@@ -16,6 +16,7 @@
 原生应用向服务端提交 Bearer 会话令牌，明确提供 Bearer 时不会回退到 Cookie 身份；401 会清理对应的本地令牌，退出登录即使网络失败也会清理本地令牌。离线退出无法立即撤销服务器端会话，重新联网前旧令牌仍可能有效。WebSocket 在发出每条事件前重新检查会话和桌内权限，空闲连接不会主动收到撤销通知。
 
 Web、iOS、Android 共用 `apps/web` 构建的页面。界面使用本地随包分发的 LXGW WenKai Screen（汉字）与 Nunito Variable（西文和数字）；WOFF2 字形按 `unicode-range` 分片按需加载，分数使用等宽数字，离线也可使用。字体许可与 webfont 版权声明位于 `apps/web/public/fonts/`。更新原生应用资源时先运行 `pnpm --filter @riichi/web build`，再运行 `pnpm --filter @riichi/web exec cap copy ios` 和 `pnpm --filter @riichi/web exec cap copy android`。
+iOS WebView 使用 `viewport-fit=cover`；原生顶部导航按 `safe-area-inset-top` 下移，状态栏区域以不透明深蓝遮住滚动内容，并在 `Info.plist` 中固定白色状态栏文字。底部玻璃导航与页面末尾按 `safe-area-inset-bottom` 留白；短页面的页脚位于首屏导航下方，滚动到末尾后可完整阅读。桌面侧栏布局不使用这些偏移。
 规则调整、结算结果选择和登录切换共用 `apps/web/src/Segmented.tsx`：组内按钮等宽、同高且不换行；字号由最长选项的字符宽度和选项数量分档（16 / 14 / 13 / 11px），窄屏无需逐按钮调整。开桌规则调整在 360px 与 390px 视口下仍可完整显示「目标点或飞人」与「每位赢家各一份」。
 
 本地牌局存于浏览器 `ichihime.localMatches.v1`；开桌规则调整直接写入该桌快照，不保存为可复用模板。损坏或未知版本会提示先备份且不会被自动覆盖（当前无旧版迁移来源）。终局会作废尚未确认的局及其立直标记；已结算的供托按终局规则处理。多标签页会刷新已保存状态，但同时写入本地存储不具事务隔离。离线模式的 Service Worker 只缓存首页离线后备页和 `/assets/` 静态资源；在线导航优先获取最新 HTML，`/api` 与 `/ws` 不进入缓存。更新旧缓存到 v3 后自动清除旧版本缓存。
