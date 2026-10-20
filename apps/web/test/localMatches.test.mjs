@@ -53,6 +53,86 @@ test('corrupt, partial and future-version records fail safely without overwritin
   assert.equal(valid.seats.length, 4);
 });
 
+test('local riichi changes consume per-seat budgets without revising or persisting rejected transitions', () => {
+  const storage = environment();
+  let match = create();
+  assert.deepEqual(match.currentHand.seats.map((seat) => seat.riichiChangeUsage),
+    Array.from({ length: 4 }, () => ({ declares: 0, cancels: 0 })));
+  const change = (seatNo) => { match = updateLocalMatch(match.id, (fresh) => markLocalRiichi(fresh, seatNo)); };
+  change(0);
+  assert.equal(match.currentHand.markRevision, 1);
+  assert.deepEqual(match.currentHand.seats[0].riichiChangeUsage, { declares: 1, cancels: 0 });
+  change(0);
+  assert.equal(match.currentHand.markRevision, 2);
+  assert.deepEqual(match.currentHand.seats[0].riichiChangeUsage, { declares: 1, cancels: 1 });
+  change(1);
+  assert.deepEqual(match.currentHand.seats[1].riichiChangeUsage, { declares: 1, cancels: 0 });
+  change(0);
+  assert.equal(match.currentHand.markRevision, 4);
+  assert.deepEqual(match.currentHand.seats[0].riichiChangeUsage, { declares: 2, cancels: 1 });
+  const beforeCancel = storage.get(LOCAL_MATCHES_STORAGE_KEY);
+  assert.throws(() => updateLocalMatch(match.id, (fresh) => markLocalRiichi(fresh, 0)), /取消次数已达上限/);
+  assert.equal(storage.get(LOCAL_MATCHES_STORAGE_KEY), beforeCancel);
+  assert.equal(getLocalMatch(match.id).currentHand.markRevision, 4);
+  const beforeDeclare = storage.get(LOCAL_MATCHES_STORAGE_KEY);
+  const mismatched = { ...match, currentHand: { ...match.currentHand,
+    seats: match.currentHand.seats.map((seat) => seat.seatNo === 0 ? { ...seat, isRiichi: false } : seat) } };
+  assert.throws(() => markLocalRiichi(mismatched, 0), /声明次数已达上限/);
+  assert.equal(mismatched.currentHand.markRevision, 4);
+  assert.deepEqual(mismatched.currentHand.seats[0].riichiChangeUsage, { declares: 2, cancels: 1 });
+  assert.equal(storage.get(LOCAL_MATCHES_STORAGE_KEY), beforeDeclare);
+  assert.deepEqual(getLocalMatch(match.id).currentHand.seats[0].riichiChangeUsage, { declares: 2, cancels: 1 });
+  const draw = { kind: 'ryuukyoku', winners: [], tenpai: [true, true, false, false] };
+  match = updateLocalMatch(match.id, (fresh) => settleLocalHand(fresh, draw));
+  assert.deepEqual(match.results[0].hand.seats[0].riichiChangeUsage, { declares: 2, cancels: 1 });
+  match = updateLocalMatch(match.id, openLocalHand);
+  assert.equal(match.currentHand.markRevision, 0);
+  assert.deepEqual(match.currentHand.seats.map((seat) => seat.riichiChangeUsage),
+    Array.from({ length: 4 }, () => ({ declares: 0, cancels: 0 })));
+  change(0);
+  assert.deepEqual(getLocalMatch(match.id).currentHand.seats[0].riichiChangeUsage, { declares: 1, cancels: 0 });
+});
+
+test('legacy local hand seats derive initial riichi usage; persisted usage must be valid', () => {
+  const storage = environment();
+  let match = create();
+  match = updateLocalMatch(match.id, (fresh) => markLocalRiichi(fresh, 0));
+  match = updateLocalMatch(match.id, (fresh) => settleLocalHand(fresh,
+    { kind: 'ryuukyoku', winners: [], tenpai: [true, false, false, false] }));
+  match = updateLocalMatch(match.id, openLocalHand);
+  match = updateLocalMatch(match.id, (fresh) => markLocalRiichi(fresh, 1));
+  const legacy = JSON.parse(storage.get(LOCAL_MATCHES_STORAGE_KEY));
+  for (const hand of [legacy.matches[0].currentHand, legacy.matches[0].results[0].hand]) {
+    for (const seat of hand.seats) delete seat.riichiChangeUsage;
+  }
+  storage.set(LOCAL_MATCHES_STORAGE_KEY, JSON.stringify(legacy));
+  let loaded = getLocalMatch(match.id);
+  assert.deepEqual(loaded.currentHand.seats[1].riichiChangeUsage, { declares: 1, cancels: 0 });
+  assert.deepEqual(loaded.currentHand.seats[2].riichiChangeUsage, { declares: 0, cancels: 0 });
+  assert.deepEqual(loaded.results[0].hand.seats[0].riichiChangeUsage, { declares: 1, cancels: 0 });
+  assert.deepEqual(loaded.results[0].hand.seats[2].riichiChangeUsage, { declares: 0, cancels: 0 });
+  loaded = updateLocalMatch(match.id, (fresh) => markLocalRiichi(fresh, 1));
+  loaded = updateLocalMatch(match.id, (fresh) => markLocalRiichi(fresh, 1));
+  assert.deepEqual(getLocalMatch(match.id).currentHand.seats[1].riichiChangeUsage, { declares: 2, cancels: 1 });
+  assert.deepEqual(getLocalMatch(match.id).results[0].hand.seats[0].riichiChangeUsage, { declares: 1, cancels: 0 });
+
+  const valid = storage.get(LOCAL_MATCHES_STORAGE_KEY);
+  for (const usage of [{ declares: 3, cancels: 1 }, { declares: 2, cancels: -1 },
+    { declares: 1.5, cancels: 0 }, { declares: 0, cancels: 0 }]) {
+    const data = JSON.parse(valid);
+    data.matches[0].currentHand.seats[1].riichiChangeUsage = usage;
+    const invalid = JSON.stringify(data);
+    storage.set(LOCAL_MATCHES_STORAGE_KEY, invalid);
+    assert.throws(() => getLocalMatch(match.id), /不完整/);
+    assert.equal(storage.get(LOCAL_MATCHES_STORAGE_KEY), invalid);
+    storage.set(LOCAL_MATCHES_STORAGE_KEY, valid);
+  }
+  const badResult = JSON.parse(valid);
+  badResult.matches[0].results[0].hand.seats[0].riichiChangeUsage = { declares: 3, cancels: 0 };
+  storage.set(LOCAL_MATCHES_STORAGE_KEY, JSON.stringify(badResult));
+  assert.throws(() => getLocalMatch(match.id), /不完整/);
+});
+
 test('riichi pool and honba carry across draw, hand open and next win; persisted seat edits use fresh records', () => {
   environment();
   let match = create();

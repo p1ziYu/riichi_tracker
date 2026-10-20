@@ -9,6 +9,39 @@ import { pool } from '../db.js';
 import { broadcastMatchEvent } from '../ws.js';
 import { prepareEngineRulesConfig } from './rulesets.js';
 
+export interface RiichiChangeUsage {
+  declares: number;
+  cancels: number;
+}
+
+// Marks events are append-only, including same-value writes by a different principal.
+// Count actual state transitions instead of events or mark revisions.
+export async function loadRiichiChangeUsage(
+  handId: string,
+  db: { query: typeof pool.query } = pool,
+): Promise<Map<number, RiichiChangeUsage>> {
+  const events = await db.query<{ seat_no: number; riichi: boolean }>(
+    `SELECT (payload->>'seatNo')::int AS seat_no, (payload->>'riichi')::boolean AS riichi
+     FROM app.match_events
+     WHERE hand_id = $1 AND type = 'marks_changed'
+     ORDER BY seq`,
+    [handId],
+  );
+  const usage = new Map<number, RiichiChangeUsage>();
+  const states = new Map<number, boolean>();
+  for (const event of events.rows) {
+    const previous = states.get(event.seat_no) ?? false;
+    if (previous !== event.riichi) {
+      const counts = usage.get(event.seat_no) ?? { declares: 0, cancels: 0 };
+      if (event.riichi) counts.declares++;
+      else counts.cancels++;
+      usage.set(event.seat_no, counts);
+      states.set(event.seat_no, event.riichi);
+    }
+  }
+  return usage;
+}
+
 export const MATCH_STATUS_BY_STATE: Record<string, string> = {
   preparing: 'preparing',
   active: 'in_progress',
@@ -663,6 +696,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         for (const mr of marksRes.rows) {
           markedSeats[mr.seat_no] = true;
         }
+        const riichiChangeUsage = await loadRiichiChangeUsage(h.id);
         currentHand = {
           id: h.id,
           handId: h.id,
@@ -680,6 +714,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
             seatNo: s.seatNo,
             points: s.points,
             isRiichi: Boolean(markedSeats[s.seatNo]),
+            riichiChangeUsage: riichiChangeUsage.get(s.seatNo) ?? { declares: 0, cancels: 0 },
           })),
         };
       }

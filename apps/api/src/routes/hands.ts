@@ -15,7 +15,7 @@ import type { PoolClient } from 'pg';
 import { requirePrincipal } from '../auth.js';
 import { pool } from '../db.js';
 import { broadcastMatchEvent } from '../ws.js';
-import { checkConfirmedParticipantWriteAccess, checkMatchAccess } from './matches.js';
+import { checkConfirmedParticipantWriteAccess, checkMatchAccess, loadRiichiChangeUsage } from './matches.js';
 import { prepareEngineRulesConfig } from './rulesets.js';
 
 class ResultValidationError extends Error {
@@ -579,6 +579,23 @@ async function finishMatchTransaction(
       return { provisionalRankings };
 }
 
+async function loadHandSeats(handId: string, matchId: string, client: PoolClient) {
+  const seats = await client.query<{ seat_no: number; marked: boolean | null }>(
+    `SELECT ms.seat_no, hrm.marked
+     FROM app.match_seats ms
+     LEFT JOIN app.hand_riichi_marks hrm ON hrm.hand_id = $1 AND hrm.seat_no = ms.seat_no
+     WHERE ms.match_id = $2
+     ORDER BY ms.seat_no`,
+    [handId, matchId],
+  );
+  const usage = await loadRiichiChangeUsage(handId, client);
+  return seats.rows.map((seat) => ({
+    seatNo: seat.seat_no,
+    isRiichi: seat.marked ?? false,
+    riichiChangeUsage: usage.get(seat.seat_no) ?? { declares: 0, cancels: 0 },
+  }));
+}
+
 export function registerHandsRoutes(app: FastifyInstance): void {
   // POST /api/matches/:id/hands {} -> { hand: { id, roundWind, roundNumber, dealerSeatNo, honba, riichiPool, markRevision, resultRevision } }
   app.post<{ Params: { id: string } }>('/api/matches/:id/hands', async (req, reply) => {
@@ -649,6 +666,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
       );
       if (openHandRes.rows[0]) {
         const h = openHandRes.rows[0];
+        const seats = await loadHandSeats(h.id, matchId, client);
         await client.query('COMMIT');
         return {
           hand: {
@@ -660,6 +678,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
             riichiPool: h.riichi_pool_before,
             markRevision: Number(h.mark_revision),
             resultRevision: Number(h.result_revision),
+            seats,
           },
         };
       }
@@ -747,6 +766,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         [matchId, handNo, roundWind, roundNumber, dealerSeatNo, honba, riichiPool],
       );
       const h = hInsert.rows[0];
+      const seats = await loadHandSeats(h.id, matchId, client);
 
       const newSeq = Number(match.version) + 1;
       const handPayload = {
@@ -785,7 +805,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
 
       broadcastMatchEvent(matchId, 'hand_started', { matchId, hand: handPayload });
 
-      return { hand: handPayload };
+      return { hand: { ...handPayload, seats } };
     } catch (err) {
       await client.query('ROLLBACK');
       throw err;
@@ -936,6 +956,17 @@ export function registerHandsRoutes(app: FastifyInstance): void {
       ) {
         await client.query('COMMIT');
         return { markRevision: Number(hand.mark_revision) };
+      }
+      if ((existingMark.rows[0]?.marked ?? false) !== riichi) {
+        const usage = await loadRiichiChangeUsage(handId, client);
+        const seatUsage = usage.get(seatNo) ?? { declares: 0, cancels: 0 };
+        if (riichi ? seatUsage.declares >= 2 : seatUsage.cancels >= 1) {
+          await client.query('ROLLBACK');
+          return reply.code(409).send({
+            error: 'riichi_change_budget_exceeded',
+            message: `Seat ${seatNo} has exhausted its riichi ${riichi ? 'declaration' : 'cancellation'} changes for this hand`,
+          });
+        }
       }
       const newSeq = Number(match.version) + 1;
       const newMarkRev = Number(hand.mark_revision) + 1;

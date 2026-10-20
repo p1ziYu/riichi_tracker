@@ -52,7 +52,10 @@ export function seedRules(seed: (typeof LOCAL_SEEDS)[number]): TableRules {
   return canonicalRules(seed.config as unknown as Record<string, unknown>);
 }
 
-export type LocalHand = Omit<HandState, 'markRevision' | 'resultRevision'> & { markRevision: number; resultRevision: number };
+export type LocalSeat = HandState['seats'][number] & { riichiChangeUsage: { declares: number; cancels: number } };
+export type LocalHand = Omit<HandState, 'seats' | 'markRevision' | 'resultRevision'> & {
+  seats: LocalSeat[]; markRevision: number; resultRevision: number;
+};
 export type LocalResult = { hand: LocalHand; input: ResultInput; output: SettlementOutput; settledAt: string };
 export interface LocalMatch {
   id: string;
@@ -89,6 +92,23 @@ const payment = (value: unknown, count: number): boolean =>
   record(value) && seatNumber(value.seatNo, count) && Number.isFinite(value.netPoints) &&
   Array.isArray(value.breakdown) && value.breakdown.every((part: unknown) =>
     record(part) && typeof part.reason === 'string' && Number.isFinite(part.amount));
+const validHandSeat = (seat: unknown, index: number): boolean =>
+  record(seat) && seat.seatNo === index && Number.isFinite(seat.points) &&
+  typeof seat.isRiichi === 'boolean' && (seat.isTenpai === null || typeof seat.isTenpai === 'boolean') &&
+  (seat.riichiChangeUsage === undefined || (record(seat.riichiChangeUsage) &&
+    typeof seat.riichiChangeUsage.declares === 'number' &&
+    Number.isInteger(seat.riichiChangeUsage.declares) && seat.riichiChangeUsage.declares >= 0 &&
+    seat.riichiChangeUsage.declares <= 2 &&
+    typeof seat.riichiChangeUsage.cancels === 'number' &&
+    Number.isInteger(seat.riichiChangeUsage.cancels) && seat.riichiChangeUsage.cancels >= 0 &&
+    seat.riichiChangeUsage.cancels <= 1 &&
+    seat.riichiChangeUsage.declares - seat.riichiChangeUsage.cancels === (seat.isRiichi ? 1 : 0)));
+const restoreHandUsage = (hand: LocalHand): LocalHand => ({
+  ...hand, seats: hand.seats.map((seat) => ({
+    ...seat, riichiChangeUsage: seat.riichiChangeUsage ??
+      { declares: seat.isRiichi ? 1 : 0, cancels: 0 },
+  })),
+});
 function validMatch(value: unknown): value is LocalMatch {
   if (!record(value) || typeof value.id !== 'string' || !value.id.startsWith('local-') ||
     typeof value.name !== 'string' || typeof value.createdAt !== 'string' || typeof value.updatedAt !== 'string' ||
@@ -106,9 +126,7 @@ function validMatch(value: unknown): value is LocalMatch {
   if (hand !== null && (!nextState(hand, count) || !record(hand) || typeof hand.handId !== 'string' ||
     !Number.isInteger(hand.markRevision) || !Number.isInteger(hand.resultRevision) ||
     !Array.isArray(hand.seats) || hand.seats.length !== count ||
-    !hand.seats.every((seat: unknown, index: number) =>
-      record(seat) && seat.seatNo === index && Number.isFinite(seat.points) &&
-      typeof seat.isRiichi === 'boolean' && (seat.isTenpai === null || typeof seat.isTenpai === 'boolean')))) return false;
+    !hand.seats.every(validHandSeat))) return false;
   if (value.nextHand !== null && !nextState(value.nextHand, count)) return false;
   if (value.status === 'active' && value.nextHand === null) return false;
   if (value.status === 'finished' && value.currentHand !== null) return false;
@@ -119,7 +137,9 @@ function validMatch(value: unknown): value is LocalMatch {
   if (value.settlementConfirmed && (!record(value.terminal) || value.terminal.isGameEnd !== true)) return false;
   return value.results.every((result: unknown) =>
     record(result) && record(result.hand) && typeof result.hand.handId === 'string' &&
-    nextState(result.hand, count) && record(result.input) && typeof result.input.kind === 'string' &&
+    nextState(result.hand, count) && Array.isArray(result.hand.seats) &&
+    result.hand.seats.length === count && result.hand.seats.every(validHandSeat) &&
+    record(result.input) && typeof result.input.kind === 'string' &&
     record(result.output) && Array.isArray(result.output.perSeat) &&
     result.output.perSeat.length === count && result.output.perSeat.every((seat: unknown) => payment(seat, count)) &&
     typeof result.settledAt === 'string');
@@ -135,7 +155,11 @@ function store(): Store {
   if (!data.matches.every(validMatch)) {
     throw new Error('本地牌局记录不完整；请先备份浏览器数据。');
   }
-  return { version: STORAGE_VERSION, matches: (data.matches as LocalMatch[]).map((match) => {
+  return { version: STORAGE_VERSION, matches: (data.matches as LocalMatch[]).map((stored) => {
+    const match = { ...stored,
+      currentHand: stored.currentHand ? restoreHandUsage(stored.currentHand) : null,
+      results: stored.results.map((result) => ({ ...result, hand: restoreHandUsage(result.hand) })),
+    };
     // Older v1 records held a lossy UI projection beside the settlement snapshot.
     // Recover its edits while retaining policies that only the snapshot knew.
     if ('ryuukyokuPoolTotal' in match.rules) {
@@ -209,7 +233,10 @@ export function openLocalHand(match: LocalMatch): LocalMatch {
   }
   const hand: LocalHand = {
     ...match.nextHand, handId: crypto.randomUUID(), markRevision: 0, resultRevision: 0,
-    seats: match.seats.map(({ seatNo }) => ({ seatNo, points: match.points[seatNo], isRiichi: false, isTenpai: null })),
+    seats: match.seats.map(({ seatNo }) => ({
+      seatNo, points: match.points[seatNo], isRiichi: false, isTenpai: null,
+      riichiChangeUsage: { declares: 0, cancels: 0 },
+    })),
   };
   return { ...match, currentHand: hand };
 }
@@ -218,8 +245,14 @@ export function markLocalRiichi(match: LocalMatch, seatNo: number): LocalMatch {
   if (match.status !== 'active' || !hand) throw new Error('没有进行中的局');
   const seat = hand.seats.find((entry) => entry.seatNo === seatNo);
   if (!seat || (!seat.isRiichi && seat.points < 1000 && match.rulesSnapshot.config.allowLowPointRiichi !== true)) throw new Error('点数不足或座位不存在');
+  const usage = seat.riichiChangeUsage ?? { declares: seat.isRiichi ? 1 : 0, cancels: 0 };
+  if (seat.isRiichi ? usage.cancels >= 1 : usage.declares >= 2) {
+    throw new Error(seat.isRiichi ? '该座位立直取消次数已达上限（最多 1 次）' : '该座位立直声明次数已达上限（最多 2 次）');
+  }
   return { ...match, currentHand: { ...hand, markRevision: hand.markRevision + 1,
-    seats: hand.seats.map((entry) => entry.seatNo === seatNo ? { ...entry, isRiichi: !entry.isRiichi } : entry) } };
+    seats: hand.seats.map((entry) => entry.seatNo === seatNo ? { ...entry, isRiichi: !entry.isRiichi,
+      riichiChangeUsage: { declares: usage.declares + (seat.isRiichi ? 0 : 1),
+        cancels: usage.cancels + (seat.isRiichi ? 1 : 0) } } : entry) } };
 }
 export function previewLocalHand(match: LocalMatch, input: ResultInput): SettlementOutput {
   if (!match.currentHand || match.status !== 'active') throw new Error('没有进行中的局');

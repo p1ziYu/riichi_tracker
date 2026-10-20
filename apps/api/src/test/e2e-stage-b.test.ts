@@ -1236,6 +1236,139 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     // Guests are bound to one match; use reusable account principals for both reference fixtures.
     const referenceThird = await registerEmailAccount(`reference3_${runId}@example.com`, '参考西家');
     const referenceFourth = await registerEmailAccount(`reference4_${runId}@example.com`, '参考北家');
+
+    // Isolated match keeps existing lifecycle event assertions unchanged.
+    const budgetMatchId = await startReadyMatch(house4p!.versionId,
+      [acct1, acct2, referenceThird, referenceFourth]);
+    type BudgetSeat = { seatNo: number; isRiichi: boolean;
+      riichiChangeUsage: { declares: number; cancels: number } };
+    type BudgetHand = { id: string; markRevision: number; seats: BudgetSeat[] };
+    const budgetOpen = await requestJson<{ hand: BudgetHand }>(
+      `/api/matches/${budgetMatchId}/hands`, { method: 'POST', cookie: acct1.cookie, body: {} },
+    );
+    checkEq(budgetOpen.status, 200, 'Budget fixture opens its first hand');
+    const budgetHandId = budgetOpen.data.hand.id;
+    checkEq(budgetOpen.data.hand.seats.map((s) => s.riichiChangeUsage),
+      Array.from({ length: 4 }, () => ({ declares: 0, cancels: 0 })),
+      'New hand returns zero usage for every seat');
+    const budgetPath = `/api/matches/${budgetMatchId}/hands/${budgetHandId}/marks`;
+    const changeBudgetMark = (seatNo: number, riichi: boolean, cookie = acct1.cookie) =>
+      requestJson<{ markRevision: number; error?: string; message?: string }>(budgetPath, {
+        method: 'POST', cookie, body: { seatNo, riichi },
+      });
+    const firstDeclare = await changeBudgetMark(0, true);
+    checkEq(firstDeclare.status, 200, 'First declaration succeeds');
+    const sameValueOtherPrincipal = await changeBudgetMark(0, true, acct2.cookie);
+    checkEq(sameValueOtherPrincipal.status, 200, 'Same-value write by another principal remains allowed');
+    checkEq(sameValueOtherPrincipal.data.markRevision, 2,
+      'Same-value write retains existing mark revision behavior');
+    const firstCancel = await changeBudgetMark(0, false);
+    checkEq(firstCancel.status, 200, 'First cancellation succeeds');
+    const secondDeclare = await changeBudgetMark(0, true);
+    checkEq(secondDeclare.status, 200, 'Second declaration succeeds');
+    const beforeBudgetDenial = await requestJson<{
+      match: { version: number }; currentHand: BudgetHand;
+    }>(`/api/matches/${budgetMatchId}`, { cookie: acct1.cookie });
+    checkEq(beforeBudgetDenial.data.currentHand.seats[0].riichiChangeUsage,
+      { declares: 2, cancels: 1 }, 'Event history counts transitions, not same-value events');
+    const secondCancel = await changeBudgetMark(0, false);
+    checkEq([secondCancel.status, secondCancel.data.error],
+      [409, 'riichi_change_budget_exceeded'], 'Second cancellation exceeds the budget');
+    check(typeof secondCancel.data.message === 'string', 'Budget denial includes a message');
+    const afterBudgetDenial = await requestJson<typeof beforeBudgetDenial.data>(
+      `/api/matches/${budgetMatchId}`, { cookie: acct1.cookie },
+    );
+    checkEq(afterBudgetDenial.data.match.version, beforeBudgetDenial.data.match.version,
+      'Rejected cancellation leaves match version unchanged');
+    checkEq(afterBudgetDenial.data.currentHand, beforeBudgetDenial.data.currentHand,
+      'Rejected cancellation leaves marks, usage and hand revisions unchanged');
+    const repeatedDeclaration = await changeBudgetMark(0, true);
+    checkEq(repeatedDeclaration.status, 200, 'Same-value declaration at budget is idempotent');
+    const concurrentOtherSeat = await Promise.all([
+      changeBudgetMark(1, true), changeBudgetMark(1, true, acct2.cookie),
+    ]);
+    checkEq(concurrentOtherSeat.map((response) => response.status), [200, 200],
+      'Concurrent same-state declarations on another seat succeed');
+    const budgetAgain = await requestJson<{ hand: BudgetHand }>(
+      `/api/matches/${budgetMatchId}/hands`, { method: 'POST', cookie: acct1.cookie, body: {} },
+    );
+    checkEq(budgetAgain.data.hand.seats.map((s) => s.riichiChangeUsage),
+      [{ declares: 2, cancels: 1 }, { declares: 1, cancels: 0 },
+        { declares: 0, cancels: 0 }, { declares: 0, cancels: 0 }],
+      'Already-open hand returns independent usage for every seat');
+
+    // A historical hand with a second cancellation predating this limit is the only
+    // reachable state from which a third declaration can be attempted.
+    const legacy = await pool.connect();
+    try {
+      await legacy.query('BEGIN');
+      const legacyVersion = await legacy.query<{ version: string }>(
+        `SELECT version FROM app.matches WHERE id = $1 FOR UPDATE`, [budgetMatchId],
+      );
+      const legacyEvent = await legacy.query<{ id: string }>(
+        `INSERT INTO app.match_events
+           (match_id, seq, hand_id, actor_principal_id, client_event_id, request_hash, type, payload)
+         VALUES ($1, $2, $3, $4, $5, $6, 'marks_changed', $7::jsonb)
+         RETURNING id`,
+        [budgetMatchId, Number(legacyVersion.rows[0].version) + 1,
+          budgetHandId, acct1.principalId, randomUUID(),
+          createHash('sha256').update(randomUUID()).digest('hex'),
+          JSON.stringify({ handId: budgetHandId, seatNo: 0, riichi: false,
+            markRevision: budgetAgain.data.hand.markRevision + 1 })],
+      );
+      await legacy.query(
+        `UPDATE app.hand_riichi_marks
+         SET marked = false, seat_revision = seat_revision + 1, updated_by = $1, last_event_id = $2
+         WHERE hand_id = $3 AND seat_no = 0`,
+        [acct1.principalId, legacyEvent.rows[0].id, budgetHandId],
+      );
+      await legacy.query(`UPDATE app.hands SET mark_revision = mark_revision + 1 WHERE id = $1`, [budgetHandId]);
+      await legacy.query(`UPDATE app.matches SET version = version + 1 WHERE id = $1`, [budgetMatchId]);
+      await legacy.query('COMMIT');
+    } catch (err) {
+      await legacy.query('ROLLBACK');
+      throw err;
+    } finally {
+      legacy.release();
+    }
+    const beforeThirdDeclare = await requestJson<typeof beforeBudgetDenial.data>(
+      `/api/matches/${budgetMatchId}`, { cookie: acct1.cookie },
+    );
+    checkEq(beforeThirdDeclare.data.currentHand.seats[0].riichiChangeUsage,
+      { declares: 2, cancels: 2 }, 'Legacy cancellation is counted from append-only history');
+    const thirdDeclare = await changeBudgetMark(0, true);
+    checkEq([thirdDeclare.status, thirdDeclare.data.error],
+      [409, 'riichi_change_budget_exceeded'], 'Third declaration exceeds the budget');
+    const afterThirdDeclare = await requestJson<typeof beforeBudgetDenial.data>(
+      `/api/matches/${budgetMatchId}`, { cookie: acct1.cookie },
+    );
+    checkEq(afterThirdDeclare.data, beforeThirdDeclare.data,
+      'Rejected declaration leaves match version, marks, usage and hand revisions unchanged');
+    const settledBudget = await requestJson(`/api/matches/${budgetMatchId}/hands/${budgetHandId}/results`, {
+      method: 'POST', cookie: acct1.cookie,
+      body: { resultInput: { kind: 'ryuukyoku', tenpai: [false, true, false, false] },
+        confirmedMarkRevision: beforeThirdDeclare.data.currentHand.markRevision },
+    });
+    checkEq(settledBudget.status, 200, 'Budget fixture settles first hand');
+    const nextBudget = await requestJson<{ hand: BudgetHand }>(
+      `/api/matches/${budgetMatchId}/hands`, { method: 'POST', cookie: acct1.cookie, body: {} },
+    );
+    checkEq(nextBudget.status, 200, 'Budget fixture opens next hand');
+    checkEq(nextBudget.data.hand.seats.map((s) => s.riichiChangeUsage),
+      Array.from({ length: 4 }, () => ({ declares: 0, cancels: 0 })),
+      'Next hand resets all seat transition budgets');
+    const nextBudgetGet = await requestJson<{ currentHand: BudgetHand }>(
+      `/api/matches/${budgetMatchId}`, { cookie: acct1.cookie },
+    );
+    checkEq(nextBudgetGet.data.currentHand.seats.map((s) => s.riichiChangeUsage),
+      Array.from({ length: 4 }, () => ({ declares: 0, cancels: 0 })),
+      'GET currentHand resets all seats on the next hand');
+    const nextDeclare = await requestJson<{ markRevision: number }>(
+      `/api/matches/${budgetMatchId}/hands/${nextBudget.data.hand.id}/marks`, {
+        method: 'POST', cookie: acct1.cookie, body: { seatNo: 0, riichi: true },
+      });
+    checkEq(nextDeclare.status, 200, 'Seat can declare anew in the next hand');
+
     const customId = await startReadyMatch(overridden.ruleset_version_id,
       [acct1, acct2, referenceThird, referenceFourth]);
     const customMine = await requestJson<{ id: string; rulesSnapshot: Record<string, unknown> }[]>(

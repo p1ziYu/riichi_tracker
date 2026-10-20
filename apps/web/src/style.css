@@ -168,10 +168,20 @@ h1,h2{letter-spacing:.015em}
 .rules-adjustment summary strong{margin-left:12px;color:#e4d3a9;font-size:13px}
 .rules-adjustment h3{margin:24px 0 12px}
 .rules-adjustment .rule-choice{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:14px 0;flex-wrap:wrap}
-.rules-adjustment .rule-choice>.segmented{display:flex;flex-wrap:wrap;max-width:100%}
-.rules-adjustment .rule-choice button{white-space:normal}
+.rules-adjustment .rule-choice>.segmented{width:min(100%,310px);max-width:100%}
 .rules-adjustment .rule-number{min-width:0}
 .rules-adjustment .rule-number label{display:block}
 .rules-adjustment .rule-presets{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 16px}
+/* Every option shares the same box; label-length classes reduce the group's font together. */
+.segmented{flex-wrap:nowrap;min-width:0}
+.segmented button:not(.text-button):not(.quiet):not(.close){
+  flex:1 1 0;min-width:0;min-height:48px;padding:8px;
+  white-space:nowrap;text-align:center;
+}
+.segmented--large{font-size:14px}
+.segmented--medium{font-size:13px}
+.segmented--small{font-size:11px}
 .rules-adjustment .rule-presets button{padding:7px 10px;font-size:12px;min-height:36px}
 .rules-adjustment .rule-number small{display:block}
+.riichi-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px}
+.seat .riichi-actions .riichi{min-width:0;padding:6px!important}
