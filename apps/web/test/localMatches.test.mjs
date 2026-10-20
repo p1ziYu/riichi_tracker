@@ -32,6 +32,23 @@ afterEach(() => {
   globalThis.localStorage = originalStorage;
   globalThis.window = originalWindow;
 });
+test('local setup persists player names and chosen East seat in the first hand and terminal tie order', () => {
+  environment();
+  const rules = seedRules(LOCAL_SEEDS[3]);
+  const match = createLocalMatch(rules, '自选起家', LOCAL_SEEDS[3].key,
+    { playerNames: ['阿一', '阿二', '阿三'], dealerSeatNo: 1 });
+  assert.deepEqual(match.seats.map((seat) => seat.displayName), ['阿一', '阿二', '阿三']);
+  assert.equal(match.currentHand.dealerSeatNo, 1);
+  assert.equal(match.nextHand.dealerSeatNo, 1);
+  assert.equal(getLocalMatch(match.id).currentHand.dealerSeatNo, 1);
+  const tied = updateLocalMatch(match.id, (fresh) => finishLocalMatch({ ...fresh, points: [40000, 40000, 25000] }));
+  const standings = previewLocalTerminal(tied).perSeat;
+  assert.equal(standings.find((seat) => seat.seatNo === 1).rank, 1);
+  assert.equal(standings.find((seat) => seat.seatNo === 0).rank, 2);
+  assert.equal(createLocalMatch(rules, '默认起家').currentHand.dealerSeatNo, 0);
+  assert.throws(() => createLocalMatch(rules, '错误起家', null, { dealerSeatNo: 3 }), /起家座位无效/);
+});
+
 
 test('corrupt, partial and future-version records fail safely without overwriting stored data', () => {
   const values = environment();

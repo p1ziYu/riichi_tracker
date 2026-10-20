@@ -86,6 +86,18 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     });
     checkEq(inheritedAuthOrigin.status, 403, 'Prototype property names never pass the auth origin allowlist');
     checkEq(inheritedAuthOrigin.data.error, 'invalid_origin', 'Auth origin denial uses the trusted-origin error');
+    const blockedPreflight = await fetch(`${baseUrl}/api/me`, {
+      method: 'OPTIONS',
+      headers: { origin: 'https://attacker.example', 'access-control-request-method': 'POST' },
+    });
+    checkEq(blockedPreflight.headers.get('access-control-allow-origin'), null,
+      'Untrusted web origin does not receive a credentialed CORS grant');
+    const processHealth = await requestJson<{ ok: boolean; service: string }>('/health');
+    checkEq(processHealth.status, 200, 'Process health endpoint responds without credentials');
+    checkEq(processHealth.data.ok, true, 'Process health reports ready');
+    const dbHealth = await requestJson<{ ok: boolean; db: boolean }>('/api/health');
+    checkEq(dbHealth.status, 200, 'Database health endpoint responds without credentials');
+    checkEq(dbHealth.data.db, true, 'Database health SELECT confirms connectivity');
     const oversizedBody = await fetch(`${baseUrl}/api/auth/sign-in/anonymous`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin: 'http://127.0.0.1:5173' },
@@ -102,6 +114,14 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     checkEq(unsupportedBody.status, 415, 'Unsupported content type receives HTTP 415');
     checkEq((await unsupportedBody.json() as { error: string }).error, 'unsupported_media_type',
       'Unsupported content type receives a stable error without parser details');
+    const malformedBody = await fetch(`${baseUrl}/api/auth/sign-in/anonymous`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'http://127.0.0.1:5173' },
+      body: '{"unterminated":',
+    });
+    checkEq(malformedBody.status, 400, 'Malformed JSON is rejected before auth handler');
+    checkEq(await malformedBody.json(), { error: 'invalid_json', message: 'Malformed JSON request body' },
+      'Malformed JSON response does not include parser details');
 
     // 0. Unauthenticated /api/me must return 401
     const unauthMe = await requestJson('/api/me');
@@ -196,6 +216,9 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     checkEq(verRes.status, 200, 'GET /api/rulesets/versions/:versionId returns 200');
     checkEq(verRes.data.versionId, house4p!.versionId, 'Version ID matches house_4p versionId');
     check(verRes.data.configHash.length === 64, 'configHash is 64-char sha256 hex');
+    const malformedVersion = await requestJson<{ error: string }>('/api/rulesets/versions/not-a-uuid');
+    checkEq(malformedVersion.status, 400, 'Malformed version UUID returns 400 instead of a database error');
+    checkEq(malformedVersion.data.error, 'invalid_ruleset_version_id', 'Malformed version has stable error code');
     const privateTemplate = await pool.query<{ id: string }>(
       `INSERT INTO app.ruleset_templates (owner_principal_id, scope, name, player_count, review_status)
        VALUES ($1, 'private', 'Private authorization probe', 4, 'not_applicable')
@@ -229,6 +252,11 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       method: 'POST', cookie: acct2.cookie, body: { rulesetVersionId: privateVersionId },
     });
     checkEq(outsiderUse.status, 403, 'Other accounts cannot create a match from private ruleset UUID');
+    const malformedCreateVersion = await requestJson<{ error: string }>('/api/matches', {
+      method: 'POST', cookie: acct1.cookie, body: { rulesetVersionId: 'not-a-uuid' },
+    });
+    checkEq(malformedCreateVersion.status, 400, 'Malformed creation version UUID returns 400');
+    checkEq(malformedCreateVersion.data.error, 'invalid_ruleset_version_id', 'Malformed creation has stable error code');
     const rulesOverride = {
       honbaPerPayer: 200,
       notenPenaltyTotal: 2400,
@@ -243,6 +271,12 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       { rulesOverride: { honbaRon: 350 } },
       { rulesOverride: { uma: [20, 10, -10, -10] } },
       { rulesOverride: { doubleYakuman: true, playerCount: 3 } },
+      { rulesOverride: JSON.parse('{"__proto__":{"polluted":true}}') },
+      { rulesOverride: JSON.parse('{"constructor":{"prototype":{"polluted":true}}}') },
+      { rulesOverride: { honbaPerPayer: -100 } },
+      { rulesOverride: { uma: [15, 5, -20] } },
+      { rulesOverride: { startingPoints: 1e15 } },
+      { rulesOverride: { uma: [1e15, -1e15, 0, 0] } },
     ]) {
       const rejected = await requestJson<{ error: string; message: string }>('/api/matches', {
         method: 'POST', cookie: acct1.cookie,
@@ -294,6 +328,13 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     const hiddenCustom = await requestJson<typeof tplRes.data>('/api/rulesets/templates', { cookie: acct1.cookie });
     check(!hiddenCustom.data.some((template) => template.versionId === overridden.ruleset_version_id),
       'Match-only version does not appear in ruleset template listing');
+    const outsiderCustomTemplates = await requestJson<typeof tplRes.data>('/api/rulesets/templates',
+      { cookie: acct2.cookie });
+    check(!outsiderCustomTemplates.data.some((template) => template.versionId === overridden.ruleset_version_id),
+      'Outsider template listing cannot enumerate match-only version');
+    const anonymousCustomTemplates = await requestJson<typeof tplRes.data>('/api/rulesets/templates');
+    check(!anonymousCustomTemplates.data.some((template) => template.versionId === overridden.ruleset_version_id),
+      'Anonymous template listing cannot enumerate match-only version');
     const outsiderCustomVersion = await requestJson(`/api/rulesets/versions/${overridden.ruleset_version_id}`,
       { cookie: acct2.cookie });
     checkEq(outsiderCustomVersion.status, 403, 'Cross-owner access to custom version is forbidden');
@@ -302,6 +343,17 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       body: { rulesetVersionId: overridden.ruleset_version_id },
     });
     checkEq(outsiderCustomUse.status, 403, 'Cross-owner creation from custom version is forbidden');
+    const ownerCustomVersion = await requestJson(`/api/rulesets/versions/${overridden.ruleset_version_id}`,
+      { cookie: acct1.cookie });
+    checkEq(ownerCustomVersion.status, 200, 'Custom version remains readable by its owner');
+    const anonymousCustomVersion = await requestJson(`/api/rulesets/versions/${overridden.ruleset_version_id}`);
+    checkEq(anonymousCustomVersion.status, 403, 'Anonymous caller cannot fetch custom version');
+    const outsiderCustomMatch = await requestJson(`/api/matches/${overrideCreate.data.match.id}`,
+      { cookie: acct2.cookie });
+    checkEq(outsiderCustomMatch.status, 403, 'Outsider cannot read custom rules through match detail');
+    const outsiderMatches = await requestJson<{ id: string }[]>('/api/matches?mine=1', { cookie: acct2.cookie });
+    check(!outsiderMatches.data.some((match) => match.id === overrideCreate.data.match.id),
+      'Outsider cannot enumerate custom rules through match list');
 
 
     // 3. Create match (4p house template) as acct1 (owner)
@@ -316,6 +368,56 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     const matchId = createRes.data.match.id;
     check(Boolean(matchId), 'Match ID returned');
     checkEq(createRes.data.match.status, 'preparing', 'Initial match status is preparing');
+    const ownerBeforeClaim = await requestJson<{
+      match: { rulesHash: string }; seats: { principalId: string | null; status: string }[]; checkedIn: number;
+    }>(`/api/matches/${matchId}`, { cookie: acct1.cookie });
+    check(ownerBeforeClaim.data.seats.every((seat) => seat.principalId === null),
+      'Owner is an active member but has no assigned seat after creation');
+    checkEq(ownerBeforeClaim.data.checkedIn, 0, 'Creation does not auto-check-in a seatless owner');
+    const ownerMembership = await pool.query<{ role: string; status: string }>(
+      'SELECT role, status FROM app.match_members WHERE match_id = $1 AND principal_id = $2',
+      [matchId, acct1.principalId],
+    );
+    checkEq(ownerMembership.rows[0], { role: 'participant', status: 'active' },
+      'Unseated owner remains an active participant');
+    const ownerClaim = await requestJson<{ seatNo: number; status: string }>(
+      `/api/matches/${matchId}/seats/claim`,
+      { method: 'POST', cookie: acct1.cookie, body: { seatNo: 0 } },
+    );
+    checkEq(ownerClaim.status, 200, 'Owner claims a seat without a join request');
+    checkEq(ownerClaim.data.status, 'checked_in', 'Owner claim is confirmed and checked in');
+    const ownerCheckIn = await pool.query<{ method: string; rules_hash: string; confirmed_by: string }>(
+      `SELECT ci.method, ci.rules_hash, sa.confirmed_by FROM app.check_ins ci
+       JOIN app.seat_assignments sa ON sa.id = ci.seat_assignment_id
+       WHERE ci.match_id = $1 AND sa.seat_no = 0 AND ci.invalidated_at IS NULL`,
+      [matchId],
+    );
+    checkEq(ownerCheckIn.rows[0],
+      { method: 'host_confirm', rules_hash: ownerBeforeClaim.data.match.rulesHash,
+        confirmed_by: acct1.principalId },
+      'Owner assignment is auto-confirmed with a current-rules check-in row');
+    const crossOriginTicket = await requestJson<{ error: string }>(`/api/matches/${matchId}/ws-tickets`, {
+      method: 'POST', cookie: acct1.cookie, origin: 'https://evil.p1ziyu.com',
+    });
+    checkEq(crossOriginTicket.status, 403, 'Cross-origin cookie POST cannot mint a WebSocket ticket');
+    checkEq(crossOriginTicket.data.error, 'invalid_origin', 'Cross-origin API write uses a stable origin error');
+    const crossOriginCreate = await requestJson<{ error: string }>('/api/matches', {
+      method: 'POST', cookie: acct1.cookie, origin: 'https://evil.p1ziyu.com',
+      body: { rulesetVersionId: house4p!.versionId },
+    });
+    checkEq(crossOriginCreate.status, 403, 'Cross-origin cookie POST cannot mutate match state');
+    const noOriginBearerTicket = await fetch(`${baseUrl}/api/matches/${matchId}/ws-tickets`, {
+      method: 'POST', headers: { authorization: `Bearer ${acct1.token}` },
+    });
+    checkEq(noOriginBearerTicket.status, 200, 'Native bearer POST without Origin remains supported');
+    const oversizedTicketBody = await fetch(`${baseUrl}/api/matches/${matchId}/ws-tickets`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: acct1.cookie },
+      body: JSON.stringify({ excess: 'x'.repeat(1024 * 1024) }),
+    });
+    checkEq(oversizedTicketBody.status, 413, 'Authenticated ticket POST enforces request body size');
+    checkEq((await oversizedTicketBody.json() as { error: string }).error, 'payload_too_large',
+      'Ticket POST size denial does not leak parser details');
     const anonymousHead = await fetch(`${baseUrl}/api/matches/${matchId}`, { method: 'HEAD' });
     checkEq(anonymousHead.status, 401, 'Implicit HEAD route preserves GET match authentication');
     const unsupportedDelete = await fetch(`${baseUrl}/api/matches/${matchId}`, {
@@ -395,6 +497,23 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     // Non-member cannot read GET /api/matches/:id before joining (403)
     const forbiddenView = await requestJson(`/api/matches/${matchId}`, { cookie: acct2.cookie });
     checkEq(forbiddenView.status, 403, 'Non-member GET /api/matches/:id returns 403');
+    const outsiderTicket = await requestJson<{ error: string }>(`/api/matches/${matchId}/ws-tickets`, {
+      method: 'POST', cookie: acct2.cookie,
+    });
+    checkEq(outsiderTicket.status, 403, 'Non-member cannot mint a match WebSocket ticket');
+    checkEq(outsiderTicket.data.error, 'forbidden', 'Non-member ticket denial does not expose ticket material');
+    const unboundGuestTicket = await requestJson<{ error: string }>(`/api/matches/${matchId}/ws-tickets`, {
+      method: 'POST', cookie: guest1.cookie,
+    });
+    checkEq(unboundGuestTicket.status, 403, 'Unbound guest cannot subscribe before owner approval');
+    checkEq(unboundGuestTicket.data.error, 'forbidden', 'Guest binding denial uses a stable error');
+    const injectedTicket = await requestJson<{ error: string; message: string }>(
+      `/api/matches/${encodeURIComponent(`${matchId}' OR true --`)}/ws-tickets`,
+      { method: 'POST', cookie: acct1.cookie },
+    );
+    checkEq(injectedTicket.status, 400, 'Invalid SQL-like match id is rejected before querying ticket access');
+    checkEq(injectedTicket.data, { error: 'invalid_match_id', message: 'matchId must be a UUID' },
+      'Invalid match id response does not expose SQL text or stack');
 
     const unticketedWs = new WebSocket(`${wsBaseUrl}/ws/matches/${matchId}`);
     const unticketedClose = await new Promise<number>((resolve) => {
@@ -410,6 +529,14 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     );
     checkEq(wsTicketRes.status, 200, 'POST /api/matches/:id/ws-tickets returns 200');
     check(Boolean(wsTicketRes.data.ticket), 'WS ticket returned');
+    const wrongMatchWs = new WebSocket(
+      `${wsBaseUrl}/ws/matches/${aliasCreate.data.match.id}?ticket=${encodeURIComponent(wsTicketRes.data.ticket)}`,
+    );
+    const wrongMatchClose = await new Promise<number>((resolve) => {
+      wrongMatchWs.addEventListener('error', () => {});
+      wrongMatchWs.addEventListener('close', (event) => resolve(event.code));
+    });
+    checkEq(wrongMatchClose, 1008, 'Ticket issued to another match cannot subscribe or consume the correct ticket');
 
     const wsTypes: Record<string, true> = {};
     const wsOpen = Promise.withResolvers<void>();
@@ -438,6 +565,12 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       { method: 'POST', cookie: acct1.cookie, body: {} },
     );
     checkEq(unapprovedTokRes.status, 200, 'POST check-in-tokens for unapproved probe returns 200');
+    const ownerTokenAttempt = await requestJson<{ error: string }>(
+      `/api/matches/${matchId}/check-ins`,
+      { method: 'POST', cookie: acct1.cookie, body: { token: unapprovedTokRes.data.token } },
+    );
+    checkEq([ownerTokenAttempt.status, ownerTokenAttempt.data.error], [403, 'owner_auto_check_in'],
+      'Owner cannot use the guest token check-in endpoint');
     const unapprovedCiRes = await requestJson<{ error: string }>(
       `/api/matches/${matchId}/check-ins`,
       {
@@ -470,9 +603,8 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       checkEq(approve.status, 200, `POST approve join-request for seat ${seatNo} returns 200`);
     }
 
-    // 5. Check-in tokens & 4 check-ins (seats 0, 1, 2, 3)
+    // Guests still require single-use tokens; the owner never consumes one.
     const playersForCheckIn: { session: ClientSession; expectedSeatNo: number; alias?: string }[] = [
-      { session: acct1, expectedSeatNo: 0 },
       { session: acct2, expectedSeatNo: 1 },
       { session: guest1, expectedSeatNo: 2, alias: '西家访客' },
       { session: guest2, expectedSeatNo: 3, alias: '北家访客' },
@@ -496,17 +628,17 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
           },
         },
       );
-      const attempts = p.expectedSeatNo === 0
+      const attempts = p.expectedSeatNo === 1
         ? await Promise.all([checkIn(), checkIn()])
         : [await checkIn()];
       const ciRes = attempts.find((attempt) => attempt.status === 200)!;
-      if (p.expectedSeatNo === 0) {
+      if (p.expectedSeatNo === 1) {
         checkEq(attempts.map((attempt) => attempt.status).sort(), [200, 400],
           'Concurrent use of the same check-in token admits exactly one request');
         const activeCheckIns = await pool.query<{ count: number }>(
           `SELECT COUNT(*)::int AS count FROM app.check_ins
            WHERE match_id = $1 AND seat_assignment_id IN (
-             SELECT id FROM app.seat_assignments WHERE match_id = $1 AND seat_no = 0
+             SELECT id FROM app.seat_assignments WHERE match_id = $1 AND seat_no = 1
            ) AND invalidated_at IS NULL`,
           [matchId],
         );
@@ -541,7 +673,7 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     }>(`/api/matches/${matchId}/seats/finalize`, {
       method: 'POST',
       cookie: acct1.cookie,
-      body: {},
+      body: { dealerSeatNo: 0 },
     });
     checkEq(finSeats.status, 200, 'POST /api/matches/:id/seats/finalize returns 200');
     checkEq(finSeats.data.seats.length, 4, '4 seats finalized');
@@ -1058,7 +1190,7 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     check(batchesRes.rows[0].entry_count >= 6, 'Hand 1 score_entries batch has riichi + tsumo + pool entries');
     check(batchesRes.rows[1].entry_count >= 6, 'Hand 2 score_entries batch follows §6.3 6-entry ledger pattern');
 
-    // (c) Principals linked (accounts linked to auth_user_id; guests linked to guest_sessions; all 4 in match_members, seat_assignments, member_access_grants, settlement_players)
+    // (c) Principals linked to account/guest identities and seated settlement participants.
     const principalIds = [acct1.principalId, acct2.principalId, guest1.principalId, guest2.principalId];
     const pRows = await pool.query<{
       id: string;
@@ -1083,15 +1215,6 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       [[guest1.principalId, guest2.principalId]],
     );
     checkEq(gsRes.rows[0].cnt, 2, 'Both guest principals linked in app.guest_sessions');
-
-    const magRes = await pool.query<{ cnt: number }>(
-      `SELECT COUNT(DISTINCT mag.principal_id)::int AS cnt
-       FROM app.member_access_grants mag
-       JOIN app.match_members mm ON mm.id = mag.member_id
-       WHERE mm.match_id = $1 AND mag.revoked_at IS NULL`,
-      [matchId],
-    );
-    checkEq(magRes.rows[0].cnt, 4, 'All 4 principals have active member_access_grants');
 
     const spRes = await pool.query<{ cnt: number; total_tenths_sum: number }>(
       `SELECT COUNT(*)::int AS cnt, SUM(total_tenths)::int AS total_tenths_sum
@@ -1120,6 +1243,101 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     ws.close();
     // A configured special double reaches the engine and survives result persistence.
     const doublePlayer = await registerEmailAccount(`double_${runId}@example.com`, '特殊役满');
+    const dealerGuest = await signInAnonymousGuest('dealer-guest');
+    const dealerMatch = await requestJson<{ match: { id: string } }>('/api/matches', {
+      method: 'POST', cookie: acct1.cookie, body: { config: { playerCount: 3 } },
+    });
+    checkEq(dealerMatch.status, 200, 'Dealer-selection fixture creates');
+    const dealerId = dealerMatch.data.match.id;
+    const claimDealer = (seatNo: number) => requestJson<{ seatNo: number; status: string }>(
+      `/api/matches/${dealerId}/seats/claim`,
+      { method: 'POST', cookie: acct1.cookie, body: { seatNo } },
+    );
+    const seatTwoClaim = await claimDealer(2);
+    checkEq([seatTwoClaim.status, seatTwoClaim.data.seatNo, seatTwoClaim.data.status], [200, 2, 'checked_in'],
+      'Owner can claim seat 2 and is immediately confirmed and checked in');
+    const firstClaim = await pool.query<{ id: string; rules_hash: string }>(
+      `SELECT ci.id, ci.rules_hash FROM app.check_ins ci
+       JOIN app.seat_assignments sa ON sa.id = ci.seat_assignment_id
+       WHERE ci.match_id = $1 AND sa.seat_no = 2 AND ci.invalidated_at IS NULL`,
+      [dealerId],
+    );
+    checkEq(firstClaim.rows.length, 1, 'Owner seat 2 has an active check-in row without a token');
+    checkEq((await claimDealer(0)).status, 200, 'Owner can switch to seat 0 before start');
+    const switched = await pool.query<{ id: string; seat_no: number; invalidated: boolean }>(
+      `SELECT ci.id, sa.seat_no, ci.invalidated_at IS NOT NULL AS invalidated
+       FROM app.check_ins ci JOIN app.seat_assignments sa ON sa.id = ci.seat_assignment_id
+       WHERE ci.match_id = $1 ORDER BY ci.confirmed_at, ci.id`,
+      [dealerId],
+    );
+    checkEq(switched.rows.length, 2, 'Seat switch reissues owner check-in rather than retaining the old row');
+    checkEq(switched.rows.find((row) => row.id === firstClaim.rows[0].id)?.invalidated, true,
+      'Previous owner check-in is invalidated on a seat change');
+    checkEq((await claimDealer(2)).status, 200, 'Owner reclaims seat 2 before start');
+    const switchedBack = await requestJson<{ seats: { seatNo: number; status: string; principalId: string | null }[]; checkedIn: number }>(
+      `/api/matches/${dealerId}`, { cookie: acct1.cookie },
+    );
+    checkEq(switchedBack.data.seats.map((seat) => seat.status), ['empty', 'empty', 'checked_in'],
+      'Owner status and active check-in follow the new seat');
+    checkEq(switchedBack.data.checkedIn, 1, 'Only the current owner check-in counts');
+    const invalidEmpty = await requestJson<{ error: string }>(`/api/matches/${dealerId}/seats/finalize`, {
+      method: 'POST', cookie: acct1.cookie, body: { dealerSeatNo: 0 },
+    });
+    checkEq([invalidEmpty.status, invalidEmpty.data.error], [400, 'invalid_dealer_seat'],
+      'Explicit dealer at an empty seat is rejected with a structured 400');
+    for (const [participant, seatNo] of [[acct2, 0], [dealerGuest, 1]] as const) {
+      const jr = await requestJson<{ joinRequestId: string }>(`/api/matches/${dealerId}/join-requests`, {
+        method: 'POST', cookie: participant.cookie, body: {},
+      });
+      const approved = await requestJson(`/api/matches/${dealerId}/join-requests/${jr.data.joinRequestId}/approve`, {
+        method: 'POST', cookie: acct1.cookie, body: { seatNo },
+      });
+      checkEq(approved.status, 200, 'Guest seat requires owner approval');
+    }
+    const invalidUnchecked = await requestJson<{ error: string }>(`/api/matches/${dealerId}/seats/finalize`, {
+      method: 'POST', cookie: acct1.cookie, body: { dealerSeatNo: 1 },
+    });
+    checkEq([invalidUnchecked.status, invalidUnchecked.data.error], [400, 'invalid_dealer_seat'],
+      'Explicit dealer at an unchecked guest seat is rejected');
+    const accountToken = await requestJson<{ token: string }>(`/api/matches/${dealerId}/check-in-tokens`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    const accountChecked = await requestJson(`/api/matches/${dealerId}/check-ins`, {
+      method: 'POST', cookie: acct2.cookie, body: { token: accountToken.data.token },
+    });
+    checkEq(accountChecked.status, 200, 'Account guest checks in with token');
+    const missingGuest = await requestJson<{ error: string }>(`/api/matches/${dealerId}/seats/finalize`, {
+      method: 'POST', cookie: acct1.cookie, body: { dealerSeatNo: 2 },
+    });
+    checkEq([missingGuest.status, missingGuest.data.error], [400, 'incomplete_check_ins'],
+      'Owner auto-check-in never bypasses a missing anonymous guest check-in');
+    for (const participant of [dealerGuest]) {
+      const token = await requestJson<{ token: string }>(`/api/matches/${dealerId}/check-in-tokens`, {
+        method: 'POST', cookie: acct1.cookie, body: {},
+      });
+      const checked = await requestJson(`/api/matches/${dealerId}/check-ins`, {
+        method: 'POST', cookie: participant.cookie, body: { token: token.data.token },
+      });
+      checkEq(checked.status, 200, 'Approved guest checks in with a token');
+    }
+    const chosen = await requestJson<{ dealerSeatNo: number }>(`/api/matches/${dealerId}/seats/finalize`, {
+      method: 'POST', cookie: acct1.cookie, body: { dealerSeatNo: 2 },
+    });
+    checkEq([chosen.status, chosen.data.dealerSeatNo], [200, 2],
+      'Finalize accepts owner seat 2 as East without an owner token');
+    const windRows = await pool.query<{ seat_no: number; initial_wind: string }>(
+      'SELECT seat_no, initial_wind FROM app.match_seats WHERE match_id = $1 ORDER BY seat_no', [dealerId],
+    );
+    checkEq(windRows.rows.map((row) => row.initial_wind), ['S', 'W', 'E'],
+      'Initial winds rotate from the selected dealer');
+    const chosenEvent = await pool.query<{ payload: { dealerSeatNo: number } }>(
+      `SELECT payload FROM app.match_events WHERE match_id = $1 AND type = 'seats_finalized'`, [dealerId],
+    );
+    checkEq(chosenEvent.rows[0].payload.dealerSeatNo, 2, 'Finalization event records chosen dealer');
+    const chosenHand = await requestJson<{ hand: { dealerSeatNo: number } }>(`/api/matches/${dealerId}/hands`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq(chosenHand.data.hand.dealerSeatNo, 2, 'First hand opens with seat 2 as dealer');
     const doubleMatch = await requestJson<{ match: { id: string } }>('/api/matches', {
       method: 'POST',
       cookie: acct1.cookie,
@@ -1127,6 +1345,10 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     });
     checkEq(doubleMatch.status, 200, 'A three-player special-double ruleset creates a match');
     const doubleMatchId = doubleMatch.data.match.id;
+    const doubleOwnerClaim = await requestJson(`/api/matches/${doubleMatchId}/seats/claim`, {
+      method: 'POST', cookie: acct1.cookie, body: { seatNo: 0 },
+    });
+    checkEq(doubleOwnerClaim.status, 200, 'Special-double owner claims their own seat');
     for (const [participant, seatNo] of [[acct2, 1], [doublePlayer, 2]] as const) {
       const join = await requestJson<{ joinRequestId: string }>(`/api/matches/${doubleMatchId}/join-requests`, {
         method: 'POST', cookie: participant.cookie, body: {},
@@ -1137,7 +1359,7 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       });
       checkEq(approve.status, 200, 'Owner approves a special-double match seat');
     }
-    for (const participant of [acct1, acct2, doublePlayer]) {
+    for (const participant of [acct2, doublePlayer]) {
       const tokenResponse = await requestJson<{ token: string }>(`/api/matches/${doubleMatchId}/check-in-tokens`, {
         method: 'POST', cookie: acct1.cookie, body: {},
       });
@@ -1148,7 +1370,7 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       checkEq(checked.status, 200, 'Approved special-double match seat checks in');
     }
     const doubleFinalize = await requestJson(`/api/matches/${doubleMatchId}/seats/finalize`, {
-      method: 'POST', cookie: acct1.cookie, body: {},
+      method: 'POST', cookie: acct1.cookie, body: { dealerSeatNo: 0 },
     });
     checkEq(doubleFinalize.status, 200, 'Special-double match seats finalize');
     const doubleStart = await requestJson<{ hand: { id: string } }>(`/api/matches/${doubleMatchId}/hands`, {
@@ -1197,12 +1419,17 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       'Persisted result retains special count and total yakuman multiplier');
     const startReadyMatch = async (
       versionId: string, participants: ClientSession[], rulesOverride?: Record<string, unknown>,
+      dealerSeatNo: number | null = 0,
     ) => {
       const created = await requestJson<{ match: { id: string } }>('/api/matches', {
         method: 'POST', cookie: acct1.cookie, body: { rulesetVersionId: versionId, ...(rulesOverride ? { rulesOverride } : {}) },
       });
       checkEq(created.status, 200, 'Reference match creates from its ruleset version');
       const id = created.data.match.id;
+      const claimed = await requestJson(`/api/matches/${id}/seats/claim`, {
+        method: 'POST', cookie: acct1.cookie, body: { seatNo: 0 },
+      });
+      checkEq(claimed.status, 200, 'Reference owner claims and auto-confirms seat 0');
       for (let seatNo = 1; seatNo < participants.length; seatNo++) {
         const join = await requestJson<{ joinRequestId: string }>(`/api/matches/${id}/join-requests`, {
           method: 'POST', cookie: participants[seatNo].cookie, body: {},
@@ -1213,7 +1440,7 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
         });
         checkEq(approved.status, 200, 'Reference participant obtains a seat');
       }
-      for (const participant of participants) {
+      for (const participant of participants.slice(1)) {
         const token = await requestJson<{ token: string }>(`/api/matches/${id}/check-in-tokens`, {
           method: 'POST', cookie: acct1.cookie, body: {},
         });
@@ -1224,7 +1451,7 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
         checkEq(checked.status, 200, 'Reference participant checked in');
       }
       const finalized = await requestJson(`/api/matches/${id}/seats/finalize`, {
-        method: 'POST', cookie: acct1.cookie, body: {},
+        method: 'POST', cookie: acct1.cookie, body: dealerSeatNo === null ? {} : { dealerSeatNo },
       });
       checkEq(finalized.status, 200, 'Reference seats finalized');
       return id;
@@ -1236,6 +1463,19 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     // Guests are bound to one match; use reusable account principals for both reference fixtures.
     const referenceThird = await registerEmailAccount(`reference3_${runId}@example.com`, '参考西家');
     const referenceFourth = await registerEmailAccount(`reference4_${runId}@example.com`, '参考北家');
+    const randomMatchId = await startReadyMatch(house4p!.versionId,
+      [acct1, acct2, referenceThird, referenceFourth], undefined, null);
+    const randomEvent = await pool.query<{ payload: { dealerSeatNo: number } }>(
+      `SELECT payload FROM app.match_events WHERE match_id = $1 AND type = 'seats_finalized'`,
+      [randomMatchId],
+    );
+    const randomDealer = randomEvent.rows[0].payload.dealerSeatNo;
+    check([0, 1, 2, 3].includes(randomDealer), 'Random dealer recorded in seats_finalized belongs to a seated player');
+    const randomHand = await requestJson<{ hand: { dealerSeatNo: number } }>(
+      `/api/matches/${randomMatchId}/hands`, { method: 'POST', cookie: acct1.cookie, body: {} },
+    );
+    checkEq(randomHand.data.hand.dealerSeatNo, randomDealer,
+      'Omitted dealer selection persists consistently into the first hand');
 
     // Isolated match keeps existing lifecycle event assertions unchanged.
     const budgetMatchId = await startReadyMatch(house4p!.versionId,
@@ -1284,6 +1524,23 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       'Rejected cancellation leaves marks, usage and hand revisions unchanged');
     const repeatedDeclaration = await changeBudgetMark(0, true);
     checkEq(repeatedDeclaration.status, 200, 'Same-value declaration at budget is idempotent');
+    const afterIdempotent = await requestJson<typeof beforeBudgetDenial.data>(
+      `/api/matches/${budgetMatchId}`, { cookie: acct1.cookie },
+    );
+    checkEq(afterIdempotent.data, beforeBudgetDenial.data,
+      'Same-value repeat at budget does not write an event or change version, mark, or usage');
+    const [sameStateAtCap, cancelAtCap] = await Promise.all([
+      changeBudgetMark(0, true, acct1.cookie),
+      changeBudgetMark(0, false, acct2.cookie),
+    ]);
+    checkEq([sameStateAtCap.status, cancelAtCap.status, cancelAtCap.data.error],
+      [200, 409, 'riichi_change_budget_exceeded'],
+      'A second principal cannot race an idempotent repeat to exceed the cancellation budget');
+    const afterConcurrentDenial = await requestJson<typeof beforeBudgetDenial.data>(
+      `/api/matches/${budgetMatchId}`, { cookie: acct1.cookie },
+    );
+    checkEq(afterConcurrentDenial.data, beforeBudgetDenial.data,
+      'Concurrent rejected cancellation and repeat leave history and mark unchanged');
     const concurrentOtherSeat = await Promise.all([
       changeBudgetMark(1, true), changeBudgetMark(1, true, acct2.cookie),
     ]);
@@ -1296,6 +1553,32 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       [{ declares: 2, cancels: 1 }, { declares: 1, cancels: 0 },
         { declares: 0, cancels: 0 }, { declares: 0, cancels: 0 }],
       'Already-open hand returns independent usage for every seat');
+    const beforeOppositeWrites = await requestJson<typeof beforeBudgetDenial.data>(
+      `/api/matches/${budgetMatchId}`, { cookie: acct1.cookie },
+    );
+    const oppositeWrites = await Promise.all([
+      changeBudgetMark(2, true, acct1.cookie),
+      changeBudgetMark(2, false, acct2.cookie),
+    ]);
+    checkEq(oppositeWrites.map((response) => response.status), [200, 200],
+      'Two principals can serialize opposite marks on one fresh seat');
+    const afterOppositeWrites = await requestJson<typeof beforeBudgetDenial.data>(
+      `/api/matches/${budgetMatchId}`, { cookie: acct1.cookie },
+    );
+    const oppositeSeat = afterOppositeWrites.data.currentHand.seats[2];
+    checkEq(afterOppositeWrites.data.currentHand.markRevision,
+      beforeOppositeWrites.data.currentHand.markRevision + 2,
+      'Both serialized writes advance the shared revision exactly once');
+    checkEq(oppositeSeat.riichiChangeUsage,
+      { declares: 1, cancels: oppositeSeat.isRiichi ? 0 : 1 },
+      'Opposite-write budget follows committed transition order, not number of requests');
+    if (oppositeSeat.isRiichi) {
+      checkEq((await changeBudgetMark(2, false)).status, 200,
+        'Reset the concurrently marked seat before settling the fixture');
+    }
+    const beforeLegacy = await requestJson<typeof beforeBudgetDenial.data>(
+      `/api/matches/${budgetMatchId}`, { cookie: acct1.cookie },
+    );
 
     // A historical hand with a second cancellation predating this limit is the only
     // reachable state from which a third declaration can be attempted.
@@ -1314,7 +1597,7 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
           budgetHandId, acct1.principalId, randomUUID(),
           createHash('sha256').update(randomUUID()).digest('hex'),
           JSON.stringify({ handId: budgetHandId, seatNo: 0, riichi: false,
-            markRevision: budgetAgain.data.hand.markRevision + 1 })],
+            markRevision: beforeLegacy.data.currentHand.markRevision + 1 })],
       );
       await legacy.query(
         `UPDATE app.hand_riichi_marks
@@ -1350,6 +1633,9 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
         confirmedMarkRevision: beforeThirdDeclare.data.currentHand.markRevision },
     });
     checkEq(settledBudget.status, 200, 'Budget fixture settles first hand');
+    const settledMark = await changeBudgetMark(0, false, acct2.cookie);
+    checkEq([settledMark.status, settledMark.data.error], [409, 'hand_not_open'],
+      'Settlement closes the marks endpoint even for a different principal');
     const nextBudget = await requestJson<{ hand: BudgetHand }>(
       `/api/matches/${budgetMatchId}/hands`, { method: 'POST', cookie: acct1.cookie, body: {} },
     );
@@ -1368,6 +1654,51 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
         method: 'POST', cookie: acct1.cookie, body: { seatNo: 0, riichi: true },
       });
     checkEq(nextDeclare.status, 200, 'Seat can declare anew in the next hand');
+    const voidMatchId = await startReadyMatch(house4p!.versionId,
+      [acct1, acct2, referenceThird, referenceFourth], { targetPoints: 25000 });
+    const voidHand = await requestJson<{ hand: BudgetHand }>(
+      `/api/matches/${voidMatchId}/hands`, { method: 'POST', cookie: acct1.cookie, body: {} },
+    );
+    checkEq(voidHand.status, 200, 'Voided-hand fixture starts at the target score');
+    const voidPath = `/api/matches/${voidMatchId}/hands/${voidHand.data.hand.id}/marks`;
+    const markedBeforeVoid = await requestJson<{ markRevision: number }>(voidPath, {
+      method: 'POST', cookie: acct1.cookie, body: { seatNo: 0, riichi: true },
+    });
+    checkEq(markedBeforeVoid.status, 200, 'An open hand accepts a mark before being voided');
+    const finishedWithOpenHand = await requestJson<{ finished: boolean }>(`/api/matches/${voidMatchId}/finish`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq([finishedWithOpenHand.status, finishedWithOpenHand.data.finished], [200, true],
+      'Finishing a target-reached match voids its open hand');
+    const voidSnapshot = await requestJson<typeof beforeBudgetDenial.data>(
+      `/api/matches/${voidMatchId}`, { cookie: acct1.cookie },
+    );
+    checkEq(voidSnapshot.data.currentHand.seats[0].riichiChangeUsage,
+      { declares: 1, cancels: 0 }, 'Voiding preserves original hand transition history');
+    const markVoided = await requestJson<{ error: string }>(voidPath, {
+      method: 'POST', cookie: acct2.cookie, body: { seatNo: 0, riichi: false },
+    });
+    checkEq([markVoided.status, markVoided.data.error], [409, 'hand_not_open'],
+      'A second principal cannot cancel a mark on a voided hand');
+    const settleVoided = await requestJson<{ error: string }>(
+      `/api/matches/${voidMatchId}/hands/${voidHand.data.hand.id}/results`, {
+        method: 'POST', cookie: acct1.cookie,
+        body: { resultInput: { kind: 'ryuukyoku', tenpai: [true, false, false, false] },
+          confirmedMarkRevision: markedBeforeVoid.data.markRevision },
+      },
+    );
+    checkEq([settleVoided.status, settleVoided.data.error], [409, 'match_not_active'],
+      'Result submission cannot reopen a voided hand via the alternate endpoint');
+    const reopenVoided = await requestJson<{ error: string }>(`/api/matches/${voidMatchId}/hands`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq([reopenVoided.status, reopenVoided.data.error], [409, 'match_not_active'],
+      'Opening hands does not reopen a voided hand in a finished match');
+    const afterVoidProbes = await requestJson<typeof beforeBudgetDenial.data>(
+      `/api/matches/${voidMatchId}`, { cookie: acct1.cookie },
+    );
+    checkEq(afterVoidProbes.data, voidSnapshot.data,
+      'Denied mark and settlement leave voided marks, usage and match version intact');
 
     const customId = await startReadyMatch(overridden.ruleset_version_id,
       [acct1, acct2, referenceThird, referenceFourth]);

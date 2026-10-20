@@ -28,7 +28,7 @@ const matchLabels: Record<string, string> = {
 };
 const GUEST_MODE = 'ichihime.local-mode';
 const ACCOUNT_HINT = 'ichihime.account-session';
-let createDraft: { guest: boolean | null; chosen: { name: string; versionId: string; seedKey?: string; base: TableRules } | null; rules: TableRules | null } = { guest: null, chosen: null, rules: null };
+let createDraft: { guest: boolean | null; chosen: { name: string; versionId: string; seedKey?: string; base: TableRules } | null; rules: TableRules | null; localNames: string[]; localDealerSeatNo: number } = { guest: null, chosen: null, rules: null, localNames: [], localDealerSeatNo: 0 };
 
 function Shell({ children, principal }: { children: React.ReactNode; principal: Principal | null }) {
   const bridge = (window as Window & { Capacitor?: { getPlatform?: () => string; platform?: string; isNativePlatform?: () => boolean } }).Capacitor;
@@ -128,6 +128,8 @@ function Create({ guest }: { guest: boolean }) {
   const [chosen, setChosen] = useState<typeof createDraft.chosen>(() => createDraft.guest === guest ? createDraft.chosen : null);
   const [rules, setRules] = useState<TableRules | null>(() => createDraft.guest === guest ? createDraft.rules : null);
   const [step, setStep] = useState<1 | 2 | 3>(() => createDraft.guest === guest && createDraft.rules ? 2 : 1);
+  const [localNames, setLocalNames] = useState<string[]>(() => createDraft.guest === guest ? createDraft.localNames : []);
+  const [localDealerSeatNo, setLocalDealerSeatNo] = useState(() => createDraft.guest === guest ? createDraft.localDealerSeatNo : 0);
   const [created, setCreated] = useState<{ id: string; template: string } | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -148,13 +150,15 @@ function Create({ guest }: { guest: boolean }) {
     }).catch((cause: unknown) => { if (alive) setError(errorText(cause)); });
     return () => { alive = false; };
   }, [guest]);
-  useEffect(() => { createDraft = { guest, chosen, rules }; }, [guest, chosen, rules]);
+  useEffect(() => { createDraft = { guest, chosen, rules, localNames, localDealerSeatNo }; }, [guest, chosen, rules, localNames, localDealerSeatNo]);
   function select(template: ServerTemplate) {
     setCreated(null);
     const base = template.config;
     setChosen({ name: template.name, versionId: template.versionId,
       seedKey: guest ? template.versionId : undefined, base });
     setRules({ ...base, uma: [...base.uma] });
+    setLocalNames(Array.from({ length: base.playerCount }, (_, seatNo) => `玩家 ${seatNo + 1}`));
+    setLocalDealerSeatNo(0);
     setError(''); setStep(2);
   }
   async function create(template?: ServerTemplate) {
@@ -168,7 +172,9 @@ function Create({ guest }: { guest: boolean }) {
     setBusy(true); setError('');
     try {
       if (guest) {
-        const match = createLocalMatch(selected, source.name, source.seedKey ?? null);
+        const match = createLocalMatch(selected, source.name, source.seedKey ?? null,
+          { playerNames: Array.from({ length: selected.playerCount }, (_, seatNo) => localNames[seatNo] ?? `玩家 ${seatNo + 1}`),
+            dealerSeatNo: localDealerSeatNo });
         setCreated({ id: match.id, template: source.name });
       } else {
         const { match } = await post<{ match: { id: string } }>('/api/matches',
@@ -189,11 +195,20 @@ function Create({ guest }: { guest: boolean }) {
         <article className="template" key={template.versionId}><div className="template-top"><span className="tag">{template.config.playerCount} 麻</span><span className="tag muted-tag">{reviewLabels[template.reviewStatus] ?? template.reviewStatus}</span></div>
           <h2>{template.name}</h2><p>{kindLabels[template.kind] ?? template.kind} · {template.templateKey}</p>
           <button type="button" onClick={() => select(template)}>以此为起点调整 →</button>
-          <button type="button" className="quiet" disabled={busy} onClick={() => void create(template)}>{guest ? '直接创建本地对局' : '直接应用'}</button>
+          <button type="button" className="quiet" disabled={busy} onClick={() => guest ? select(template) : void create(template)}>{guest ? '设置玩家与起家 →' : '直接应用'}</button>
         </article>)}</div>
     </>}
     {step === 2 && chosen && rules && <><div className="section-heading"><span>{chosen.name} · 本桌规则</span><button type="button" className="text-button" onClick={() => { setStep(1); setError(''); }}>重新选模板</button></div>
       <RulesAdjustment key={chosen.versionId} base={chosen.base} rules={rules} onChange={(adjusted) => { setCreated(null); setRules(adjusted); }} />
+      {guest && <section className="panel local-setup"><div className="section-heading"><span>本地玩家与起家</span><small>开局前设置，默认座位 1 为东家</small></div>
+        <div className="member-list">{Array.from({ length: rules.playerCount }, (_, seatNo) => <div key={seatNo}><span className="wind-badge">{seatNo + 1}</span>
+          <label>座位 {seatNo + 1}<input aria-label={`座位 ${seatNo + 1} 玩家姓名`} maxLength={40} value={localNames[seatNo] ?? `玩家 ${seatNo + 1}`} onChange={(event) => {
+            setCreated(null);
+            setLocalNames((names) => { const updated = [...names]; updated[seatNo] = event.target.value; return updated; });
+          }} /></label>
+          <label className="toggle">起家（东家）<input type="radio" name="local-dealer" checked={localDealerSeatNo === seatNo} onChange={() => { setCreated(null); setLocalDealerSeatNo(seatNo); }} /></label>
+        </div>)}</div>
+      </section>}
       {validation && <div className="notice invalid" role="alert">{validation}</div>}
       {!validation && <RulePreview rules={rules} guest={guest} />}
       <div className="sticky-actions"><p>模板只读；调整后的完整规则随本桌保存。</p><button type="button" className="primary" disabled={!!validation || busy} onClick={() => void create()}>{guest ? '创建本地对局 →' : '仅用于本桌 →'}</button></div>
@@ -201,7 +216,7 @@ function Create({ guest }: { guest: boolean }) {
     {step === 3 && created && <section className="panel">
       <p className="eyebrow">{guest ? 'LOCAL TABLE / 本地对局' : 'TABLE READY / 入桌签到'}</p>
       <h2>{created.template} · 已开桌</h2>
-      <p className="muted">{guest ? '牌局已保存在此设备。进入牌桌即可修改玩家姓名并记分，无需签到或联网。' : '牌局已创建。进入牌桌继续座次确认与签到。'}</p>
+      <p className="muted">{guest ? '牌局已保存在此设备。进入牌桌即可记分，无需签到或联网。' : '牌局已创建。进入牌桌继续座次确认与签到。'}</p>
       <Link className="button primary" to={`/table/${created.id}`}>{guest ? '进入本地牌桌 →' : '入桌签到 →'}</Link>
     </section>}
     {error && <div className="notice invalid" role="alert">{error}</div>}

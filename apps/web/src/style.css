@@ -166,6 +166,14 @@ h1,h2{letter-spacing:.015em}
 .steps button:not(:disabled):hover{color:#f5f5ef}
 .steps button:disabled{opacity:.45;cursor:not-allowed}
 .table-checkin .member-list label{flex:1;min-width:0}
+.local-setup .member-list>div{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.local-setup .member-list label:not(.toggle){flex:1 1 160px}
+.local-setup .member-list .toggle{flex:0 1 auto}
+.local-setup .member-list input:not([type="radio"]){width:100%}
+@media(max-width:600px){
+  .table-page .table-checkin-owner .member-list{display:grid;grid-template-columns:1fr;gap:8px}
+  .table-page .table-checkin-owner .member-list>div{flex-wrap:wrap}
+}
 .table-checkin .member-list input{max-width:320px}
 .history-row>a{min-height:44px;display:inline-flex;align-items:center;color:#e4d3a9;white-space:nowrap}
 .history-row>.tag{flex:none}

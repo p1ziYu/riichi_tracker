@@ -187,12 +187,17 @@ function save(matches: LocalMatch[]): void {
 export function listLocalMatches(): LocalMatch[] { return store().matches; }
 export function getLocalMatch(id: string): LocalMatch | null { return store().matches.find((match) => match.id === id) ?? null; }
 export function isLocalId(id: string | undefined): boolean { return !!id && id.startsWith('local-'); }
-export function createLocalMatch(rules: TableRules, name: string, seedKey: string | null = null): LocalMatch {
+export function createLocalMatch(rules: TableRules, name: string, seedKey: string | null = null,
+  setup: { playerNames?: string[]; dealerSeatNo?: number } = {}): LocalMatch {
   const invalid = rulesError(rules);
   if (invalid) throw new Error(invalid);
   const seed = LOCAL_SEEDS.find((item) => item.key === seedKey);
   const baseRules = seed ? seedRules(seed) : null;
   const config = canonicalRules(rules);
+  const dealerSeatNo = setup.dealerSeatNo ?? 0;
+  if (!seatNumber(dealerSeatNo, config.playerCount)) throw new Error('起家座位无效');
+  if (setup.playerNames && (setup.playerNames.length !== config.playerCount ||
+    setup.playerNames.some((player) => typeof player !== 'string'))) throw new Error('玩家姓名与座位不匹配');
   const createdAt = new Date().toISOString();
   const match: LocalMatch = {
     id: `local-${crypto.randomUUID()}`, name, createdAt, updatedAt: createdAt,
@@ -204,9 +209,10 @@ export function createLocalMatch(rules: TableRules, name: string, seedKey: strin
           overrideKeys: Object.keys(ruleOverrides(baseRules, config)) } } : {}),
       },
     }, engineVersion: ENGINE_VERSION,
-    seats: Array.from({ length: config.playerCount }, (_, seatNo) => ({ seatNo, displayName: `玩家 ${seatNo + 1}` })),
+    seats: Array.from({ length: config.playerCount }, (_, seatNo) => ({ seatNo,
+      displayName: setup.playerNames?.[seatNo].trim() || `玩家 ${seatNo + 1}` })),
     points: Array(config.playerCount).fill(config.startingPoints) as number[], currentHand: null,
-    nextHand: { roundWind: 'E', roundNumber: 1, dealerSeatNo: 0, honba: 0, riichiPool: 0 },
+    nextHand: { roundWind: 'E', roundNumber: 1, dealerSeatNo, honba: 0, riichiPool: 0 },
     results: [], terminal: null, settlementConfirmed: false,
   };
   const ready = openLocalHand(match);
@@ -293,7 +299,10 @@ export function finishLocalMatch(match: LocalMatch): LocalMatch {
 export function previewLocalTerminal(match: LocalMatch): TerminalSettlementOutput {
   if (match.status !== 'finished') throw new Error('请先终局');
   return calculateTerminalSettlement(match.points, match.rulesSnapshot, {
-    riichiPool: match.nextHand?.riichiPool ?? 0, startingDealerSeatNo: 0, requireTargetPoints: true,
+    riichiPool: match.nextHand?.riichiPool ?? 0,
+    startingDealerSeatNo: match.results[0]?.hand.dealerSeatNo ??
+      match.currentHand?.dealerSeatNo ?? match.nextHand?.dealerSeatNo ?? 0,
+    requireTargetPoints: true,
     completedSouth4: match.rulesSnapshot.config.fixedSouth4EndPolicy === 'completed_south_4' &&
       match.nextHand?.roundWind === 'W' && match.nextHand.roundNumber === 1 &&
       match.results.some(({ hand }) => hand.roundWind === 'S' && hand.roundNumber === 4),

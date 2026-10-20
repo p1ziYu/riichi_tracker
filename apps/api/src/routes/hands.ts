@@ -689,6 +689,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         state: string;
         round_wind: string;
         round_number: number;
+        dealer_seat_no: number;
         calculation: {
           nextHand?: {
             roundWind: string;
@@ -699,7 +700,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
           };
         } | null;
       }>(
-        `SELECT h.hand_no, h.state, h.round_wind, h.round_number, hr.calculation
+        `SELECT h.hand_no, h.state, h.round_wind, h.round_number, h.dealer_seat_no, hr.calculation
          FROM app.hands h
          LEFT JOIN app.hand_results hr ON hr.hand_id = h.id AND hr.superseded_at IS NULL
          WHERE h.match_id = $1
@@ -711,11 +712,31 @@ export function registerHandsRoutes(app: FastifyInstance): void {
       let handNo = 1;
       let roundWind = 'E';
       let roundNumber = 1;
-      let dealerSeatNo = 0;
+      let dealerSeatNo: number;
       let honba = 0;
       let riichiPool = 0;
 
       const prev = prevHandRes.rows[0];
+      if (prev) {
+        dealerSeatNo = prev.dealer_seat_no;
+      } else {
+        const finalized = await client.query<{ dealer_seat_no: number | null }>(
+          `SELECT (payload->>'dealerSeatNo')::int AS dealer_seat_no
+           FROM app.match_events WHERE match_id = $1 AND type = 'seats_finalized'
+           ORDER BY seq DESC LIMIT 1`,
+          [matchId],
+        );
+        if (finalized.rows[0]?.dealer_seat_no != null) {
+          dealerSeatNo = finalized.rows[0].dealer_seat_no;
+        } else {
+          // Pre-existing finalized events predate dealer selection; read their stored East.
+          const east = await client.query<{ seat_no: number }>(
+            `SELECT seat_no FROM app.match_seats WHERE match_id = $1 AND initial_wind = 'E'`,
+            [matchId],
+          );
+          dealerSeatNo = east.rows[0].seat_no;
+        }
+      }
       if (prev) {
         handNo = prev.hand_no + 1;
         const nh = prev.calculation?.nextHand;

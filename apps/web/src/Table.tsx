@@ -9,6 +9,7 @@ import Segmented from './Segmented';
 type Revision = number | string;
 type Seat = {
   seatNo: number;
+  principalId?: string | null;
   points?: number;
   displayName?: string;
   memberName?: string;
@@ -61,7 +62,8 @@ const matchStateLabels: Record<string, string> = {
 function seatLabel(seat: Seat): string {
   return seat.displayName ?? seat.memberName ?? seat.member?.displayName ?? seat.member?.name ?? `座位 ${seat.seatNo + 1}`;
 }
-function checkInLabel(checkedIn: MatchState['checkedIn'], seat: Seat): string {
+function checkInLabel(checkedIn: MatchState['checkedIn'], seat: Seat, ownerPrincipalId?: string): string {
+  if (seat.principalId && seat.principalId === ownerPrincipalId && seat.status === 'checked_in') return '房主免签到';
   // Real API contract: per-seat check-in state lives on each seat
   // ('checked_in' | 'assigned' | 'empty'); `checkedIn` is only an aggregate count.
   if (seat.status === 'checked_in') return '已签到';
@@ -118,6 +120,7 @@ export default function Table() {
   const [retryConnection, setRetryConnection] = useState(0);
   const [identity, setIdentity] = useState<{ id: string; principalId: string } | null>(null);
   const [templateNames, setTemplateNames] = useState<Record<string, string>>({});
+  const [dealerSeatNo, setDealerSeatNo] = useState<number | null>(null);
   useEffect(() => {
     let alive = true;
     api<{ versionId: string; name: string }[]>('/api/rulesets/templates').then((templates) => {
@@ -161,6 +164,7 @@ export default function Table() {
     if (!id) return;
     let alive = true;
     setIdentity(null);
+    setDealerSeatNo(null);
     setToken(null);
     setDialog(false);
     setDraftPreview(null);
@@ -448,22 +452,33 @@ export default function Table() {
     {!state && loadError?.id === id && <Link className="button" to="/create">返回开桌</Link>}
     {state && <>
       <section className={`panel table-checkin${isOwner && ['preparing', 'lobby'].includes(state.match.status) ? ' table-checkin-owner' : ''}`}><div className="section-heading"><span>座次与签到</span><small>以服务端状态为准</small></div>
-        <div className="member-list">{seats.map((seat) => <div key={seat.seatNo}><span className="wind-badge">{winds[seat.seatNo]}</span><span>{seatLabel(seat)} · 座位 {seat.seatNo + 1}</span><small>{checkInLabel(state.checkedIn, seat)}</small></div>)}</div>
-        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && <div className="table-controls"><button type="button" disabled={busy} onClick={() => void action(async () => {
-          setToken(null);
-          const result = await post<TokenResponse>(`${base}/check-in-tokens`, {});
-          if (!result?.token) throw new Error('服务端未返回签到令牌');
-          setToken({ id: id!, value: result.token, expiresAt: result.expiresAt,
-            checkedInAtIssue: typeof state.checkedIn === 'number' ? state.checkedIn : 0 });
-        })}>生成签到链接</button><button type="button" className="primary" disabled={busy} onClick={() => void action(async () => { await post(`${base}/seats/finalize`, {}); await refresh(); })}>确认座次</button></div>}
+        <div className="member-list">{seats.map((seat) => <div key={seat.seatNo}><span className="wind-badge">{seat.seatNo + 1}</span><span>{seatLabel(seat)} · 座位 {seat.seatNo + 1}</span><small>{checkInLabel(state.checkedIn, seat, state.match.ownerPrincipalId)}</small>
+          {isOwner && ['preparing', 'lobby'].includes(state.match.status) &&
+            (!seat.principalId || (seat.principalId === identity?.principalId && seat.status !== 'checked_in')) &&
+            <button type="button" disabled={busy} onClick={() => void action(async () => {
+              await post(`${base}/seats/claim`, { seatNo: seat.seatNo });
+              setDealerSeatNo(null);
+              await refresh();
+            })}>{seat.principalId ? '房主确认本座' : '房主选此座'}</button>}
+          {isOwner && ['preparing', 'lobby'].includes(state.match.status) && seat.principalId &&
+            <button type="button" className="text-button" aria-pressed={dealerSeatNo === seat.seatNo} disabled={busy} onClick={() => setDealerSeatNo(seat.seatNo)}>{dealerSeatNo === seat.seatNo ? '起家 · 东家' : '设为起家'}</button>}
+        </div>)}</div>
+        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && <><div className="table-controls"><span>起家：</span><button type="button" aria-pressed={dealerSeatNo === null} disabled={busy} onClick={() => setDealerSeatNo(null)}>随机（默认）</button><small>点击已入座玩家的座位指定东家</small></div>
+          <div className="table-controls"><button type="button" disabled={busy} onClick={() => void action(async () => {
+            setToken(null);
+            const result = await post<TokenResponse>(`${base}/check-in-tokens`, {});
+            if (!result?.token) throw new Error('服务端未返回签到令牌');
+            setToken({ id: id!, value: result.token, expiresAt: result.expiresAt,
+              checkedInAtIssue: typeof state.checkedIn === 'number' ? state.checkedIn : 0 });
+          })}>生成玩家签到链接</button><button type="button" className="primary" disabled={busy} onClick={() => void action(async () => { await post(`${base}/seats/finalize`, dealerSeatNo === null ? {} : { dealerSeatNo }); await refresh(); })}>确认座次</button></div></>}
         {isOwner && ['preparing', 'lobby'].includes(state.match.status) && token?.id === id &&
           !checkInUrl && <p className="notice" role="status">签到链接已使用或过期，请重新生成。</p>}
-        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && checkInUrl && <div className="table-invite"><div className="table-qr">{qrCode?.url === checkInUrl ? <img src={qrCode.image} width="256" height="256" alt="扫描二维码打开签到链接" /> : <span role="status">{qrError ? '二维码生成失败，请使用下方链接' : '正在生成签到二维码…'}</span>}</div><div className="table-invite-details"><p>桌主签到链接：</p><small>每个链接仅供一位已获座位的玩家使用，签到后请为下一位重新生成。</small><a href={checkInUrl}>{checkInUrl}</a>{token?.expiresAt && <small>截止 {token.expiresAt}</small>}<button type="button" onClick={() => void copyCheckIn()}>复制签到链接</button>{copyStatus && <small role="status">{copyStatus}</small>}</div></div>}
+        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && checkInUrl && <div className="table-invite"><div className="table-qr">{qrCode?.url === checkInUrl ? <img src={qrCode.image} width="256" height="256" alt="扫描二维码打开签到链接" /> : <span role="status">{qrError ? '二维码生成失败，请使用下方链接' : '正在生成签到二维码…'}</span>}</div><div className="table-invite-details"><p>玩家签到链接（房主免签到）：</p><small>每个链接仅供一位已获座位的玩家使用，签到后请为下一位重新生成。</small><a href={checkInUrl}>{checkInUrl}</a>{token?.expiresAt && <small>截止 {token.expiresAt}</small>}<button type="button" onClick={() => void copyCheckIn()}>复制签到链接</button>{copyStatus && <small role="status">{copyStatus}</small>}</div></div>}
       </section>
       <div className="table-layout"><section className="felt" aria-label="牌桌座位"><div className="felt-lines" aria-hidden="true" /><div className="seat-grid">{seats.map((seat) => {
         const inHand = handSeats.find((entry) => entry.seatNo === seat.seatNo);
         const points = pointsFor(seat);
-        return <article className={`seat seat-${seat.seatNo}`} key={seat.seatNo}><div className="seat-top"><span className="wind-badge">{winds[seat.seatNo]}</span><span className="seat-name">{seatLabel(seat)}{hand?.dealerSeatNo === seat.seatNo && <em>庄家</em>}</span></div><strong>{typeof points === 'number' ? pointText(points) : '点数未提供'}</strong>{!hand && <small className="seat-status">{checkInLabel(state.checkedIn, seat)}</small>}{activeHand && inHand && <><div className="riichi-actions"><button type="button" className={inHand.isRiichi ? 'riichi marked' : 'riichi'} disabled={busy || !handId || inHand.isRiichi !== false || inHand.riichiChangeUsage.declares >= 2 || (typeof inHand.points === 'number' && inHand.points < 1000 && state.match.rulesSnapshot?.allowLowPointRiichi !== true)} onClick={() => changeMark(inHand, true)}>宣言</button><button type="button" className="riichi" disabled={busy || !handId || inHand.isRiichi !== true || inHand.riichiChangeUsage.cancels >= 1} onClick={() => changeMark(inHand, false)}>取消</button></div><small className="seat-status">还可立直 {Math.max(0, 2 - inHand.riichiChangeUsage.declares)} 次 · 还可取消 {Math.max(0, 1 - inHand.riichiChangeUsage.cancels)} 次</small></>}</article>;
+        return <article className={`seat seat-${seat.seatNo}`} key={seat.seatNo}><div className="seat-top"><span className="wind-badge">{hand ? winds[(seat.seatNo - hand.dealerSeatNo! + seats.length) % seats.length] : dealerSeatNo === null ? seat.seatNo + 1 : winds[(seat.seatNo - dealerSeatNo + seats.length) % seats.length]}</span><span className="seat-name">{seatLabel(seat)}{hand?.dealerSeatNo === seat.seatNo && <em>庄家</em>}</span></div><strong>{typeof points === 'number' ? pointText(points) : '点数未提供'}</strong>{!hand && <small className="seat-status">{checkInLabel(state.checkedIn, seat, state.match.ownerPrincipalId)}</small>}{activeHand && inHand && <><div className="riichi-actions"><button type="button" className={inHand.isRiichi ? 'riichi marked' : 'riichi'} disabled={busy || !handId || inHand.isRiichi !== false || inHand.riichiChangeUsage.declares >= 2 || (typeof inHand.points === 'number' && inHand.points < 1000 && state.match.rulesSnapshot?.allowLowPointRiichi !== true)} onClick={() => changeMark(inHand, true)}>宣言</button><button type="button" className="riichi" disabled={busy || !handId || inHand.isRiichi !== true || inHand.riichiChangeUsage.cancels >= 1} onClick={() => changeMark(inHand, false)}>取消</button></div><small className="seat-status">还可立直 {Math.max(0, 2 - inHand.riichiChangeUsage.declares)} 次 · 还可取消 {Math.max(0, 1 - inHand.riichiChangeUsage.cancels)} 次</small></>}</article>;
       })}<div className="table-center">{hand ? <><span>{hand.roundWind && typeof hand.roundNumber === 'number' ? `${({ E: '东', S: '南', W: '西' } as const)[hand.roundWind]}${['一', '二', '三', '四'][hand.roundNumber - 1] ?? hand.roundNumber}局` : '当前局'}</span><b>{typeof hand.honba === 'number' ? `${hand.honba} 本场` : '本场未提供'}</b><small>{typeof hand.riichiPool === 'number' ? `供托 ${hand.riichiPool} 根` : '供托未提供'}</small></> : <span>{['preparing', 'lobby'].includes(state.match.status) ? '等待座次确认' : '待开下一局'}</span>}</div></div></section>
       <aside className="panel table-aside"><h2>牌局操作</h2><div className="aside-stat"><span>牌桌状态</span><b>{statusText}</b></div>{hand && <div className="aside-stat"><span>立直标记版本</span><b>{revision || '未提供'}</b></div>}
         <p className="note">立直标记同步至同桌，确认本局结果时才由服务端结算点数。{activeHand && !handId && '当前局标识未提供，无法操作本局。'}</p>

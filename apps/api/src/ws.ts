@@ -5,9 +5,12 @@ import { requirePrincipal } from './auth.js';
 import { pool } from './db.js';
 import { checkMatchAccess } from './routes/matches.js';
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export type WsEventType =
   | 'check_in'
   | 'join_approved'
+  | 'seat_claimed'
   | 'seats_finalized'
   | 'hand_started'
   | 'marks_changed'
@@ -70,6 +73,9 @@ export function registerWsRoutes(app: FastifyInstance): void {
     if (!principal) return;
 
     const matchId = req.params.id;
+    if (!UUID_REGEX.test(matchId)) {
+      return reply.code(400).send({ error: 'invalid_match_id', message: 'matchId must be a UUID' });
+    }
     const access = await checkMatchAccess(matchId, principal.id);
     if (access === 'not_found') {
       return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
@@ -105,6 +111,10 @@ export function registerWsRoutes(app: FastifyInstance): void {
     async (socket, req) => {
       const matchId = req.params.id;
       const ticket = req.query?.ticket;
+      if (!UUID_REGEX.test(matchId)) {
+        socket.close(1008, 'Invalid match id');
+        return;
+      }
 
       if (!ticket || typeof ticket !== 'string') {
         socket.close(1008, 'Missing ticket');
