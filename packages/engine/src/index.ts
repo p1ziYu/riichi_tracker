@@ -49,6 +49,7 @@ export interface WinnerInput {
   /**
    * If true, the winning tile on a ron was the discarder's riichi declaration tile.
    * Per docs §4.4 / §12.1, a riichi declaration whose tile is ron'd does NOT stand (no 1,000 deducted).
+   * All explicit winner flags on a multi-ron refer to the same discard and must agree.
    */
   isRiichiDeclarationDealIn?: boolean;
 }
@@ -62,6 +63,7 @@ export interface ResultInput {
   /**
    * Only valid on ron when this marked seat is the winner's actual discarder;
    * its 1,000-point stick does not stand (§4.4 / §12.1).
+   * An explicit false winner flag cannot accompany this declaration seat.
    */
   riichiDeclarationDealInSeatNo?: number | null;
   /**
@@ -680,15 +682,29 @@ export function calculateSettlement(
 
   const kind = resultInput.kind;
   const declarationSeatNo = resultInput.riichiDeclarationDealInSeatNo;
-  if (declarationSeatNo !== undefined && declarationSeatNo !== null) {
-    if (kind !== 'ron' || !Array.isArray(resultInput.winners) ||
-      !seatMap.get(declarationSeatNo)?.isRiichi ||
-      !resultInput.winners.some((w) => w.dealInSeatNo === declarationSeatNo && w.seatNo !== declarationSeatNo)) {
-      throw new Error('riichiDeclarationDealInSeatNo must be a marked seat that dealt in on a ron.');
+  const hasDeclarationSeat = declarationSeatNo !== undefined && declarationSeatNo !== null;
+  let winnerDeclaresDealIn = false;
+  let winnerDeniesDealIn = false;
+  if (Array.isArray(resultInput.winners)) {
+    for (const w of resultInput.winners) {
+      if (w.isRiichiDeclarationDealIn !== undefined && typeof w.isRiichiDeclarationDealIn !== 'boolean') {
+        throw new Error('isRiichiDeclarationDealIn must be a boolean.');
+      }
+      winnerDeclaresDealIn ||= w.isRiichiDeclarationDealIn === true;
+      winnerDeniesDealIn ||= w.isRiichiDeclarationDealIn === false;
     }
   }
-  if (Array.isArray(resultInput.winners) && resultInput.winners.some((w) =>
-    w.isRiichiDeclarationDealIn && (kind !== 'ron' || !seatMap.get(w.dealInSeatNo!)?.isRiichi))) {
+  if (winnerDeniesDealIn && (hasDeclarationSeat || winnerDeclaresDealIn)) {
+    throw new Error('Conflicting riichi declaration deal-in flags for the same ron discard.');
+  }
+  if (hasDeclarationSeat && (kind !== 'ron' || !Array.isArray(resultInput.winners) ||
+    !seatMap.get(declarationSeatNo)?.isRiichi ||
+    !resultInput.winners.some((w) => w.dealInSeatNo === declarationSeatNo && w.seatNo !== declarationSeatNo))) {
+    throw new Error('riichiDeclarationDealInSeatNo must be a marked seat that dealt in on a ron.');
+  }
+  if (winnerDeclaresDealIn && (kind !== 'ron' || !Array.isArray(resultInput.winners) ||
+    !resultInput.winners.every((w) => w.dealInSeatNo !== undefined && w.dealInSeatNo !== null &&
+      seatMap.get(w.dealInSeatNo)?.isRiichi))) {
     throw new Error('isRiichiDeclarationDealIn requires a marked ron deal-in seat.');
   }
 
@@ -974,6 +990,12 @@ export function calculateSettlement(
       }
       seenWinners.add(w.seatNo);
     }
+    const tenpaiMap = resolveTenpaiMap(handState, resultInput, playerCount);
+    for (const s of handState.seats) {
+      if (s.isRiichi && !tenpaiMap.get(s.seatNo)) {
+        throw new Error(`Riichi seat ${s.seatNo} is noten: manual adjudication required.`);
+      }
+    }
 
     // Nagashi mangan pays as tsumo mangan (basicPoints = 2000), without honba bonus.
     // Riichi pool policy (Deliverable 1): by default (config.nagashiCollectsRiichiPool === false),
@@ -1001,7 +1023,6 @@ export function calculateSettlement(
       nextRiichiPool = 0;
     }
 
-    const tenpaiMap = resolveTenpaiMap(handState, resultInput, playerCount);
     const dealerWonNagashi = seenWinners.has(handState.dealerSeatNo);
     const dealerTenpai = tenpaiMap.get(handState.dealerSeatNo) === true;
     const dealerRepeats = dealerWonNagashi || dealerTenpai;

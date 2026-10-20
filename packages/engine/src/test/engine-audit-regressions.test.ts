@@ -44,6 +44,35 @@ describe('deep engine audit regressions', () => {
     }, ENGINE_VERSION)), [0, 3000, -2000, -1000]);
   });
 
+  it('rejects malformed and contradictory declaration flags for one ron discard', () => {
+    const h = hand(4);
+    h.seats[2].isRiichi = true;
+    const winner: WinnerInput = { seatNo: 1, han: 2, fu: 30, dealInSeatNo: 2 };
+    const settleRon = (winners: WinnerInput[], seatNo?: number) => settle(
+      rules({ ...HOUSE_4P_V1 }), h,
+      { kind: 'ron', winners, ...(seatNo !== undefined ? { riichiDeclarationDealInSeatNo: seatNo } : {}) },
+      ENGINE_VERSION,
+    );
+    assert.throws(() => settleRon([{ ...winner, isRiichiDeclarationDealIn: false }], 2),
+      /Conflicting riichi declaration deal-in flags/);
+    assert.throws(() => settleRon([
+      { ...winner, isRiichiDeclarationDealIn: true },
+      { ...winner, seatNo: 3, isRiichiDeclarationDealIn: false },
+    ]), /Conflicting riichi declaration deal-in flags/);
+    assert.throws(() => settleRon([{ ...winner, isRiichiDeclarationDealIn: 'false' as unknown as boolean }]),
+      /isRiichiDeclarationDealIn must be a boolean/);
+    const invalid = hand(4);
+    invalid.seats[3].isRiichi = true; // A different marked seat cannot stand in for the actual discarder.
+    assert.throws(() => settle(rules({ ...HOUSE_4P_V1 }), invalid, {
+      kind: 'ron', winners: [{ ...winner, isRiichiDeclarationDealIn: true }],
+    }, ENGINE_VERSION), /marked ron deal-in seat/);
+    const explicit = settleRon([winner], 2);
+    const perWinner = settleRon([{ ...winner, isRiichiDeclarationDealIn: true }]);
+    assert.deepEqual(perWinner, explicit);
+    assert.deepEqual(net(explicit), [0, 2000, -2000, 0]);
+    assert.equal(explicit.perSeat[2].breakdown.some((entry) => entry.reason === 'riichi'), false);
+  });
+
   it('H2: ongoing match keeps its pool and has no terminal award', () => {
     const out = terminal({ points: [21000, 29000, 29000, 20000], riichiPool: 1000,
       requireTargetPoints: true, startingDealerSeatNo: 1 }, rules({ ...HOUSE_4P_V1 }));
@@ -111,6 +140,22 @@ describe('deep engine audit regressions', () => {
     /manual adjudication/);
   });
 
+  it('requires manual adjudication of a noten riichi mark on enabled nagashi draws too', () => {
+    const h = hand(3);
+    h.seats[0].isRiichi = true;
+    const config = rules({ ...HOUSE_3P_V1, nagashiManganEnabled: true });
+    const winners = [{ seatNo: 1, han: 5, fu: 30 }];
+    assert.throws(() => settle(config, h, {
+      kind: 'nagashi_mangan', winners, tenpai: [false, true, false],
+    }, ENGINE_VERSION), /Riichi seat 0 is noten: manual adjudication required/);
+    const valid = settle(config, h, {
+      kind: 'nagashi_mangan', winners, tenpai: [true, true, false],
+    }, ENGINE_VERSION);
+    assert.deepEqual(net(valid), [-5000, 6000, -2000]);
+    assert.equal(valid.nextHand.riichiPool, 1000);
+    assert.equal(valid.nextHand.dealerSeatNo, 0);
+  });
+
   it('L8: negative fu is invalid even for yakuman', () => {
     assert.throws(() => settle(rules({ ...HOUSE_4P_V1 }), hand(4),
       { kind: 'ron', winners: [{ seatNo: 1, dealInSeatNo: 0, han: 1, fu: -1, yakumanCount: 1 }] },
@@ -133,6 +178,7 @@ describe('deep engine audit regressions', () => {
     const h = hand(4);
     h.riichiPool = 1000;
     h.seats[2].isRiichi = true;
+    h.seats[2].isTenpai = true;
     const result = { kind: 'nagashi_mangan' as const, winners: [{ seatNo: 1, han: 5, fu: 30 }] };
     assert.throws(() => settle(rules({ ...HOUSE_4P_V1 }), h, result, ENGINE_VERSION),
       /Automatic nagashi mangan is disabled/);

@@ -158,6 +158,36 @@ describe('seeded hand settlement properties', () => {
               s.breakdown.some((entry) => entry.reason === reason && entry.amount > 0)),
             'at least one winner must gain positive hand-payment points, irrespective of riichi/pool');
           }
+          if (result.kind === 'ron') {
+            const discarder = result.winners[0].dealInSeatNo!;
+            if (hand.seats.some((seat) => seat.seatNo === discarder && seat.isRiichi)) {
+              const claimed = calculateSettlement(rules, hand, {
+                ...result, riichiDeclarationDealInSeatNo: discarder,
+              }, ENGINE_VERSION);
+              const winnerClaimed = calculateSettlement(rules, hand, {
+                kind: 'ron', winners: result.winners.map((w) => ({
+                  ...w, isRiichiDeclarationDealIn: true,
+                })),
+              }, ENGINE_VERSION);
+              const ordinary = calculateSettlement(rules, hand, {
+                kind: 'ron', winners: result.winners,
+              }, ENGINE_VERSION);
+              const nearestWinner = [...result.winners].sort((a, b) =>
+                (a.seatNo - discarder + config.playerCount) % config.playerCount -
+                (b.seatNo - discarder + config.playerCount) % config.playerCount)[0].seatNo;
+              assert.deepEqual(claimed, winnerClaimed, 'both declaration inputs must settle identically');
+              assert.equal(claimed.nextHand.riichiPool, ordinary.nextHand.riichiPool);
+              for (const payment of claimed.perSeat) {
+                const regular = ordinary.perSeat.find((seat) => seat.seatNo === payment.seatNo)!;
+                const expectedDifference = payment.seatNo === discarder ? 1000 :
+                  payment.seatNo === nearestWinner ? -1000 : 0;
+                assert.equal(payment.netPoints - regular.netPoints, expectedDifference);
+                assert.equal(payment.breakdown.some((entry) => entry.reason === 'riichi'),
+                  payment.seatNo !== discarder && hand.seats.some((seat) =>
+                    seat.seatNo === payment.seatNo && seat.isRiichi));
+              }
+            }
+          }
         } catch (error) {
           reportCase(seed, { template: config.templateKey, iteration: i, hand: {
             ...hand, markRevision: '0', resultRevision: '0',
