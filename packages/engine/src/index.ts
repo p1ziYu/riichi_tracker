@@ -409,11 +409,14 @@ export function normalizeRulesConfig(
     pickNumber(rawConfig, ['returnPoints', 'okaBasePoints', 'baseReturnPoints']) ?? base.returnPoints;
   const targetPoints = pickNumber(rawConfig, ['targetPoints', 'goalPoints']) ?? returnPoints;
 
-  if (!Number.isInteger(startingPoints) || startingPoints % 100 !== 0) {
-    throw new Error(`Invalid startingPoints: ${startingPoints}. Must be an integer multiple of 100.`);
+  if (!Number.isInteger(startingPoints) || startingPoints <= 0 || startingPoints % 100 !== 0) {
+    throw new Error(`Invalid startingPoints: ${startingPoints}. Must be a positive integer multiple of 100.`);
   }
-  if (!Number.isInteger(returnPoints) || returnPoints % 100 !== 0) {
-    throw new Error(`Invalid returnPoints: ${returnPoints}. Must be an integer multiple of 100.`);
+  if (!Number.isInteger(returnPoints) || returnPoints <= 0 || returnPoints % 100 !== 0) {
+    throw new Error(`Invalid returnPoints: ${returnPoints}. Must be a positive integer multiple of 100.`);
+  }
+  if (!Number.isInteger(targetPoints) || targetPoints <= 0 || targetPoints % 100 !== 0) {
+    throw new Error(`Invalid targetPoints: ${targetPoints}. Must be a positive integer multiple of 100.`);
   }
 
   let uma: number[] = [...base.uma];
@@ -431,9 +434,9 @@ export function normalizeRulesConfig(
     }
     uma = (rawConfig.umaTenths as number[]).map((t) => t / 10);
   }
-  const umaTenthsSum = uma.reduce((acc, v) => acc + Math.round(v * 10), 0);
-  if (umaTenthsSum !== 0) {
-    throw new Error(`Invalid uma: sum of uma must be 0, got ${umaTenthsSum / 10}.`);
+  if (uma.some((v) => !Number.isInteger(v * 10)) ||
+    uma.reduce((acc, v) => acc + Math.round(v * 10), 0) !== 0) {
+    throw new Error('Invalid uma: values must be in tenths and sum to 0.');
   }
 
   const computedOka = ((returnPoints - startingPoints) * playerCount) / 1000;

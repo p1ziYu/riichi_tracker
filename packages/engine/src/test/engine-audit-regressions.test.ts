@@ -92,6 +92,18 @@ describe('deep engine audit regressions', () => {
     assert.throws(() => normalizeRulesConfig({ templateKey: 'house_4p_v1', playerCount: 3 }), /Seat count mismatch/);
   });
 
+  it('validates canonical point and uma constraints before settlement', () => {
+    for (const config of [
+      { startingPoints: 0 },
+      { returnPoints: -100 },
+      { targetPoints: 25950 },
+      { uma: [10.01, 0, -5, -5.01] },
+    ]) {
+      assert.throws(() => normalizeRulesConfig({ ...HOUSE_4P_V1, ...config }), /Invalid/);
+    }
+    assert.equal(normalizeRulesConfig({ ...HOUSE_4P_V1, doubleYakuman: true }).doubleYakuman, true);
+  });
+
   it('M4: non-divisible four-player noten totals fail at normalization, never substitute another total', () => {
     assert.throws(() => normalizeRulesConfig({ ...HOUSE_4P_V1, notenPenaltyTotal: 2000 }), /notenPenaltyTotal/);
     for (const tenpai of [[true, false, false, false], [true, true, true, false]]) {
