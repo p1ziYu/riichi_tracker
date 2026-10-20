@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   calculateSettlement,
   calculateTerminalSettlement,
+  isAutomaticMatchEnd,
   normalizeRulesConfig,
   type EngineRulesConfig,
   type HandState,
@@ -10,6 +11,7 @@ import {
   type WinnerInput,
 } from '@riichi/engine';
 import type { FastifyInstance } from 'fastify';
+import type { PoolClient } from 'pg';
 import { requirePrincipal } from '../auth.js';
 import { pool } from '../db.js';
 import { broadcastMatchEvent } from '../ws.js';
@@ -40,6 +42,15 @@ const EFFECTIVE_WIN_REASONS: Record<string, true> = {
 };
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SOUTH4_COMPLETION_SQL = `
+  SELECT h.state = 'settled' AND h.round_wind = 'S' AND h.round_number = 4
+    AND hr.calculation->'nextHand'->>'roundWind' = 'W'
+    AND hr.calculation->'nextHand'->>'roundNumber' = '1' AS complete
+  FROM app.hands h
+  LEFT JOIN app.hand_results hr ON hr.hand_id = h.id AND hr.superseded_at IS NULL
+  WHERE h.match_id = $1
+  ORDER BY h.hand_no DESC LIMIT 1`;
+
 
 function resolveClientEventUuid(rawClientEventId: string): string {
   const trimmed = rawClientEventId.trim();
@@ -141,6 +152,43 @@ function validateAndNormalizeResultInput(
     }
   }
 
+  let nagashiEligibility: ResultInput['nagashiEligibility'];
+  if (kind === 'nagashi_mangan') {
+    const attestations = rawObj.nagashiEligibility;
+    if (!Array.isArray(attestations) || attestations.length !== rawWinners.length) {
+      throw new ResultValidationError('invalid_nagashi_eligibility', 'Each nagashi winner requires a complete discard history');
+    }
+    const attestedSeats = new Set<number>();
+    nagashiEligibility = attestations.map((attestation) => {
+      if (!attestation || typeof attestation !== 'object' || Array.isArray(attestation)) {
+        throw new ResultValidationError('invalid_nagashi_eligibility', 'Invalid nagashi discard history');
+      }
+      const record = attestation as Record<string, unknown>;
+      if (Object.keys(record).some((key) => key !== 'seatNo' && key !== 'discards') ||
+          typeof record.seatNo !== 'number' || !Number.isInteger(record.seatNo) ||
+          record.seatNo < 0 || record.seatNo >= playerCount ||
+          attestedSeats.has(record.seatNo) || !Array.isArray(record.discards) || record.discards.length === 0) {
+        throw new ResultValidationError('invalid_nagashi_eligibility', 'Invalid nagashi discard history');
+      }
+      attestedSeats.add(record.seatNo);
+      const discards = record.discards.map((discard: unknown) => {
+        if (!discard || typeof discard !== 'object' || Array.isArray(discard)) {
+          throw new ResultValidationError('invalid_nagashi_eligibility', 'Invalid nagashi discard');
+        }
+        const tile = discard as Record<string, unknown>;
+        if (Object.keys(tile).some((key) => key !== 'tile' && key !== 'called') ||
+            typeof tile.tile !== 'string' || !/^(?:[1-9][mps]|[1-7]z)$/.test(tile.tile) ||
+            tile.called !== false || !/^(?:[19][mps]|[1-7]z)$/.test(tile.tile)) {
+          throw new ResultValidationError('invalid_nagashi_eligibility', 'Nagashi requires only uncalled terminal or honor discards');
+        }
+        return { tile: tile.tile, called: false };
+      });
+      return { seatNo: record.seatNo, discards };
+    });
+  } else if (rawObj.nagashiEligibility !== undefined) {
+    throw new ResultValidationError('invalid_nagashi_eligibility', 'Nagashi eligibility is only allowed for nagashi_mangan');
+  }
+
   const seenWinnerSeats: Record<number, true> = {};
   let sharedDealInSeatNo: number | null = null;
   const winners: WinnerInput[] = [];
@@ -162,6 +210,13 @@ function validateAndNormalizeResultInput(
       throw new ResultValidationError('duplicate_winner_seat', 'Duplicate winner seatNo');
     }
     seenWinnerSeats[w.seatNo] = true;
+
+    if (kind === 'nagashi_mangan' &&
+        (Object.keys(w).some((key) => key !== 'seatNo' && key !== 'han' && key !== 'fu') ||
+          (w.han !== undefined && w.han !== 5) || (w.fu !== undefined && w.fu !== 30) ||
+          !nagashiEligibility?.some((entry) => entry.seatNo === w.seatNo))) {
+      throw new ResultValidationError('invalid_nagashi_eligibility', 'Nagashi winner must have an attested history and only standard mangan han/fu');
+    }
 
     let yakumanCount: number | undefined;
     if (w.yakumanCount !== undefined && w.yakumanCount !== null) {
@@ -209,19 +264,6 @@ function validateAndNormalizeResultInput(
       ) {
         throw new ResultValidationError('invalid_fu', 'Winner fu must be an integer between 20 and 140');
       } else {
-        fu = w.fu;
-      }
-    } else if (kind === 'nagashi_mangan') {
-      if (w.han !== undefined && w.han !== null) {
-        if (typeof w.han !== 'number' || !Number.isInteger(w.han) || w.han < 0 || w.han > 130) {
-          throw new ResultValidationError('invalid_han', 'Invalid han');
-        }
-        han = w.han;
-      }
-      if (w.fu !== undefined && w.fu !== null) {
-        if (typeof w.fu !== 'number' || !Number.isInteger(w.fu) || w.fu < 20 || w.fu > 140) {
-          throw new ResultValidationError('invalid_fu', 'Invalid fu');
-        }
         fu = w.fu;
       }
     }
@@ -368,7 +410,8 @@ function validateAndNormalizeResultInput(
     manualPayments = {};
     for (const [k, v] of Object.entries(rawObj.manualPayments as Record<string, unknown>)) {
       const seat = Number(k);
-      if (!Number.isInteger(seat) || seat < 0 || seat >= playerCount || typeof v !== 'number' || !Number.isInteger(v)) {
+      if (!Number.isInteger(seat) || seat < 0 || seat >= playerCount ||
+          typeof v !== 'number' || !Number.isSafeInteger(v) || Math.abs(v) > 2_147_483_647) {
         throw new ResultValidationError('invalid_manual_payments', 'Invalid manualPayments entry');
       }
       manualPayments[seat] = v;
@@ -381,8 +424,159 @@ function validateAndNormalizeResultInput(
     tenpai,
     chomboRole,
     riichiDeclarationDealInSeatNo,
+    ...(nagashiEligibility !== undefined ? { nagashiEligibility } : {}),
     manualPayments,
   };
+}
+
+interface ProvisionalRanking {
+  rank: number;
+  seatNo: number;
+  principalId: string | null;
+  rawPoints: number;
+  points: number;
+  finalPoints: number;
+}
+
+// Runs with the match row locked; the caller commits and publishes after this returns.
+async function finishMatchTransaction(
+  client: PoolClient,
+  matchId: string,
+  actorPrincipalId: string,
+  matchVersion: number,
+  rules: EngineRulesConfig,
+): Promise<{ provisionalRankings: ProvisionalRanking[] }> {
+
+      // Query current balances and seat principals
+      const accRes = await client.query<{
+        id: string;
+        kind: string;
+        seat_no: number | null;
+        balance: number;
+        principal_id: string | null;
+      }>(
+        `SELECT
+           a.id,
+           a.kind,
+           a.seat_no,
+           (a.opening_balance + COALESCE(SUM(e.amount), 0))::int AS balance,
+           mm.principal_id
+         FROM app.score_accounts a
+         LEFT JOIN app.score_entries e ON e.account_id = a.id
+         LEFT JOIN app.seat_assignments sa
+           ON sa.match_id = a.match_id AND sa.seat_no = a.seat_no AND sa.end_hand_no IS NULL
+         LEFT JOIN app.match_members mm
+           ON mm.match_id = sa.match_id AND mm.id = sa.member_id
+         WHERE a.match_id = $1
+         GROUP BY a.id, a.kind, a.seat_no, a.opening_balance, mm.principal_id
+         ORDER BY a.seat_no ASC NULLS LAST`,
+        [matchId],
+      );
+
+      const seatAccounts: {
+        accountId: string;
+        seatNo: number;
+        rawPoints: number;
+        principalId: string | null;
+      }[] = [];
+      let riichiPoolAccount: { accountId: string; balance: number } | null = null;
+
+      for (const r of accRes.rows) {
+        if (r.kind === 'seat' && r.seat_no !== null) {
+          seatAccounts.push({
+            accountId: r.id,
+            seatNo: r.seat_no,
+            rawPoints: r.balance,
+            principalId: r.principal_id,
+          });
+        } else if (r.kind === 'riichi_pool') {
+          riichiPoolAccount = { accountId: r.id, balance: r.balance };
+        }
+      }
+
+      const residualPool = riichiPoolAccount?.balance ?? 0;
+
+      // Rank by raw points to identify the recipient only when the rules award the pool.
+      const sortedByRaw = [...seatAccounts].sort((a, b) => {
+        if (b.rawPoints !== a.rawPoints) return b.rawPoints - a.rawPoints;
+        return a.seatNo - b.seatNo;
+      });
+
+      const allocatesPool = rules.terminalRiichiPoolPolicy === 'first';
+      const topSeatNo = allocatesPool ? sortedByRaw[0].seatNo : null;
+      const topSeatAccountId = allocatesPool ? sortedByRaw[0].accountId : null;
+
+      // The unallocated policy leaves the deposits in the pool account and excludes them from rankings.
+      const withFinalPoints = seatAccounts.map((s) => ({
+        ...s,
+        finalPoints: s.rawPoints + (s.seatNo === topSeatNo ? residualPool : 0),
+      }));
+      const finalSorted = [...withFinalPoints].sort((a, b) => {
+        if (b.finalPoints !== a.finalPoints) return b.finalPoints - a.finalPoints;
+        return a.seatNo - b.seatNo;
+      });
+
+      let sharedRank = 1;
+      const provisionalRankings = finalSorted.map((s, idx) => {
+        if (idx > 0 && s.finalPoints !== finalSorted[idx - 1].finalPoints) sharedRank = idx + 1;
+        return {
+          rank: rules.tiedUmaPolicy === 'split' ? sharedRank : idx + 1,
+          seatNo: s.seatNo,
+          principalId: s.principalId,
+          rawPoints: s.rawPoints,
+          points: s.finalPoints,
+          finalPoints: s.finalPoints,
+        };
+      });
+
+      const newSeq = matchVersion + 1;
+      const reqHash = createHash('sha256').update(`match_finished:${matchId}`).digest('hex');
+      const evRes = await client.query<{ id: string }>(
+        `INSERT INTO app.match_events (
+           match_id, seq, hand_id, actor_principal_id, client_event_id, request_hash, type, payload
+         )
+         VALUES ($1, $2, NULL, $3, $4, $5, 'match_finished', $6::jsonb)
+         RETURNING id`,
+        [
+          matchId,
+          newSeq,
+          actorPrincipalId,
+          randomUUID(),
+          reqHash,
+          JSON.stringify({
+            unclaimedRiichiPoints: residualPool,
+            poolRecipientSeatNo: topSeatNo,
+            provisionalRankings,
+          }),
+        ],
+      );
+      const eventId = evRes.rows[0].id;
+
+      // Under the first-place policy, transfer the residual pool to the leader.
+      if (residualPool > 0 && riichiPoolAccount && topSeatAccountId !== null) {
+        await client.query(
+          `INSERT INTO app.score_entries (match_id, event_id, account_id, amount, reason)
+           VALUES ($1, $2, $3, $4, 'terminal_riichi_pool_out'),
+                  ($1, $2, $5, $6, 'terminal_riichi_pool')`,
+          [matchId, eventId, riichiPoolAccount.accountId, -residualPool, topSeatAccountId, residualPool],
+        );
+      }
+
+      await client.query(
+        `UPDATE app.matches
+         SET state = 'finished',
+             ended_at = now(),
+             version = $1
+         WHERE id = $2`,
+        [newSeq, matchId],
+      );
+
+      await client.query(
+        `INSERT INTO app.outbox_messages (event_id, topic, payload, published_at)
+         VALUES ($1, 'match_events', $2::jsonb, now())`,
+        [eventId, JSON.stringify({ type: 'match_finished', matchId, finished: true, provisionalRankings })],
+      );
+      return { provisionalRankings };
 }
 
 export function registerHandsRoutes(app: FastifyInstance): void {
@@ -418,7 +612,9 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         state: string;
         version: string;
         current_hand_id: string | null;
-      }>(`SELECT id, state, version, current_hand_id FROM app.matches WHERE id = $1 FOR UPDATE`, [matchId]);
+        player_count: number;
+        rules_snapshot: Record<string, unknown>;
+      }>(`SELECT id, state, version, current_hand_id, player_count, rules_snapshot FROM app.matches WHERE id = $1 FOR UPDATE`, [matchId]);
       const match = mRes.rows[0];
       if (!match) {
         await client.query('ROLLBACK');
@@ -471,6 +667,9 @@ export function registerHandsRoutes(app: FastifyInstance): void {
       // Determine next hand parameters from previous settled hand (if any)
       const prevHandRes = await client.query<{
         hand_no: number;
+        state: string;
+        round_wind: string;
+        round_number: number;
         calculation: {
           nextHand?: {
             roundWind: string;
@@ -481,7 +680,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
           };
         } | null;
       }>(
-        `SELECT h.hand_no, hr.calculation
+        `SELECT h.hand_no, h.state, h.round_wind, h.round_number, hr.calculation
          FROM app.hands h
          LEFT JOIN app.hand_results hr ON hr.hand_id = h.id AND hr.superseded_at IS NULL
          WHERE h.match_id = $1
@@ -508,6 +707,13 @@ export function registerHandsRoutes(app: FastifyInstance): void {
           honba = nh.honba;
           riichiPool = nh.riichiPool;
         }
+      }
+      if (normalizeRulesConfig(prepareEngineRulesConfig(match.rules_snapshot), match.player_count)
+        .fixedSouth4EndPolicy === 'completed_south_4' &&
+          prev?.state === 'settled' && prev.round_wind === 'S' && prev.round_number === 4 &&
+          prev.calculation?.nextHand?.roundWind === 'W' && prev.calculation.nextHand.roundNumber === 1) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({ error: 'final_round_complete', message: 'South 4 is complete; finish the match' });
       }
 
       // Also check actual riichi_pool account balance in score_accounts
@@ -614,8 +820,8 @@ export function registerHandsRoutes(app: FastifyInstance): void {
       const parsedExp = Number(expectedMarkRevision);
       if (
         (typeof expectedMarkRevision !== 'number' && typeof expectedMarkRevision !== 'string') ||
-        String(expectedMarkRevision).trim() === '' ||
-        !Number.isInteger(parsedExp) ||
+        (typeof expectedMarkRevision === 'string' && !/^\d+$/.test(expectedMarkRevision)) ||
+        !Number.isSafeInteger(parsedExp) ||
         parsedExp < 0
       ) {
         return reply.code(400).send({
@@ -952,8 +1158,8 @@ export function registerHandsRoutes(app: FastifyInstance): void {
     }
     if (
       (typeof confirmedMarkRevision !== 'number' && typeof confirmedMarkRevision !== 'string') ||
-      String(confirmedMarkRevision).trim() === '' ||
-      !Number.isInteger(Number(confirmedMarkRevision)) ||
+      (typeof confirmedMarkRevision === 'string' && !/^\d+$/.test(confirmedMarkRevision)) ||
+      !Number.isSafeInteger(Number(confirmedMarkRevision)) ||
       Number(confirmedMarkRevision) < 0
     ) {
       return reply.code(400).send({
@@ -1424,6 +1630,19 @@ export function registerHandsRoutes(app: FastifyInstance): void {
           }),
         ],
       );
+      let automaticRankings: ProvisionalRanking[] | null = null;
+      if (norm.automaticEndPolicy === 'ranked_sanma' &&
+          isAutomaticMatchEnd(
+            effectiveRulesConfig,
+            handState,
+            effectiveInput,
+            output.nextHand,
+            snapshotState.seats,
+          )) {
+        const finished = await finishMatchTransaction(client, matchId, principal.id, newSeq, norm);
+        automaticRankings = finished.provisionalRankings;
+      }
+
 
       await client.query('COMMIT');
 
@@ -1433,6 +1652,14 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         perSeat: output.perSeat,
         nextHand: output.nextHand,
       });
+      if (automaticRankings) {
+        broadcastMatchEvent(matchId, 'match_finished', {
+          matchId,
+          finished: true,
+          provisionalRankings: automaticRankings,
+        });
+      }
+
 
       return {
         perSeat: output.perSeat,
@@ -1557,137 +1784,33 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         await client.query('ROLLBACK');
         return reply.code(409).send({ error: 'match_not_active', message: 'Match is not active' });
       }
+      const rules = normalizeRulesConfig(prepareEngineRulesConfig(match.rules_snapshot), match.player_count);
+      if (rules.fixedSouth4EndPolicy === 'completed_south_4') {
+        const completion = await client.query<{ complete: boolean | null }>(SOUTH4_COMPLETION_SQL, [matchId]);
+        if (completion.rows[0]?.complete !== true) {
+          await client.query('ROLLBACK');
+          return reply.code(409).send({
+            error: 'final_round_incomplete',
+            message: 'Finish requires a settled South 4 hand with the final dealer rotation complete',
+          });
+        }
+      }
+      if (rules.automaticEndPolicy === 'ranked_sanma') {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({
+          error: 'automatic_end_required',
+          message: 'This ruleset finishes automatically at its last-dealer or round-cap condition',
+        });
+      }
       // Void any unsettled open hand
       await client.query(
         `UPDATE app.hands SET state = 'voided' WHERE match_id = $1 AND state = 'open'`,
         [matchId],
       );
 
-      // Query current balances and seat principals
-      const accRes = await client.query<{
-        id: string;
-        kind: string;
-        seat_no: number | null;
-        balance: number;
-        principal_id: string | null;
-      }>(
-        `SELECT
-           a.id,
-           a.kind,
-           a.seat_no,
-           (a.opening_balance + COALESCE(SUM(e.amount), 0))::int AS balance,
-           mm.principal_id
-         FROM app.score_accounts a
-         LEFT JOIN app.score_entries e ON e.account_id = a.id
-         LEFT JOIN app.seat_assignments sa
-           ON sa.match_id = a.match_id AND sa.seat_no = a.seat_no AND sa.end_hand_no IS NULL
-         LEFT JOIN app.match_members mm
-           ON mm.match_id = sa.match_id AND mm.id = sa.member_id
-         WHERE a.match_id = $1
-         GROUP BY a.id, a.kind, a.seat_no, a.opening_balance, mm.principal_id
-         ORDER BY a.seat_no ASC NULLS LAST`,
-        [matchId],
+      const { provisionalRankings } = await finishMatchTransaction(
+        client, matchId, principal.id, Number(match.version), rules,
       );
-
-      const seatAccounts: {
-        accountId: string;
-        seatNo: number;
-        rawPoints: number;
-        principalId: string | null;
-      }[] = [];
-      let riichiPoolAccount: { accountId: string; balance: number } | null = null;
-
-      for (const r of accRes.rows) {
-        if (r.kind === 'seat' && r.seat_no !== null) {
-          seatAccounts.push({
-            accountId: r.id,
-            seatNo: r.seat_no,
-            rawPoints: r.balance,
-            principalId: r.principal_id,
-          });
-        } else if (r.kind === 'riichi_pool') {
-          riichiPoolAccount = { accountId: r.id, balance: r.balance };
-        }
-      }
-
-      const residualPool = riichiPoolAccount?.balance ?? 0;
-
-      // Provisional ranking by rawPoints descending, tie-breaking by fixed initial seat order (0, 1, 2, 3) per docs §4.5
-      const sortedByRaw = [...seatAccounts].sort((a, b) => {
-        if (b.rawPoints !== a.rawPoints) return b.rawPoints - a.rawPoints;
-        return a.seatNo - b.seatNo;
-      });
-
-      const topSeatNo = sortedByRaw[0].seatNo;
-      const topSeatAccountId = sortedByRaw[0].accountId;
-
-      // Apply residual riichiPool to provisional #1 and re-rank if needed
-      const withFinalPoints = seatAccounts.map((s) => ({
-        ...s,
-        finalPoints: s.rawPoints + (s.seatNo === topSeatNo ? residualPool : 0),
-      }));
-      const finalSorted = [...withFinalPoints].sort((a, b) => {
-        if (b.finalPoints !== a.finalPoints) return b.finalPoints - a.finalPoints;
-        return a.seatNo - b.seatNo;
-      });
-
-      const provisionalRankings = finalSorted.map((s, idx) => ({
-        rank: idx + 1,
-        seatNo: s.seatNo,
-        principalId: s.principalId,
-        rawPoints: s.rawPoints,
-        points: s.finalPoints,
-        finalPoints: s.finalPoints,
-      }));
-
-      const newSeq = Number(match.version) + 1;
-      const reqHash = createHash('sha256').update(`match_finished:${matchId}`).digest('hex');
-      const evRes = await client.query<{ id: string }>(
-        `INSERT INTO app.match_events (
-           match_id, seq, hand_id, actor_principal_id, client_event_id, request_hash, type, payload
-         )
-         VALUES ($1, $2, NULL, $3, $4, $5, 'match_finished', $6::jsonb)
-         RETURNING id`,
-        [
-          matchId,
-          newSeq,
-          principal.id,
-          randomUUID(),
-          reqHash,
-          JSON.stringify({
-            unclaimedRiichiPoints: residualPool,
-            poolRecipientSeatNo: topSeatNo,
-            provisionalRankings,
-          }),
-        ],
-      );
-      const eventId = evRes.rows[0].id;
-
-      // If residual riichiPool > 0, transfer it in score_entries to provisional #1
-      if (residualPool > 0 && riichiPoolAccount) {
-        await client.query(
-          `INSERT INTO app.score_entries (match_id, event_id, account_id, amount, reason)
-           VALUES ($1, $2, $3, $4, 'terminal_riichi_pool_out'),
-                  ($1, $2, $5, $6, 'terminal_riichi_pool')`,
-          [matchId, eventId, riichiPoolAccount.accountId, -residualPool, topSeatAccountId, residualPool],
-        );
-      }
-
-      await client.query(
-        `UPDATE app.matches
-         SET state = 'finished',
-             ended_at = now(),
-             version = $1
-         WHERE id = $2`,
-        [newSeq, matchId],
-      );
-
-      await client.query(
-        `INSERT INTO app.outbox_messages (event_id, topic, payload, published_at)
-         VALUES ($1, 'match_events', $2::jsonb, now())`,
-        [eventId, JSON.stringify({ type: 'match_finished', matchId, finished: true, provisionalRankings })],
-      );
-
       await client.query('COMMIT');
 
       broadcastMatchEvent(matchId, 'match_finished', {
@@ -1760,10 +1883,16 @@ export function registerHandsRoutes(app: FastifyInstance): void {
       }
     }
 
+    const fixedSouth4 = normalizeRulesConfig(prepareEngineRulesConfig(match.rules_snapshot), match.player_count)
+      .fixedSouth4EndPolicy === 'completed_south_4';
+    const completedSouth4 = fixedSouth4
+      ? (await pool.query<{ complete: boolean | null }>(SOUTH4_COMPLETION_SQL, [matchId])).rows[0]?.complete === true
+      : false;
+
     const terminal = calculateTerminalSettlement(
       seatEntries,
       { rulesHash: match.rules_hash, config: match.rules_snapshot },
-      { riichiPool: poolBalance, requireTargetPoints: false },
+      { riichiPool: poolBalance, requireTargetPoints: false, completedSouth4 },
     );
 
     return {
@@ -1889,13 +2018,19 @@ export function registerHandsRoutes(app: FastifyInstance): void {
       );
       const unclaimedRiichiPoints =
         finishEvRes.rows[0]?.payload?.unclaimedRiichiPoints ?? poolBalance;
+      const fixedSouth4 = normalizeRulesConfig(prepareEngineRulesConfig(match.rules_snapshot), match.player_count)
+        .fixedSouth4EndPolicy === 'completed_south_4';
+      const completedSouth4 = fixedSouth4
+        ? (await client.query<{ complete: boolean | null }>(SOUTH4_COMPLETION_SQL, [matchId])).rows[0]?.complete === true
+        : false;
+
 
       const terminal = calculateTerminalSettlement(
         seatEntries.map((s) => ({ seatNo: s.seatNo, points: s.points })),
         { rulesHash: match.rules_hash, config: match.rules_snapshot },
         // The owner has already finished this match explicitly; settle even if
         // its ruleset would otherwise require a target score to auto-finish.
-        { riichiPool: poolBalance, requireTargetPoints: false },
+        { riichiPool: poolBalance, requireTargetPoints: false, completedSouth4 },
       );
       if (!terminal.isGameEnd) {
         await client.query('ROLLBACK');

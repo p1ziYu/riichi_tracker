@@ -109,7 +109,12 @@ async function migrate(): Promise<void> {
     for (const m of migrations) {
       const appliedChecksum = applied.get(m.version);
       if (appliedChecksum !== undefined) {
-        if (appliedChecksum !== m.checksum) {
+        // 008's reference-only seed literals were corrected for fresh installs; 009
+        // upgrades databases that already applied the original 008. Accept only
+        // that exact historical checksum, not arbitrary edits to applied SQL.
+        const originalReferenceSeedChecksum = '4f1426907db9d02cef674c18ebdee1db1dd8aedfeed9905adae697fd24af25d0';
+        if (appliedChecksum !== m.checksum &&
+          !(m.version === '008' && appliedChecksum === originalReferenceSeedChecksum)) {
           throw new Error(`migration ${m.file} was modified after being applied (checksum mismatch)`);
         }
         continue;

@@ -51,11 +51,19 @@ export async function buildApp() {
   });
 
   app.setErrorHandler((err: Error & { statusCode?: number; code?: string }, _req, reply) => {
-    if (
-      err instanceof SyntaxError ||
-      err.statusCode === 400 ||
-      err.code?.startsWith('FST_ERR_CTP_')
-    ) {
+    if (err.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
+      return reply.code(413).send({
+        error: 'payload_too_large',
+        message: 'Request body is too large',
+      });
+    }
+    if (err.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE') {
+      return reply.code(415).send({
+        error: 'unsupported_media_type',
+        message: 'Unsupported request content type',
+      });
+    }
+    if (err instanceof SyntaxError) {
       return reply.code(400).send({
         error: 'invalid_json',
         message: 'Malformed JSON request body',

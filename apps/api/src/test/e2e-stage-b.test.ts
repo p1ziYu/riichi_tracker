@@ -86,6 +86,22 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     });
     checkEq(inheritedAuthOrigin.status, 403, 'Prototype property names never pass the auth origin allowlist');
     checkEq(inheritedAuthOrigin.data.error, 'invalid_origin', 'Auth origin denial uses the trusted-origin error');
+    const oversizedBody = await fetch(`${baseUrl}/api/auth/sign-in/anonymous`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'http://127.0.0.1:5173' },
+      body: JSON.stringify({ excess: 'x'.repeat(1024 * 1024) }),
+    });
+    checkEq(oversizedBody.status, 413, 'Oversized JSON receives HTTP 413, not a malformed-JSON response');
+    checkEq((await oversizedBody.json() as { error: string }).error, 'payload_too_large',
+      'Oversized JSON receives a stable error without parser details');
+    const unsupportedBody = await fetch(`${baseUrl}/api/auth/sign-in/anonymous`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-unsupported', origin: 'http://127.0.0.1:5173' },
+      body: 'test',
+    });
+    checkEq(unsupportedBody.status, 415, 'Unsupported content type receives HTTP 415');
+    checkEq((await unsupportedBody.json() as { error: string }).error, 'unsupported_media_type',
+      'Unsupported content type receives a stable error without parser details');
 
     // 0. Unauthenticated /api/me must return 401
     const unauthMe = await requestJson('/api/me');
@@ -306,6 +322,13 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     const forbiddenView = await requestJson(`/api/matches/${matchId}`, { cookie: acct2.cookie });
     checkEq(forbiddenView.status, 403, 'Non-member GET /api/matches/:id returns 403');
 
+    const unticketedWs = new WebSocket(`${wsBaseUrl}/ws/matches/${matchId}`);
+    const unticketedClose = await new Promise<number>((resolve) => {
+      unticketedWs.addEventListener('error', () => {});
+      unticketedWs.addEventListener('close', (event) => resolve(event.code));
+    });
+    checkEq(unticketedClose, 1008, 'A WebSocket without a ticket closes with policy violation');
+
     // Connect WebSocket as owner to verify all real-time events
     const wsTicketRes = await requestJson<{ ticket: string; expiresAt: string }>(
       `/api/matches/${matchId}/ws-tickets`,
@@ -477,6 +500,29 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     checkEq(h1Start.data.hand.dealerSeatNo, 0, 'Hand 1 dealer is seat 0');
     checkEq(h1Start.data.hand.honba, 0, 'Hand 1 honba is 0');
     checkEq(h1Start.data.hand.riichiPool, 0, 'Hand 1 riichiPool is 0');
+    for (const revision of ['0x0', '9007199254740992']) {
+      const invalidMark = await requestJson<{ error: string }>(
+        `/api/matches/${matchId}/hands/${hand1Id}/marks`,
+        { method: 'POST', cookie: acct1.cookie, body: { seatNo: 0, riichi: true, expectedMarkRevision: revision } },
+      );
+      checkEq(invalidMark.status, 400, `Non-decimal or unsafe mark revision ${revision} is rejected`);
+      checkEq(invalidMark.data.error, 'invalid_input', 'Invalid mark revision uses a stable error');
+      const invalidResult = await requestJson<{ error: string }>(
+        `/api/matches/${matchId}/hands/${hand1Id}/results`,
+        { method: 'POST', cookie: acct1.cookie, body: { resultInput: { kind: 'ryuukyoku' }, confirmedMarkRevision: revision } },
+      );
+      checkEq(invalidResult.status, 400, `Non-decimal or unsafe result revision ${revision} is rejected`);
+      checkEq(invalidResult.data.error, 'invalid_mark_revision', 'Invalid result revision uses a stable error');
+    }
+    const overflowingPayments = await requestJson<{ error: string }>(
+      `/api/matches/${matchId}/hands/${hand1Id}/preview`,
+      {
+        method: 'POST', cookie: acct1.cookie,
+        body: { resultInput: { kind: 'chombo', manualPayments: { 0: 2_147_483_648, 1: -2_147_483_648 } } },
+      },
+    );
+    checkEq(overflowingPayments.status, 400, 'Manual payments outside SQL ledger integer range fail before persistence');
+    checkEq(overflowingPayments.data.error, 'invalid_manual_payments', 'Oversized manual payments return a stable validation error');
 
     // Spectators can read the table but cannot change an open hand.
     const spectator = await registerEmailAccount(`spectator_${runId}@example.com`, '观战者');
@@ -1075,6 +1121,257 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     );
     checkEq(storedDouble.rows[0], { double_count: 1, multiplier: 2 },
       'Persisted result retains special count and total yakuman multiplier');
+    const startReadyMatch = async (versionId: string, participants: ClientSession[]) => {
+      const created = await requestJson<{ match: { id: string } }>('/api/matches', {
+        method: 'POST', cookie: acct1.cookie, body: { rulesetVersionId: versionId },
+      });
+      checkEq(created.status, 200, 'Reference match creates from its ruleset version');
+      const id = created.data.match.id;
+      for (let seatNo = 1; seatNo < participants.length; seatNo++) {
+        const join = await requestJson<{ joinRequestId: string }>(`/api/matches/${id}/join-requests`, {
+          method: 'POST', cookie: participants[seatNo].cookie, body: {},
+        });
+        checkEq(join.status, 200, 'Reference participant requests a seat');
+        const approved = await requestJson(`/api/matches/${id}/join-requests/${join.data.joinRequestId}/approve`, {
+          method: 'POST', cookie: acct1.cookie, body: { seatNo },
+        });
+        checkEq(approved.status, 200, 'Reference participant obtains a seat');
+      }
+      for (const participant of participants) {
+        const token = await requestJson<{ token: string }>(`/api/matches/${id}/check-in-tokens`, {
+          method: 'POST', cookie: acct1.cookie, body: {},
+        });
+        checkEq(token.status, 200, 'Reference check-in token issued');
+        const checked = await requestJson(`/api/matches/${id}/check-ins`, {
+          method: 'POST', cookie: participant.cookie, body: { token: token.data.token },
+        });
+        checkEq(checked.status, 200, 'Reference participant checked in');
+      }
+      const finalized = await requestJson(`/api/matches/${id}/seats/finalize`, {
+        method: 'POST', cookie: acct1.cookie, body: {},
+      });
+      checkEq(finalized.status, 200, 'Reference seats finalized');
+      return id;
+    };
+
+    const wrc = tplRes.data.find((template) => template.templateKey === 'reference_4p_competition');
+    const tenhou = tplRes.data.find((template) => template.templateKey === 'reference_3p_common');
+    check(Boolean(wrc && tenhou), 'Both reference rulesets are available');
+    // Guests are bound to one match; use reusable account principals for both reference fixtures.
+    const referenceThird = await registerEmailAccount(`reference3_${runId}@example.com`, '参考西家');
+    const referenceFourth = await registerEmailAccount(`reference4_${runId}@example.com`, '参考北家');
+    const wrcId = await startReadyMatch(wrc!.versionId, [acct1, acct2, referenceThird, referenceFourth]);
+    const houseLowId = await startReadyMatch(house4p!.versionId, [acct1, acct2, referenceThird, referenceFourth]);
+    for (const [id, start, other] of [[wrcId, 62500, -2500], [houseLowId, 500, 49500]] as const) {
+      const changed = await pool.query(
+        `UPDATE app.score_accounts SET opening_balance = CASE seat_no WHEN 0 THEN $2 WHEN 1 THEN $3 ELSE opening_balance END
+         WHERE match_id = $1 AND kind = 'seat' AND seat_no IN (0, 1)`,
+        [id, start, other],
+      );
+      checkEq(changed.rowCount, 2, 'Low-point fixture preserves the total opening balance');
+    }
+    const houseLowHand = await requestJson<{ hand: { id: string } }>(`/api/matches/${houseLowId}/hands`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq(houseLowHand.status, 200, 'House low-point hand opens');
+    const houseLowMark = await requestJson<{ error: string }>(
+      `/api/matches/${houseLowId}/hands/${houseLowHand.data.hand.id}/marks`,
+      { method: 'POST', cookie: acct1.cookie, body: { seatNo: 0, riichi: true } },
+    );
+    checkEq(houseLowMark.status, 400, 'House rules deny a 500-point riichi declaration');
+    checkEq(houseLowMark.data.error, 'insufficient_points_for_riichi', 'House low-point denial uses the admission guard');
+
+    const earlyFinish = await requestJson<{ error: string }>(`/api/matches/${wrcId}/finish`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq(earlyFinish.status, 409, 'WRC cannot finish before South 4 completes');
+    checkEq(earlyFinish.data.error, 'final_round_incomplete', 'WRC finish enforces fixed South 4');
+    for (let handIndex = 0; handIndex < 9; handIndex++) {
+      const opened = await requestJson<{ hand: { id: string; roundWind: string; roundNumber: number } }>(
+        `/api/matches/${wrcId}/hands`, { method: 'POST', cookie: acct1.cookie, body: {} },
+      );
+      checkEq(opened.status, 200, `WRC hand ${handIndex + 1} opens`);
+      checkEq([opened.data.hand.roundWind, opened.data.hand.roundNumber],
+        [handIndex < 4 ? 'E' : 'S', handIndex === 8 ? 4 : handIndex % 4 + 1], 'WRC hand follows East/South dealer rotation');
+      if (handIndex < 2) {
+        const mark = await requestJson<{ markRevision: number }>(
+          `/api/matches/${wrcId}/hands/${opened.data.hand.id}/marks`,
+          { method: 'POST', cookie: acct1.cookie, body: { seatNo: handIndex === 0 ? 1 : 0, riichi: true } },
+        );
+        checkEq(mark.status, 200, 'WRC low-point and normal riichi declarations are admitted');
+      }
+      const settled = await requestJson<{ nextHand: { roundWind: string; roundNumber: number } }>(
+        `/api/matches/${wrcId}/hands/${opened.data.hand.id}/results`,
+        { method: 'POST', cookie: acct1.cookie,
+          body: { resultInput: { kind: 'ryuukyoku', tenpai: handIndex === 0
+            ? [false, true, false, false] : handIndex === 1
+              ? [true, false, false, false] : handIndex === 7
+                ? [false, false, false, true] : [false, false, false, false] },
+            confirmedMarkRevision: handIndex < 2 ? 1 : 0 } },
+      );
+      checkEq(settled.status, 200, 'WRC draw settles');
+      if (handIndex === 0) {
+        const negative = await pool.query<{ balance: number }>(
+          `SELECT (a.opening_balance + COALESCE(SUM(e.amount), 0))::int AS balance
+           FROM app.score_accounts a LEFT JOIN app.score_entries e ON e.account_id = a.id
+           WHERE a.match_id = $1 AND a.kind = 'seat' AND a.seat_no = 1
+           GROUP BY a.id, a.opening_balance`, [wrcId],
+        );
+        checkEq(negative.rows[0].balance, -500, 'WRC riichi ledger permits negative points and match continuation');
+        const reset = await pool.query(
+          `UPDATE app.score_accounts SET opening_balance = CASE seat_no WHEN 0 THEN 30000 WHEN 1 THEN 30000 END
+           WHERE match_id = $1 AND kind = 'seat' AND seat_no IN (0, 1)`, [wrcId],
+        );
+        checkEq(reset.rowCount, 2, 'Balanced fixture reset prepares tied WRC final standings');
+      }
+      if (handIndex === 6) {
+        const premature = await requestJson<{ error: string }>(`/api/matches/${wrcId}/finish`, {
+          method: 'POST', cookie: acct1.cookie, body: {},
+        });
+        checkEq(premature.status, 409, 'WRC cannot finish during South 4 before dealer rotation');
+      }
+      if (handIndex === 7) {
+        checkEq(settled.data.nextHand.roundWind, 'S', 'S4 dealer tenpai repeats instead of agari-yame');
+        const repeatFinish = await requestJson<{ error: string }>(`/api/matches/${wrcId}/finish`, {
+          method: 'POST', cookie: acct1.cookie, body: {},
+        });
+        checkEq(repeatFinish.status, 409, 'WRC top dealer cannot finish during an S4 repeat');
+      }
+      if (handIndex === 8) checkEq(settled.data.nextHand.roundWind, 'W', 'South 4 concludes on West rotation');
+    }
+    const pastLast = await requestJson<{ error: string }>(`/api/matches/${wrcId}/hands`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq(pastLast.status, 409, 'WRC cannot open West 1 after South 4 completes');
+    const wrcFinish = await requestJson<{
+      provisionalRankings: { seatNo: number; rank: number; points: number }[];
+    }>(`/api/matches/${wrcId}/finish`, { method: 'POST', cookie: acct1.cookie, body: {} });
+    checkEq(wrcFinish.status, 200, 'WRC finish succeeds after completed South 4');
+    checkEq(wrcFinish.data.provisionalRankings.map((entry) => [entry.seatNo, entry.rank, entry.points]),
+      [[3, 1, 31000], [0, 2, 30000], [1, 2, 30000], [2, 4, 27000]],
+      'WRC leaves pool unallocated and exposes shared standings ranks');
+    const poolLeft = await pool.query<{ balance: number }>(
+      `SELECT (a.opening_balance + COALESCE(SUM(e.amount), 0))::int AS balance
+       FROM app.score_accounts a LEFT JOIN app.score_entries e ON e.account_id = a.id
+       WHERE a.match_id = $1 AND a.kind = 'riichi_pool' GROUP BY a.id, a.opening_balance`, [wrcId],
+    );
+    checkEq(poolLeft.rows[0].balance, 2000, 'Unallocated WRC pool remains on the ledger after finish');
+    const wrcPreview = await requestJson<{ terminalTenths: number[]; standings: { seatNo: number; umaTenths: number }[] }>(
+      `/api/matches/${wrcId}/settlement/preview`, { cookie: acct1.cookie },
+    );
+    checkEq(wrcPreview.status, 200, 'WRC terminal settlement previews');
+    checkEq(wrcPreview.data.standings.map((s) => [s.seatNo, s.umaTenths]),
+      [[3, 150], [0, 0], [1, 0], [2, -150]], 'WRC tied positions split their combined uma');
+    checkEq(wrcPreview.data.terminalTenths.reduce((sum, amount) => sum + amount, 0), -20,
+      'Unallocated 2,000-point pool is excluded from player terminal totals');
+    const wrcConfirm = await requestJson<{ settlementId: string }>(`/api/matches/${wrcId}/settlement/confirm`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq(wrcConfirm.status, 200, 'WRC terminal settlement confirms with a retained pool');
+
+    const tenhouId = await startReadyMatch(tenhou!.versionId, [acct1, acct2, doublePlayer]);
+    const nagashiHand = await requestJson<{ hand: { id: string } }>(`/api/matches/${tenhouId}/hands`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq(nagashiHand.status, 200, 'Tenhou nagashi hand opens');
+    const nagashiPath = `/api/matches/${tenhouId}/hands/${nagashiHand.data.hand.id}`;
+    const eligibleNagashi = {
+      kind: 'nagashi_mangan',
+      winners: [{ seatNo: 1, han: 5, fu: 30 }],
+      tenpai: [false, true, false],
+      nagashiEligibility: [{ seatNo: 1, discards: [{ tile: '1p', called: false }, { tile: '7z', called: false }] }],
+    };
+    for (const [variant, description] of [
+      [{ ...eligibleNagashi, nagashiEligibility: undefined }, 'missing attestation'],
+      [{ ...eligibleNagashi, nagashiEligibility: [{ seatNo: 1, discards: [{ tile: '2p', called: false }] }] }, 'middle tile'],
+      [{ ...eligibleNagashi, nagashiEligibility: [{ seatNo: 1, discards: [{ tile: '1p', called: true }] }] }, 'called discard'],
+      [{ ...eligibleNagashi, nagashiEligibility: [{ seatNo: 1, discards: [{ tile: '1p', called: false }], eligible: true }] }, 'forged eligibility flag'],
+      [{ ...eligibleNagashi, winners: [{ seatNo: 1, eligible: true }] }, 'forged winner field'],
+    ] as const) {
+      const invalid = await requestJson<{ error: string }>(`${nagashiPath}/preview`, {
+        method: 'POST', cookie: acct1.cookie, body: { resultInput: variant },
+      });
+      checkEq(invalid.status, 400, `Tenhou nagashi rejects ${description}`);
+      checkEq(invalid.data.error, 'invalid_nagashi_eligibility', 'Nagashi attestation reports a stable error');
+    }
+    const nagashiPreview = await requestJson<{ perSeat: { netPoints: number }[] }>(`${nagashiPath}/preview`, {
+      method: 'POST', cookie: acct1.cookie, body: { resultInput: eligibleNagashi },
+    });
+    checkEq(nagashiPreview.status, 200, 'Attested Tenhou nagashi previews');
+    checkEq(nagashiPreview.data.perSeat.map((seat) => seat.netPoints), [-4000, 6000, -2000],
+      'Nagashi replaces noten settlement with a single tsumo-mangan payment');
+    const nagashiResult = await requestJson<{ perSeat: { netPoints: number }[] }>(`${nagashiPath}/results`, {
+      method: 'POST', cookie: acct1.cookie, body: { resultInput: eligibleNagashi, confirmedMarkRevision: 0 },
+    });
+    checkEq(nagashiResult.status, 200, 'Attested Tenhou nagashi settles');
+    checkEq(nagashiResult.data.perSeat, nagashiPreview.data.perSeat, 'Nagashi settlement equals preview');
+    const savedNagashi = await pool.query<{ eligibility: unknown }>(
+      `SELECT input->'nagashiEligibility' AS eligibility FROM app.hand_results WHERE hand_id = $1`, [nagashiHand.data.hand.id],
+    );
+    checkEq(savedNagashi.rows[0].eligibility, eligibleNagashi.nagashiEligibility,
+      'Complete attested discard history persists with the result');
+
+    const tenhouCapId = await startReadyMatch(tenhou!.versionId, [acct1, acct2, doublePlayer]);
+    const manualTenhouFinish = await requestJson<{ error: string }>(`/api/matches/${tenhouCapId}/finish`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq(manualTenhouFinish.status, 409, 'Tenhou reference cannot bypass its automatic end by manual finish');
+    checkEq(manualTenhouFinish.data.error, 'automatic_end_required', 'Tenhou requires automatic round completion');
+    for (let handIndex = 0; handIndex < 9; handIndex++) {
+      const opened = await requestJson<{ hand: { id: string; roundWind: string; roundNumber: number } }>(
+        `/api/matches/${tenhouCapId}/hands`, { method: 'POST', cookie: acct1.cookie, body: {} },
+      );
+      checkEq(opened.status, 200, 'Tenhou cap fixture opens the next hand');
+      checkEq([opened.data.hand.roundWind, opened.data.hand.roundNumber],
+        [handIndex < 3 ? 'E' : handIndex < 6 ? 'S' : 'W', handIndex % 3 + 1],
+        'Tenhou rotates through East, South, and West three-player rounds');
+      const result = await requestJson<{ nextHand: { roundWind: string } }>(
+        `/api/matches/${tenhouCapId}/hands/${opened.data.hand.id}/results`,
+        { method: 'POST', cookie: acct1.cookie,
+          body: { resultInput: { kind: 'ryuukyoku', tenpai: [false, false, false] }, confirmedMarkRevision: 0 } },
+      );
+      checkEq(result.status, 200, 'Tenhou no-tenpai draw settles');
+      if (handIndex === 5) checkEq(result.data.nextHand.roundWind, 'W',
+        'Sanma extends to West when nobody reaches the configured candidate target');
+    }
+    const cappedMatch = await requestJson<{ match: { status: string } }>(
+      `/api/matches/${tenhouCapId}`, { cookie: acct1.cookie },
+    );
+    checkEq(cappedMatch.data.match.status, 'finished', 'Tenhou West 3 cap finishes automatically');
+    const cappedFinishEvent = await pool.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM app.match_events WHERE match_id = $1 AND type = 'match_finished'`,
+      [tenhouCapId],
+    );
+    checkEq(cappedFinishEvent.rows[0].count, 1, 'Automatic end emits exactly one match_finished event');
+    const beyondCap = await requestJson<{ error: string }>(`/api/matches/${tenhouCapId}/hands`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq(beyondCap.status, 409, 'No hand may open after the Tenhou West 3 cap');
+
+    const tenhouLastDealerId = await startReadyMatch(tenhou!.versionId, [acct1, acct2, doublePlayer]);
+    for (let handIndex = 0; handIndex < 6; handIndex++) {
+      const opened = await requestJson<{ hand: { id: string } }>(
+        `/api/matches/${tenhouLastDealerId}/hands`, { method: 'POST', cookie: acct1.cookie, body: {} },
+      );
+      checkEq(opened.status, 200, 'Tenhou last-dealer fixture opens a hand');
+      const result = await requestJson(`/api/matches/${tenhouLastDealerId}/hands/${opened.data.hand.id}/results`, {
+        method: 'POST', cookie: acct1.cookie,
+        body: { resultInput: { kind: 'ryuukyoku', tenpai: handIndex === 5
+          ? [false, false, true] : [false, false, false] }, confirmedMarkRevision: 0 },
+      });
+      checkEq(result.status, 200, 'Tenhou last-dealer fixture settles a draw');
+    }
+    const lastDealerMatch = await requestJson<{ match: { status: string } }>(
+      `/api/matches/${tenhouLastDealerId}`, { cookie: acct1.cookie },
+    );
+    checkEq(lastDealerMatch.data.match.status, 'finished',
+      'Tenhou automatically stops after a leading South 3 dealer is tenpai');
+    const lastDealerHands = await pool.query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM app.hands WHERE match_id = $1 AND state = 'settled'`,
+      [tenhouLastDealerId],
+    );
+    checkEq(lastDealerHands.rows[0].count, 6, 'Last-dealer stop does not open West 1');
+
     const expiryProbe = await registerEmailAccount(`expiry_${runId}@example.com`, '会话过期');
     const liveBearer = await requestJson('/api/me', { token: expiryProbe.token });
     checkEq(liveBearer.status, 200, 'Bearer-only session authenticates before expiration');
@@ -1084,6 +1381,16 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     checkEq(bearerOverCookie.status, 200, 'A valid bearer takes precedence over another account cookie');
     checkEq(bearerOverCookie.data.principal.id, acct2.principalId,
       'Combined credentials resolve to the bearer principal');
+    const invalidBearerWithCookie = await requestJson('/api/me', {
+      token: `${expiryProbe.token}tampered`, cookie: acct1.cookie,
+    });
+    checkEq(invalidBearerWithCookie.status, 401,
+      'A malformed bearer credential cannot fall back to another account cookie');
+    const emptyBearerWithCookie = await fetch(`${baseUrl}/api/me`, {
+      headers: { authorization: 'Bearer', cookie: acct1.cookie },
+    });
+    checkEq(emptyBearerWithCookie.status, 401,
+      'An empty bearer credential cannot fall back to another account cookie');
     const expiryUpdate = await pool.query(
       `UPDATE public."session" SET "expiresAt" = now() - interval '1 minute'
        WHERE "token" = $1`,
