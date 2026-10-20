@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ComponentType, ReactNode } from 'react';
+import QRCode from 'qrcode';
 import { Link, useParams } from 'react-router-dom';
 import type { ResultInput } from '@riichi/engine';
-import { ApiError, api, errorText, post } from './api';
+import { ApiError, api, errorText, post, webSocketUrl } from './api';
 import { pointText, winds } from './rules';
 
 type Revision = number | string;
@@ -12,6 +12,7 @@ type Seat = {
   displayName?: string;
   memberName?: string;
   memberId?: string;
+  status?: string;
   member?: { id?: string; displayName?: string; name?: string } | null;
   initialWind?: string;
 };
@@ -31,11 +32,11 @@ type CurrentHand = {
 type Score = { seatNo: number; points: number };
 type CheckIn = { seatNo?: number; memberId?: string; checkedIn?: boolean; isCheckedIn?: boolean; status?: string };
 type MatchState = {
-  match: { id: string; name?: string; status: string; playerCount?: number; handsPlayed?: number; version?: Revision; settlementConfirmed?: boolean };
+  match: { id: string; name?: string; ownerPrincipalId?: string; status: string; playerCount?: number; handsPlayed?: number; version?: Revision; settlementConfirmed?: boolean };
   seats: Seat[];
   currentHand: CurrentHand | null;
   scoreboard: Score[] | Record<string, number>;
-  checkedIn: CheckIn[] | boolean[] | string[] | Record<string, boolean>;
+  checkedIn: CheckIn[] | boolean[] | string[] | Record<string, boolean> | number;
 };
 type TokenResponse = { token: string; expiresAt?: string };
 type PaymentPreview = {
@@ -44,11 +45,14 @@ type PaymentPreview = {
 };
 type TerminalPreview = { terminalTenths: number[] };
 type DraftPreview = { handId: string; revision: string; input: string; output: PaymentPreview };
-type Connection = '连接中' | '实时同步中' | '正在重连';
+type Connection = '连接中' | '实时同步中' | '正在重连' | '连接已断开';
+const MAX_RECONNECT_FAILURES = 5;
+
 const matchStateLabels: Record<string, string> = {
   preparing: '等待座次确认',
   lobby: '等待座次确认',
   active: '牌局进行中',
+  in_progress: '牌局进行中',
   finished: '牌局已结束',
   abandoned: '牌局已取消',
 };
@@ -57,6 +61,11 @@ function seatLabel(seat: Seat): string {
   return seat.displayName ?? seat.memberName ?? seat.member?.displayName ?? seat.member?.name ?? `座位 ${seat.seatNo + 1}`;
 }
 function checkInLabel(checkedIn: MatchState['checkedIn'], seat: Seat): string {
+  // Real API contract: per-seat check-in state lives on each seat
+  // ('checked_in' | 'assigned' | 'empty'); `checkedIn` is only an aggregate count.
+  if (seat.status === 'checked_in') return '已签到';
+  if (seat.status === 'assigned') return '未签到';
+  if (seat.status === 'empty') return '空座';
   if (Array.isArray(checkedIn)) {
     const value = checkedIn[seat.seatNo];
     if (typeof value === 'boolean') return value ? '已签到' : '未签到';
@@ -95,7 +104,7 @@ function nextHandText(nextHand: PaymentPreview['nextHand']): string {
   return `${round} · ${dealer} · ${honba} · ${pool}`;
 }
 
-export default function Table({ Shell }: { Shell: ComponentType<{ children: ReactNode }> }) {
+export default function Table() {
   const { id } = useParams();
   const base = `/api/matches/${encodeURIComponent(id ?? '')}`;
   const requestRef = useRef(0);
@@ -105,7 +114,12 @@ export default function Table({ Shell }: { Shell: ComponentType<{ children: Reac
   const [busy, setBusy] = useState(false);
   const [connection, setConnection] = useState<Connection>('连接中');
   const [connectionError, setConnectionError] = useState('');
+  const [retryConnection, setRetryConnection] = useState(0);
+  const [identity, setIdentity] = useState<{ id: string; principalId: string } | null>(null);
   const [token, setToken] = useState<{ id: string; value: string; expiresAt?: string } | null>(null);
+  const [qrCode, setQrCode] = useState<{ url: string; image: string } | null>(null);
+  const [qrError, setQrError] = useState('');
+  const [copyStatus, setCopyStatus] = useState('');
   const [dialog, setDialog] = useState(false);
   const [kind, setKind] = useState<'ron' | 'tsumo' | 'ryuukyoku'>('ron');
   const [winner, setWinner] = useState(0);
@@ -133,61 +147,132 @@ export default function Table({ Shell }: { Shell: ComponentType<{ children: Reac
 
   useEffect(() => {
     if (!id) return;
-    setConnection('连接中');
-    setConnectionError('');
+    let alive = true;
+    setIdentity(null);
     setToken(null);
     setDialog(false);
     setDraftPreview(null);
     setTerminalPreview(null);
     setActionError('');
     void refresh().catch(() => {}); // The GET error is rendered from loadError.
+    void api<{ principal: { id: string } }>('/api/me')
+      .then(({ principal }) => { if (alive) setIdentity({ id, principalId: principal.id }); })
+      .catch((error: unknown) => { if (alive) setActionError(`读取身份失败：${errorText(error)}`); });
+    return () => { alive = false; ++requestRef.current; };
+  }, [id, refresh]);
+
+  useEffect(() => {
+    if (!id) return;
     let stopped = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    let timer: number | undefined;
+    let stableTimer: number | undefined;
     let socket: WebSocket | undefined;
-    const reconnect = () => {
-      if (!stopped) {
-        setConnection('正在重连');
-        timer = setTimeout(() => { void connect(); }, 2000);
+    let connecting = false;
+    setConnection('连接中');
+    setConnectionError('');
+
+    const available = () => navigator.onLine && document.visibilityState === 'visible';
+    const schedule = () => {
+      if (stopped || failures >= MAX_RECONNECT_FAILURES) return;
+      window.clearTimeout(timer);
+      timer = undefined;
+      if (!available()) {
+        setConnection('连接已断开');
+        return;
       }
+      setConnection('正在重连');
+      const ceiling = Math.min(30_000, 1000 * 2 ** Math.max(0, failures - 1));
+      timer = window.setTimeout(() => { timer = undefined; void connect(); }, ceiling * (0.75 + Math.random() * 0.25));
+    };
+    const failed = (message: string) => {
+      if (stopped) return;
+      setConnectionError(message);
+      failures += 1;
+      if (failures >= MAX_RECONNECT_FAILURES) setConnection('连接已断开');
+      else schedule();
     };
     const connect = async () => {
+      if (stopped || connecting || socket || failures >= MAX_RECONNECT_FAILURES || !available()) return;
+      connecting = true;
       try {
+        // Tickets are single-use: request one for every individual connection attempt.
         const { ticket } = await post<{ ticket: string }>(`${base}/ws-tickets`);
         if (stopped) return;
         if (!ticket) throw new Error('服务端未返回实时连接凭据');
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        socket = new WebSocket(`${protocol}//${window.location.host}/ws/matches/${encodeURIComponent(id)}?ticket=${encodeURIComponent(ticket)}`);
-        socket.onopen = () => {
+        if (!available()) { schedule(); return; }
+        const ws = new WebSocket(`${webSocketUrl(`/ws/matches/${encodeURIComponent(id)}`)}?ticket=${encodeURIComponent(ticket)}`);
+        socket = ws;
+        ws.onopen = () => {
+          if (stopped) return;
+          stableTimer = window.setTimeout(() => { failures = 0; }, 10_000);
           setConnection('实时同步中');
           setConnectionError('');
           void refresh().catch(() => {});
         };
-        socket.onmessage = () => { void refresh().catch(() => {}); };
-        socket.onerror = () => socket?.close();
-        socket.onclose = () => { socket = undefined; reconnect(); };
+        ws.onmessage = () => { if (!stopped) void refresh().catch(() => {}); };
+        ws.onerror = () => { setConnectionError('实时连接失败'); ws.close(); };
+        ws.onclose = () => {
+          if (socket !== ws) return;
+          window.clearTimeout(stableTimer);
+          socket = undefined;
+          failed('实时连接已断开');
+        };
       } catch (error) {
-        if (stopped) return;
-        setConnectionError(errorText(error));
-        reconnect();
+        failed(errorText(error));
+      } finally {
+        connecting = false;
+        if (!stopped && !socket && timer === undefined && failures < MAX_RECONNECT_FAILURES && available()) schedule();
       }
     };
-    void connect();
+    const resume = () => {
+      if (stopped || socket || failures >= MAX_RECONNECT_FAILURES) return;
+      if (!available()) {
+        window.clearTimeout(timer);
+        timer = undefined;
+        setConnection('连接已断开');
+      } else if (!connecting) schedule();
+    };
+    window.addEventListener('online', resume);
+    window.addEventListener('offline', resume);
+    document.addEventListener('visibilitychange', resume);
+    if (available()) void connect();
+    else setConnection('连接已断开');
     return () => {
       stopped = true;
-      ++requestRef.current;
-      clearTimeout(timer);
+      window.clearTimeout(timer);
+      window.clearTimeout(stableTimer);
+      window.removeEventListener('online', resume);
+      window.removeEventListener('offline', resume);
+      document.removeEventListener('visibilitychange', resume);
       if (socket) {
         socket.onclose = null;
         socket.close();
       }
     };
-  }, [id, base, refresh]);
+  }, [id, base, refresh, retryConnection]);
+
+  const checkInUrl = token && token.id === id
+    ? new URL(`/checkin/${encodeURIComponent(id!)}?token=${encodeURIComponent(token.value)}`, 'https://riichi.p1ziyu.com').href : null;
+  useEffect(() => {
+    if (!checkInUrl) return;
+    let alive = true;
+    setQrCode(null);
+    setQrError('');
+    setCopyStatus('');
+    void QRCode.toDataURL(checkInUrl, { errorCorrectionLevel: 'M', margin: 2, width: 256 })
+      .then((image) => { if (alive) setQrCode({ url: checkInUrl, image }); })
+      .catch((error: unknown) => { if (alive) setQrError(errorText(error)); });
+    return () => { alive = false; };
+  }, [checkInUrl]);
 
   const state = loaded && loaded.id === id ? loaded.value : null;
+  const isOwner = !!state?.match.ownerPrincipalId && identity !== null && identity.id === id && identity.principalId === state.match.ownerPrincipalId;
   const hand = state?.currentHand ?? null;
   const seats = useMemo(() => [...(state?.seats ?? [])].sort((a, b) => a.seatNo - b.seatNo), [state?.seats]);
   const handSeats = hand?.seats ?? [];
-  const activeHand = state?.match.status === 'active' && hand && (!hand.status || ['active', 'open', 'in_progress'].includes(hand.status));
+  const matchInProgress = state?.match.status === 'active' || state?.match.status === 'in_progress';
+  const activeHand = matchInProgress && hand && (!hand.status || ['active', 'open', 'in_progress'].includes(hand.status));
   const betweenHands = !hand || ['settled', 'completed', 'finished'].includes(hand.status ?? '');
   const input: ResultInput = kind === 'ryuukyoku'
     ? { kind, winners: [], tenpai: seats.map((seat) => !!tenpai[seat.seatNo]) }
@@ -226,7 +311,11 @@ export default function Table({ Shell }: { Shell: ComponentType<{ children: Reac
   const changeMark = (seat: HandSeat) => {
     if (!handId || typeof seat.isRiichi !== 'boolean') return;
     void action(async () => {
-      await post(`${base}/hands/${encodeURIComponent(handId)}/marks`, { seatNo: seat.seatNo, riichi: !seat.isRiichi });
+      await post(`${base}/hands/${encodeURIComponent(handId)}/marks`, {
+        seatNo: seat.seatNo,
+        riichi: !seat.isRiichi,
+        ...(hand?.markRevision != null ? { expectedMarkRevision: hand.markRevision } : {}),
+      });
       setDraftPreview(null);
       await refresh();
     });
@@ -278,38 +367,64 @@ export default function Table({ Shell }: { Shell: ComponentType<{ children: Reac
     const fromScore = Array.isArray(score) ? score.find((entry) => entry.seatNo === seat.seatNo)?.points : score?.[String(seat.seatNo)];
     return fromScore ?? handSeats.find((entry) => entry.seatNo === seat.seatNo)?.points ?? seat.points;
   };
+  const copyCheckIn = async () => {
+    if (!checkInUrl) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(checkInUrl);
+      } else {
+        const field = document.createElement('textarea');
+        field.value = checkInUrl;
+        field.style.position = 'fixed';
+        field.style.opacity = '0';
+        document.body.appendChild(field);
+        try {
+          field.select();
+          if (!document.execCommand('copy')) throw new Error('请长按签到链接复制');
+        } finally {
+          field.remove();
+        }
+      }
+      setCopyStatus('链接已复制');
+    } catch (error) {
+      setCopyStatus(`复制失败：${errorText(error)}`);
+    }
+  };
 
   const statusText = state ? (state.match.status ? matchStateLabels[state.match.status] ?? state.match.status : '牌桌状态未提供') : '读取牌桌状态中';
 
-  return <Shell><main className="page table-page">
+  return <main className="page table-page">
     <div className="table-heading"><div><p className="eyebrow">LIVE TABLE / 实时牌桌</p><h1>{state?.match.name ?? '牌桌'}</h1><p className="muted">{statusText} · <span role="status">{connection}</span></p></div><button type="button" onClick={() => void refresh().catch(() => {})} disabled={busy}>刷新牌桌</button></div>
-    {connectionError && <p className="notice invalid" role="status">实时连接：{connectionError}；正在重新连接。仍可手动刷新。</p>}
+    {(connectionError || connection === '连接已断开') && <div className="notice invalid table-connection" role="status">
+      实时连接：{connectionError || '当前离线或页面处于后台'}。{connection === '连接已断开' ? '实时同步已暂停，可手动刷新牌桌。' : '正在尝试重新连接。'}
+      {connection === '连接已断开' && <button type="button" onClick={() => setRetryConnection((count) => count + 1)}>重连</button>}
+    </div>}
     {loadError && loadError.id === id && <div className="notice invalid" role="alert">读取牌桌失败：{loadError.message}<button type="button" onClick={() => void refresh().catch(() => {})}>重试读取</button></div>}
     {actionError && <div className="notice invalid" role="alert">{actionError}</div>}
     {!state && loadError?.id !== id && <p className="notice" role="status">正在读取牌桌…</p>}
     {!state && loadError?.id === id && <Link className="button" to="/create">返回开桌</Link>}
     {state && <>
-      <section className="panel table-checkin"><div className="section-heading"><span>座次与签到</span><small>以服务端状态为准</small></div>
+      <section className={`panel table-checkin${isOwner && ['preparing', 'lobby'].includes(state.match.status) ? ' table-checkin-owner' : ''}`}><div className="section-heading"><span>座次与签到</span><small>以服务端状态为准</small></div>
         <div className="member-list">{seats.map((seat) => <div key={seat.seatNo}><span className="wind-badge">{winds[seat.seatNo]}</span><span>{seatLabel(seat)} · 座位 {seat.seatNo + 1}</span><small>{checkInLabel(state.checkedIn, seat)}</small></div>)}</div>
-        {['preparing', 'lobby'].includes(state.match.status) && <div className="table-controls"><button type="button" disabled={busy} onClick={() => void action(async () => {
+        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && <div className="table-controls"><button type="button" disabled={busy} onClick={() => void action(async () => {
           setToken(null);
           const result = await post<TokenResponse>(`${base}/check-in-tokens`, {});
           if (!result?.token) throw new Error('服务端未返回签到令牌');
           setToken({ id: id!, value: result.token, expiresAt: result.expiresAt });
         })}>生成签到链接</button><button type="button" className="primary" disabled={busy} onClick={() => void action(async () => { await post(`${base}/seats/finalize`, {}); await refresh(); })}>确认座次</button></div>}
-        {token && token.id === id && <p className="rule-detail">桌主签到链接：<Link to={`/checkin/${encodeURIComponent(id!)}?token=${encodeURIComponent(token.value)}`}>{`/checkin/${encodeURIComponent(id!)}?token=${encodeURIComponent(token.value)}`}</Link>{token.expiresAt && <small> · 截止 {token.expiresAt}</small>}</p>}
+        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && checkInUrl && <div className="table-invite"><div className="table-qr">{qrCode?.url === checkInUrl ? <img src={qrCode.image} width="256" height="256" alt="扫描二维码打开签到链接" /> : <span role="status">{qrError ? '二维码生成失败，请使用下方链接' : '正在生成签到二维码…'}</span>}</div><div className="table-invite-details"><p>桌主签到链接：</p><a href={checkInUrl}>{checkInUrl}</a>{token?.expiresAt && <small>截止 {token.expiresAt}</small>}<button type="button" onClick={() => void copyCheckIn()}>复制签到链接</button>{copyStatus && <small role="status">{copyStatus}</small>}</div></div>}
       </section>
       <div className="table-layout"><section className="felt" aria-label="牌桌座位"><div className="felt-lines" aria-hidden="true" /><div className="seat-grid">{seats.map((seat) => {
         const inHand = handSeats.find((entry) => entry.seatNo === seat.seatNo);
         const points = pointsFor(seat);
-        return <article className={`seat seat-${seat.seatNo}`} key={seat.seatNo}><div className="seat-top"><span className="wind-badge">{winds[seat.seatNo]}</span><span>{seatLabel(seat)}{hand?.dealerSeatNo === seat.seatNo && <em>庄家</em>}</span></div><strong>{typeof points === 'number' ? pointText(points) : '点数未提供'}</strong>{activeHand && inHand && <button type="button" className={inHand.isRiichi ? 'riichi marked' : 'riichi'} aria-pressed={!!inHand.isRiichi} disabled={busy || !handId || typeof inHand.isRiichi !== 'boolean' || (!inHand.isRiichi && typeof inHand.points === 'number' && inHand.points < 1000)} onClick={() => changeMark(inHand)}>{inHand.isRiichi ? '立直 · 已标记' : '标记立直'}</button>}</article>;
+        return <article className={`seat seat-${seat.seatNo}`} key={seat.seatNo}><div className="seat-top"><span className="wind-badge">{winds[seat.seatNo]}</span><span className="seat-name">{seatLabel(seat)}{hand?.dealerSeatNo === seat.seatNo && <em>庄家</em>}</span></div><strong>{typeof points === 'number' ? pointText(points) : '点数未提供'}</strong>{!hand && <small className="seat-status">{checkInLabel(state.checkedIn, seat)}</small>}{activeHand && inHand ? <button type="button" className={inHand.isRiichi ? 'riichi marked' : 'riichi'} aria-pressed={!!inHand.isRiichi} disabled={busy || !handId || typeof inHand.isRiichi !== 'boolean' || (!inHand.isRiichi && typeof inHand.points === 'number' && inHand.points < 1000)} onClick={() => changeMark(inHand)}>{inHand.isRiichi ? '立直 · 已标记' : '标记立直'}</button> : hand && inHand && <small className="seat-status">{inHand.isRiichi == null ? '立直状态未提供' : inHand.isRiichi ? '立直 · 已标记' : '未立直'}</small>}</article>;
       })}<div className="table-center">{hand ? <><span>{hand.roundWind && typeof hand.roundNumber === 'number' ? `${({ E: '东', S: '南', W: '西' } as const)[hand.roundWind]}${['一', '二', '三', '四'][hand.roundNumber - 1] ?? hand.roundNumber}局` : '当前局'}</span><b>{typeof hand.honba === 'number' ? `${hand.honba} 本场` : '本场未提供'}</b><small>{typeof hand.riichiPool === 'number' ? `供托 ${hand.riichiPool} 根` : '供托未提供'}</small></> : <span>{['preparing', 'lobby'].includes(state.match.status) ? '等待座次确认' : '待开下一局'}</span>}</div></div></section>
       <aside className="panel table-aside"><h2>牌局操作</h2><div className="aside-stat"><span>牌桌状态</span><b>{statusText}</b></div>{hand && <div className="aside-stat"><span>立直标记版本</span><b>{revision || '未提供'}</b></div>}
         <p className="note">立直标记同步至同桌，确认本局结果时才由服务端结算点数。{activeHand && !handId && '当前局标识未提供，无法操作本局。'}</p>
-        {state.match.status === 'active' && betweenHands && <button type="button" className="primary" disabled={busy} onClick={() => void action(async () => { await post(`${base}/hands`, {}); await refresh(); })}>新开一局</button>}
-        {state.match.status === 'active' && activeHand && <button type="button" className="primary" disabled={busy || !handId} onClick={() => { setActionError(''); setDraftPreview(null); setDialog(true); }}>录入本局结果 →</button>}
-        {state.match.status === 'active' && betweenHands && <button type="button" disabled={busy} onClick={() => void action(async () => { await post(`${base}/finish`, {}); await refresh(); setTerminalPreview(null); })}>终局</button>}
-        {state.match.status === 'finished' && <><button type="button" disabled={busy} onClick={fetchTerminalPreview}>预览终局成绩</button>{shownTerminalPreview && <><div className="payment-list">{seats.map((seat, index) => <div className="payment-row" key={seat.seatNo}><span>{winds[seat.seatNo]}家</span><strong>{(shownTerminalPreview.terminalTenths[index] / 10).toFixed(1)}</strong><small>{seatLabel(seat)} · 终局成绩</small></div>)}</div><button type="button" className="primary" disabled={busy || state.match.settlementConfirmed === true} onClick={() => void action(async () => { await post(`${base}/settlement/confirm`, {}); await refresh(); setTerminalPreview(null); })}>{state.match.settlementConfirmed ? '终局已确认' : '确认终局成绩'}</button></>}</>}
+        {matchInProgress && betweenHands && <button type="button" className="primary" disabled={busy} onClick={() => void action(async () => { await post(`${base}/hands`, {}); await refresh(); })}>新开一局</button>}
+        {matchInProgress && activeHand && <button type="button" className="primary" disabled={busy || !handId} onClick={() => { setActionError(''); setDraftPreview(null); setDialog(true); }}>录入本局结果 →</button>}
+        {isOwner && matchInProgress && betweenHands && <button type="button" disabled={busy} onClick={() => void action(async () => { await post(`${base}/finish`, {}); await refresh(); setTerminalPreview(null); })}>终局</button>}
+        {state.match.status === 'finished' && <><button type="button" disabled={busy} onClick={fetchTerminalPreview}>预览终局成绩</button>{shownTerminalPreview && <><div className="payment-list">{seats.map((seat, index) => <div className="payment-row" key={seat.seatNo}><span>{winds[seat.seatNo]}家</span><strong>{(shownTerminalPreview.terminalTenths[index] / 10).toFixed(1)}</strong><small>{seatLabel(seat)} · 终局成绩</small></div>)}</div>{isOwner && <button type="button" className="primary" disabled={busy || state.match.settlementConfirmed === true} onClick={() => void action(async () => { await post(`${base}/settlement/confirm`, {}); await refresh(); setTerminalPreview(null); })}>{state.match.settlementConfirmed ? '终局已确认' : '确认终局成绩'}</button>}</>}</>}
       </aside></div>
     </>}
     {dialog && hand && activeHand && <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setDialog(false); }}><section className="dialog panel" role="dialog" aria-modal="true" aria-label="录入结算"><div className="dialog-head"><div><p className="eyebrow">SETTLEMENT / 本局结算</p><h2>支付确认</h2></div><button type="button" className="close" aria-label="关闭" disabled={busy} onClick={() => setDialog(false)}>×</button></div><p className="muted">支付明细来自服务端；立直标记或输入变化后需重新预览。</p><div className="segmented" role="group" aria-label="结果类型">{(['ron', 'tsumo', 'ryuukyoku'] as const).map((value) => <button type="button" key={value} className={kind === value ? 'selected' : ''} onClick={() => { setKind(value); setActionError(''); }}>{({ ron: '荣和', tsumo: '自摸', ryuukyoku: '荒牌流局' })[value]}</button>)}</div>
@@ -319,5 +434,5 @@ export default function Table({ Shell }: { Shell: ComponentType<{ children: Reac
       {shownPreview && <><h3>逐座支付</h3><Payments output={shownPreview} /><p className="rule-detail">下一局：{nextHandText(shownPreview.nextHand)}</p></>}
       {actionError && <div className="notice invalid" role="alert">{actionError}</div>}
       <div className="dialog-actions"><button type="button" disabled={busy} onClick={() => setDialog(false)}>取消</button><button type="button" disabled={busy || invalid || !handId || revision === ''} onClick={previewHand}>服务端预览支付</button><button type="button" className="primary" disabled={busy || invalid || !shownPreview} onClick={submitHand}>确认并结算</button></div></section></div>}
-  </main></Shell>;
+  </main>;
 }

@@ -3,7 +3,7 @@ import type { HandState, ResultInput, RulesSnapshot } from '@riichi/engine';
 export type PlayerCount = 3 | 4;
 export interface TableRules {
   playerCount: PlayerCount;
-  startPoints: number;
+  startingPoints: number;
   returnPoints: number;
   uma: number[];
   ryuukyokuPoolTotal: number;
@@ -34,7 +34,7 @@ export function initialHand(rules: TableRules, handId = 'preview'): HandState {
     handId, roundWind: 'E', roundNumber: 1, dealerSeatNo: 0, honba: 0, riichiPool: 0,
     markRevision: 0n, resultRevision: 0n,
     seats: Array.from({ length: rules.playerCount }, (_, seatNo) => ({
-      seatNo, points: rules.startPoints, isRiichi: false, isTenpai: null,
+      seatNo, points: rules.startingPoints, isRiichi: false, isTenpai: null,
     })),
   };
 }
@@ -47,8 +47,8 @@ export function exampleResults(rules: TableRules): { title: string; input: Resul
   ];
 }
 export function rulesError(rules: TableRules): string | null {
-  const points = [rules.startPoints, rules.returnPoints, rules.endTarget, rules.ryuukyokuPoolTotal, rules.honbaPerPayer];
-  if (points.some((n) => !Number.isInteger(n) || n < 0 || n % 100 !== 0) || rules.startPoints < 1000) return '点数需为非负整百；起始点至少 1,000。';
+  const points = [rules.startingPoints, rules.returnPoints, rules.endTarget, rules.ryuukyokuPoolTotal, rules.honbaPerPayer];
+  if (points.some((n) => !Number.isInteger(n) || n < 0 || n % 100 !== 0) || rules.startingPoints < 1000) return '点数需为非负整百；起始点至少 1,000。';
   if (rules.uma.length !== rules.playerCount || rules.uma.some((n) => !Number.isInteger(n))) return '马点需为每座填写整数。';
   if (rules.maxRounds < (rules.roundLength === 'east' ? 4 : 8) || !Number.isInteger(rules.maxRounds)) return '延长上限不能短于所选场次。';
   if (rules.redFives < 0 || rules.redFives > (rules.playerCount === 3 ? 2 : 3) || !Number.isInteger(rules.redFives)) return '赤宝牌枚数超出该人数支持范围。';
@@ -56,5 +56,5 @@ export function rulesError(rules: TableRules): string | null {
   return null;
 }
 export function oka(rules: TableRules): number {
-  return (rules.returnPoints - rules.startPoints) * rules.playerCount / 1000 - rules.uma.reduce((a, b) => a + b, 0);
+  return (rules.returnPoints - rules.startingPoints) * rules.playerCount / 1000 - rules.uma.reduce((a, b) => a + b, 0);
 }
