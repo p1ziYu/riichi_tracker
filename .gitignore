@@ -8,3 +8,10 @@ dist/
 *.log
 .DS_Store
 infra/.env
+apps/api/.env
+apps/web/.env
+
+# secret guard: real env files never enter git
+**/.env
+**/.env.*
+!**/.env.example
