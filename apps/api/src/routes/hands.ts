@@ -1802,6 +1802,27 @@ export function registerHandsRoutes(app: FastifyInstance): void {
           message: 'This ruleset finishes automatically at its last-dealer or round-cap condition',
         });
       }
+      if (rules.fixedSouth4EndPolicy === 'target_or_bust') {
+        const balances = await client.query<{ max_points: number; min_points: number }>(
+          `SELECT MAX(balance)::int AS max_points, MIN(balance)::int AS min_points
+           FROM (
+             SELECT a.opening_balance + COALESCE(SUM(e.amount), 0) AS balance
+             FROM app.score_accounts a
+             LEFT JOIN app.score_entries e ON e.account_id = a.id
+             WHERE a.match_id = $1 AND a.kind = 'seat'
+             GROUP BY a.id, a.opening_balance
+           ) seats`,
+          [matchId],
+        );
+        const { max_points, min_points } = balances.rows[0];
+        if (max_points < rules.targetPoints && !(rules.bustEndsGame && min_points < 0)) {
+          await client.query('ROLLBACK');
+          return reply.code(409).send({
+            error: 'target_not_reached',
+            message: 'Finish requires a target score or a bust under these rules',
+          });
+        }
+      }
       // Void any unsettled open hand
       await client.query(
         `UPDATE app.hands SET state = 'voided' WHERE match_id = $1 AND state = 'open'`,
@@ -1892,7 +1913,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
     const terminal = calculateTerminalSettlement(
       seatEntries,
       { rulesHash: match.rules_hash, config: match.rules_snapshot },
-      { riichiPool: poolBalance, requireTargetPoints: false, completedSouth4 },
+      { riichiPool: poolBalance, requireTargetPoints: true, completedSouth4 },
     );
 
     return {
@@ -2028,9 +2049,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
       const terminal = calculateTerminalSettlement(
         seatEntries.map((s) => ({ seatNo: s.seatNo, points: s.points })),
         { rulesHash: match.rules_hash, config: match.rules_snapshot },
-        // The owner has already finished this match explicitly; settle even if
-        // its ruleset would otherwise require a target score to auto-finish.
-        { riichiPool: poolBalance, requireTargetPoints: false, completedSouth4 },
+        { riichiPool: poolBalance, requireTargetPoints: true, completedSouth4 },
       );
       if (!terminal.isGameEnd) {
         await client.query('ROLLBACK');

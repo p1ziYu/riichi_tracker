@@ -229,6 +229,80 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       method: 'POST', cookie: acct2.cookie, body: { rulesetVersionId: privateVersionId },
     });
     checkEq(outsiderUse.status, 403, 'Other accounts cannot create a match from private ruleset UUID');
+    const rulesOverride = {
+      honbaPerPayer: 200,
+      notenPenaltyTotal: 2400,
+      kiriageMangan: true,
+      targetPoints: 26000,
+      uma: [15, 5, -5, -15],
+      doubleYakuman: true,
+    };
+    for (const invalid of [
+      { rulesOverride: { kiriageMangan: 'true' } },
+      { rulesOverride: { targetPoints: 25950 } },
+      { rulesOverride: { honbaRon: 350 } },
+      { rulesOverride: { uma: [20, 10, -10, -10] } },
+      { rulesOverride: { doubleYakuman: true, playerCount: 3 } },
+    ]) {
+      const rejected = await requestJson<{ error: string; message: string }>('/api/matches', {
+        method: 'POST', cookie: acct1.cookie,
+        body: { rulesetVersionId: house4p!.versionId, ...invalid },
+      });
+      checkEq(rejected.status, 400, 'Invalid canonical rules override returns HTTP 400');
+      checkEq(rejected.data.error, 'invalid_rules_override', 'Override validation has a structured error');
+      check(Boolean(rejected.data.message), 'Override validation explains the invalid value');
+    }
+    const missingBase = await requestJson<{ error: string }>('/api/matches', {
+      method: 'POST', cookie: acct1.cookie, body: { rulesOverride },
+    });
+    checkEq(missingBase.status, 400, 'Rules override cannot be submitted without a selected version');
+    const outsiderOverride = await requestJson('/api/matches', {
+      method: 'POST', cookie: acct2.cookie,
+      body: { rulesetVersionId: privateVersionId, rulesOverride },
+    });
+    checkEq(outsiderOverride.status, 403, 'Override cannot bypass base ruleset ownership');
+    const overrideCreate = await requestJson<{ match: { id: string } }>('/api/matches', {
+      method: 'POST', cookie: acct1.cookie, body: { rulesetVersionId: house4p!.versionId, rulesOverride },
+    });
+    checkEq(overrideCreate.status, 200, 'Owner creates match with per-match rules override');
+    const overrideMatch = await pool.query<{
+      ruleset_version_id: string; rules_snapshot: Record<string, unknown>; rules_hash: string;
+      config: Record<string, unknown>; config_hash: string; scope: string; owner_principal_id: string;
+    }>(
+      `SELECT m.ruleset_version_id, m.rules_snapshot, m.rules_hash, v.config, v.config_hash,
+              t.scope, t.owner_principal_id
+       FROM app.matches m
+       JOIN app.ruleset_versions v ON v.id = m.ruleset_version_id
+       JOIN app.ruleset_templates t ON t.id = v.template_id
+       WHERE m.id = $1`,
+      [overrideCreate.data.match.id],
+    );
+    const overridden = overrideMatch.rows[0];
+    check(overridden.ruleset_version_id !== house4p!.versionId, 'Custom match binds a new immutable version');
+    check(overridden.rules_hash !== verRes.data.configHash, 'Custom rules differ from selected template hash');
+    checkEq(overridden.rules_hash, overridden.config_hash, 'Match and immutable version hashes agree');
+    checkEq(overridden.rules_snapshot, overridden.config, 'Match snapshot agrees with stored version config');
+    checkEq(overridden.rules_snapshot.honbaRon, 600, 'Overriding payer derives consistent ron honba');
+    checkEq(overridden.rules_snapshot.notenPenaltyTotal, 2400, 'Overridden draw penalty is canonical');
+    checkEq(overridden.rules_snapshot.uma, [15, 5, -5, -15], 'Overridden uma replaces seeded umaTenths');
+    checkEq(overridden.scope, 'user', 'Match-only template uses user scope');
+    checkEq(overridden.owner_principal_id, acct1.principalId, 'Custom ruleset belongs only to creator');
+    const metadata = overridden.rules_snapshot.metadata;
+    check(metadata !== null && typeof metadata === 'object' && !Array.isArray(metadata)
+      && 'baseRulesetVersionId' in metadata && metadata.baseRulesetVersionId === house4p!.versionId,
+    'Custom snapshot retains base provenance');
+    const hiddenCustom = await requestJson<typeof tplRes.data>('/api/rulesets/templates', { cookie: acct1.cookie });
+    check(!hiddenCustom.data.some((template) => template.versionId === overridden.ruleset_version_id),
+      'Match-only version does not appear in ruleset template listing');
+    const outsiderCustomVersion = await requestJson(`/api/rulesets/versions/${overridden.ruleset_version_id}`,
+      { cookie: acct2.cookie });
+    checkEq(outsiderCustomVersion.status, 403, 'Cross-owner access to custom version is forbidden');
+    const outsiderCustomUse = await requestJson('/api/matches', {
+      method: 'POST', cookie: acct2.cookie,
+      body: { rulesetVersionId: overridden.ruleset_version_id },
+    });
+    checkEq(outsiderCustomUse.status, 403, 'Cross-owner creation from custom version is forbidden');
+
 
     // 3. Create match (4p house template) as acct1 (owner)
     const createRes = await requestJson<{
@@ -1121,9 +1195,11 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     );
     checkEq(storedDouble.rows[0], { double_count: 1, multiplier: 2 },
       'Persisted result retains special count and total yakuman multiplier');
-    const startReadyMatch = async (versionId: string, participants: ClientSession[]) => {
+    const startReadyMatch = async (
+      versionId: string, participants: ClientSession[], rulesOverride?: Record<string, unknown>,
+    ) => {
       const created = await requestJson<{ match: { id: string } }>('/api/matches', {
-        method: 'POST', cookie: acct1.cookie, body: { rulesetVersionId: versionId },
+        method: 'POST', cookie: acct1.cookie, body: { rulesetVersionId: versionId, ...(rulesOverride ? { rulesOverride } : {}) },
       });
       checkEq(created.status, 200, 'Reference match creates from its ruleset version');
       const id = created.data.match.id;
@@ -1160,6 +1236,77 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     // Guests are bound to one match; use reusable account principals for both reference fixtures.
     const referenceThird = await registerEmailAccount(`reference3_${runId}@example.com`, '参考西家');
     const referenceFourth = await registerEmailAccount(`reference4_${runId}@example.com`, '参考北家');
+    const customId = await startReadyMatch(overridden.ruleset_version_id,
+      [acct1, acct2, referenceThird, referenceFourth]);
+    const customMine = await requestJson<{ id: string; rulesSnapshot: Record<string, unknown> }[]>(
+      '/api/matches?mine=1', { cookie: acct1.cookie },
+    );
+    checkEq(customMine.data.find((m) => m.id === customId)?.rulesSnapshot.kiriageMangan, true,
+      'Match list exposes effective custom snapshot');
+    const earlyCustom = await requestJson<{ error: string }>(`/api/matches/${customId}/finish`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq(earlyCustom.status, 409, 'Target policy cannot finish below target without a bust');
+    checkEq(earlyCustom.data.error, 'target_not_reached', 'Premature finish has policy-specific error');
+    const earlyCustomPreview = await requestJson<{ terminalTenths: number[] }>(
+      `/api/matches/${customId}/settlement/preview`, { cookie: acct1.cookie },
+    );
+    checkEq(earlyCustomPreview.data.terminalTenths, [], 'Target policy preview is unfinished below target');
+    const customHand = await requestJson<{ hand: { id: string } }>(
+      `/api/matches/${customId}/hands`, { method: 'POST', cookie: acct1.cookie, body: {} },
+    );
+    checkEq(customHand.status, 200, 'Custom match opens a hand');
+    const customResult = await requestJson<{ perSeat: { seatNo: number; netPoints: number }[] }>(
+      `/api/matches/${customId}/hands/${customHand.data.hand.id}/results`, {
+        method: 'POST', cookie: acct1.cookie,
+        body: { resultInput: { kind: 'ron',
+          winners: [{ seatNo: 0, han: 4, fu: 30, dealInSeatNo: 1 }] }, confirmedMarkRevision: 0 },
+      },
+    );
+    checkEq(customResult.status, 200, 'Custom match settles the first hand');
+    checkEq(customResult.data.perSeat.map((s) => s.netPoints), [12000, -12000, 0, 0],
+      'Kiriage override applies mangan dealer ron instead of 11,600 base payment');
+    const customFinish = await requestJson<{ finished: boolean }>(`/api/matches/${customId}/finish`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq(customFinish.status, 200, 'Target policy permits early finish once target is reached');
+    checkEq(customFinish.data.finished, true, 'Custom target match is finished');
+    const customSettlement = await requestJson<{ terminalTenths: number[] }>(
+      `/api/matches/${customId}/settlement/preview`, { cookie: acct1.cookie },
+    );
+    checkEq(customSettlement.data.terminalTenths.length, 4, 'Custom terminal preview uses effective rules');
+    const wrcCustomId = await startReadyMatch(
+      wrc!.versionId, [acct1, acct2, referenceThird, referenceFourth],
+      { multiRon: 'double_ron', kiriageMangan: false, uma: [16, 4, -4, -16] },
+    );
+    const wrcCustomMatch = await requestJson<{ match: {
+      rulesSnapshot: Record<string, unknown>; rulesetVersionId: string;
+    } }>(`/api/matches/${wrcCustomId}`, { cookie: acct1.cookie });
+    checkEq(wrcCustomMatch.data.match.rulesSnapshot.multiRon, 'double_ron',
+      'WRC custom snapshot replaces head-bump rule');
+    checkEq(wrcCustomMatch.data.match.rulesSnapshot.kiriageMangan, false,
+      'WRC custom snapshot disables kiriage');
+    checkEq(wrcCustomMatch.data.match.rulesSnapshot.uma, [16, 4, -4, -16],
+      'WRC custom snapshot retains zero-sum custom uma');
+    check(wrcCustomMatch.data.match.rulesetVersionId !== wrc!.versionId,
+      'WRC custom match binds a distinct private version');
+    const wrcCustomHand = await requestJson<{ hand: { id: string } }>(
+      `/api/matches/${wrcCustomId}/hands`, { method: 'POST', cookie: acct1.cookie, body: {} },
+    );
+    checkEq(wrcCustomHand.status, 200, 'WRC custom match opens a hand');
+    const wrcCustomResult = await requestJson<{ perSeat: { seatNo: number; netPoints: number }[] }>(
+      `/api/matches/${wrcCustomId}/hands/${wrcCustomHand.data.hand.id}/results`, {
+        method: 'POST', cookie: acct1.cookie,
+        body: { resultInput: { kind: 'ron', winners: [
+          { seatNo: 1, han: 4, fu: 30, dealInSeatNo: 3 },
+          { seatNo: 2, han: 4, fu: 30, dealInSeatNo: 3 },
+        ] }, confirmedMarkRevision: 0 },
+      },
+    );
+    checkEq(wrcCustomResult.status, 200, 'WRC override settles both ron winners');
+    checkEq(wrcCustomResult.data.perSeat.map((s) => s.netPoints), [0, 7700, 7700, -15400],
+      'Double ron pays both winners and 4 han 30 fu rounds to 7700 without kiriage');
+
     const wrcId = await startReadyMatch(wrc!.versionId, [acct1, acct2, referenceThird, referenceFourth]);
     const houseLowId = await startReadyMatch(house4p!.versionId, [acct1, acct2, referenceThird, referenceFourth]);
     for (const [id, start, other] of [[wrcId, 62500, -2500], [houseLowId, 500, 49500]] as const) {

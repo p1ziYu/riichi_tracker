@@ -89,7 +89,7 @@ export function registerRulesetsRoutes(app: FastifyInstance): void {
          v.config
        FROM app.ruleset_templates t
        JOIN app.ruleset_versions v ON v.template_id = t.id
-       WHERE t.scope = 'system' OR ($1::uuid IS NOT NULL AND t.owner_principal_id = $1)
+       WHERE t.scope = 'system' OR (t.scope = 'private' AND $1::uuid IS NOT NULL AND t.owner_principal_id = $1)
        ORDER BY t.id, v.version DESC`,
       [principal?.status === 'active' ? principal.id : null],
     );

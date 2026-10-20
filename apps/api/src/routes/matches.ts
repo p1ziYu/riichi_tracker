@@ -181,11 +181,76 @@ function firstAlias(source: Record<string, unknown>, keys: readonly string[]): u
   return undefined;
 }
 
+const RULE_OVERRIDE_NUMBERS: Record<string, true> = {
+  startingPoints: true, returnPoints: true, targetPoints: true,
+  honbaRon: true, honbaPerPayer: true, notenPenaltyTotal: true,
+};
+const RULE_OVERRIDE_BOOLEANS: Record<string, true> = {
+  kiriageMangan: true, kazoeYakuman: true, compositeYakuman: true, doubleYakuman: true,
+  nagashiManganEnabled: true, nagashiDealerRepeatRequiresTenpai: true,
+  nagashiCollectsRiichiPool: true, bustEndsGame: true, allowLowPointRiichi: true, tsumoLoss: true,
+};
+const RULE_OVERRIDE_ENUMS: Record<string, readonly string[]> = {
+  multiRon: ['double_ron', 'head_bump', 'allow_all'],
+  doubleRonHonbaPolicy: ['each_winner', 'nearest_only'],
+  fixedSouth4EndPolicy: ['target_or_bust', 'completed_south_4'],
+  terminalRiichiPoolPolicy: ['first', 'unallocated'],
+  tiedUmaPolicy: ['seat_order', 'split'],
+  automaticEndPolicy: ['manual', 'ranked_sanma'],
+};
+
+function validateRulesOverride(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('rulesOverride must be an object.');
+  }
+  const override = value as Record<string, unknown>;
+  for (const [key, entry] of Object.entries(override)) {
+    if (key === 'uma') {
+      if (!Array.isArray(entry) || !entry.every((v) => typeof v === 'number' && Number.isFinite(v))) {
+        throw new Error('uma must be an array of finite numbers.');
+      }
+    } else if (Object.hasOwn(RULE_OVERRIDE_NUMBERS, key)) {
+      if (typeof entry !== 'number' || !Number.isFinite(entry)) {
+        throw new Error(`${key} must be a finite number.`);
+      }
+    } else if (Object.hasOwn(RULE_OVERRIDE_BOOLEANS, key)) {
+      if (typeof entry !== 'boolean') throw new Error(`${key} must be a boolean.`);
+    } else if (Object.hasOwn(RULE_OVERRIDE_ENUMS, key)) {
+      if (typeof entry !== 'string' || !RULE_OVERRIDE_ENUMS[key].includes(entry)) {
+        throw new Error(`Invalid ${key}. Expected one of: ${RULE_OVERRIDE_ENUMS[key].join(', ')}.`);
+      }
+    } else {
+      throw new Error(`Unknown rulesOverride key: ${key}.`);
+    }
+  }
+  return override;
+}
+
+function mergeRulesOverride(
+  baseConfig: Record<string, unknown>,
+  playerCount: 3 | 4,
+  override: Record<string, unknown>,
+): Record<string, unknown> {
+  // Normalize the source first: seed/form aliases (umaTenths, honba objects, okaTenths)
+  // must not override or contradict the new canonical values.
+  const base = normalizeRulesConfig(prepareEngineRulesConfig(baseConfig), playerCount);
+  const merged: Record<string, unknown> = { ...base, ...override };
+  if ('startingPoints' in override || 'returnPoints' in override) delete merged.oka;
+  if ('honbaRon' in override && !('honbaPerPayer' in override)) delete merged.honbaPerPayer;
+  if ('honbaPerPayer' in override && !('honbaRon' in override)) delete merged.honbaRon;
+  const normalized = normalizeRulesConfig(merged, playerCount);
+  if (normalized.automaticEndPolicy === 'ranked_sanma' && playerCount !== 3) {
+    throw new Error('ranked_sanma automatic end requires three players.');
+  }
+  return { ...normalized };
+}
+
 export function registerMatchesRoutes(app: FastifyInstance): void {
-  // POST /api/matches { rulesetVersionId?, config?, visibility? } -> { match: { id, inviteCode, status } }
+  // POST /api/matches { rulesetVersionId?, rulesOverride?, config?, visibility? }
   app.post<{
     Body: {
       rulesetVersionId?: string;
+      rulesOverride?: Record<string, unknown>;
       config?: Record<string, unknown>;
       visibility?: string;
     };
@@ -202,6 +267,20 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     let rulesSnapshot: Record<string, unknown>;
     let rulesHash: string;
     let playerCount: 3 | 4 = 4;
+    let overrideMetadata: {
+      baseRulesetVersionId: string;
+      baseTemplateName: string;
+      baseConfig: Record<string, unknown>;
+      overrideKeys: string[];
+      sourceLabel: string | null;
+      sourceUrl: string | null;
+    } | null = null;
+    if (body.rulesOverride !== undefined && !body.rulesetVersionId) {
+      return reply.code(400).send({
+        error: 'invalid_rules_override',
+        message: 'rulesOverride requires rulesetVersionId.',
+      });
+    }
 
     if (body.rulesetVersionId) {
       const vRes = await pool.query<{
@@ -211,8 +290,12 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         config_hash: string;
         scope: string;
         owner_principal_id: string | null;
+        name: string;
+        source_label: string | null;
+        source_url: string | null;
       }>(
-        `SELECT v.id, v.player_count, v.config, v.config_hash, t.scope, t.owner_principal_id
+        `SELECT v.id, v.player_count, v.config, v.config_hash, t.scope, t.owner_principal_id,
+                t.name, t.source_label, t.source_url
          FROM app.ruleset_versions v
          JOIN app.ruleset_templates t ON t.id = v.template_id
          WHERE v.id = $1`,
@@ -232,6 +315,29 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
       playerCount = vRow.player_count;
       rulesSnapshot = vRow.config;
       rulesHash = vRow.config_hash;
+      if (body.rulesOverride !== undefined) {
+        try {
+          const override = validateRulesOverride(body.rulesOverride);
+          if (Object.keys(override).length > 0) {
+            const normalized = mergeRulesOverride(vRow.config, vRow.player_count, override);
+            overrideMetadata = {
+              baseRulesetVersionId: vRow.id,
+              baseTemplateName: vRow.name,
+              baseConfig: vRow.config,
+              overrideKeys: Object.keys(override),
+              sourceLabel: vRow.source_label,
+              sourceUrl: vRow.source_url,
+            };
+            rulesSnapshot = { ...normalized, metadata: overrideMetadata };
+            rulesHash = createHash('sha256').update(JSON.stringify(rulesSnapshot)).digest('hex');
+          }
+        } catch (err) {
+          return reply.code(400).send({
+            error: 'invalid_rules_override',
+            message: err instanceof Error ? err.message : 'Invalid rulesOverride',
+          });
+        }
+      }
     } else if (body.config && typeof body.config === 'object') {
       try {
         // D4: canonical config key is `startingPoints` (engine normalizeRulesConfig
@@ -320,6 +426,22 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      if (overrideMetadata) {
+        const template = await client.query<{ id: string }>(
+          `INSERT INTO app.ruleset_templates (
+             owner_principal_id, scope, name, player_count, source_label, source_url, review_status
+           ) VALUES ($1, 'user', $2, $3, $4, $5, 'not_applicable') RETURNING id`,
+          [principal.id, `${overrideMetadata.baseTemplateName} (match custom)`.slice(0, 64),
+            playerCount, overrideMetadata.sourceLabel, overrideMetadata.sourceUrl],
+        );
+        const version = await client.query<{ id: string }>(
+          `INSERT INTO app.ruleset_versions (
+             template_id, version, player_count, config, config_hash, config_schema_version, engine_version
+           ) VALUES ($1, 1, $2, $3::jsonb, $4, 1, $5) RETURNING id`,
+          [template.rows[0].id, playerCount, JSON.stringify(rulesSnapshot), rulesHash, ENGINE_VERSION],
+        );
+        rulesetVersionId = version.rows[0].id;
+      }
 
       const matchRes = await client.query<{ id: string; state: string }>(
         `INSERT INTO app.matches (
@@ -386,7 +508,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     }
   });
 
-  // GET /api/matches?mine=1 -> [{ id, status, playerCount, createdAt }]
+  // GET /api/matches?mine=1 -> [{ id, status, playerCount, rulesetVersionId, rulesSnapshot, createdAt }]
   app.get<{ Querystring: { mine?: string } }>('/api/matches', async (req, reply) => {
     const principal = await requirePrincipal(req, reply);
     if (!principal) return;
@@ -395,9 +517,11 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
       id: string;
       state: string;
       player_count: number;
+      rules_snapshot: Record<string, unknown>;
+      ruleset_version_id: string | null;
       created_at: Date;
     }>(
-      `SELECT DISTINCT m.id, m.state, m.player_count, m.created_at
+      `SELECT DISTINCT m.id, m.state, m.player_count, m.created_at, m.rules_snapshot, m.ruleset_version_id
        FROM app.matches m
        JOIN app.match_members mm ON mm.match_id = m.id AND mm.status = 'active'
        LEFT JOIN app.member_access_grants mag ON mag.member_id = mm.id AND mag.revoked_at IS NULL
@@ -421,7 +545,9 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
       id: row.id,
       status: MATCH_STATUS_BY_STATE[row.state] ?? row.state,
       playerCount: row.player_count,
+      rulesetVersionId: row.ruleset_version_id,
       createdAt: row.created_at.toISOString(),
+      rulesSnapshot: row.rules_snapshot,
     }));
   });
 
