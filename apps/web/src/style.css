@@ -98,6 +98,7 @@ h1,h2{letter-spacing:.015em}
 .bottom-tab.active{font-weight:800}
 .bottom-tab svg{flex:none}
 .bottom-tab:hover{color:#fff}
+.bottom-tab:focus-visible{outline-offset:-3px}
 .sidebar-brand{display:none}
 @media(min-width:1024px){
   .app-shell:not(.native-shell){--tab-clearance:0px;padding-left:260px}
@@ -143,6 +144,7 @@ h1,h2{letter-spacing:.015em}
   white-space:nowrap;font-weight:600;
 }
 .steps button.active:not(.text-button):not(.quiet):not(.close){color:#f5f5ef;border-bottom-color:#c4a66a}
+.steps button:focus-visible{outline-offset:-3px}
 .steps button:not(:disabled):hover{color:#f5f5ef}
 .steps button:disabled{opacity:.45;cursor:not-allowed}
 .table-checkin .member-list label{flex:1;min-width:0}

@@ -38,7 +38,7 @@ export default function BottomTabs({ signedIn }: { signedIn: boolean }) {
     const measure = () => {
       const navBounds = nav.getBoundingClientRect();
       const linkBounds = link.getBoundingClientRect();
-      const desktop = window.matchMedia('(min-width: 1024px)').matches;
+      const desktop = !nav.closest('.native-shell') && window.matchMedia('(min-width: 1024px)').matches;
       const next = {
         x: linkBounds.left - navBounds.left - nav.clientLeft,
         y: linkBounds.top - navBounds.top - nav.clientTop,

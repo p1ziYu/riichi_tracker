@@ -7,7 +7,7 @@ import { exampleResults, initialHand, oka, pointText, rulesError, rulesSnapshot,
 import type { RuleTemplate, TableRules } from './rules';
 import Table from './Table';
 import BottomTabs from './BottomTabs';
-import { createLocalMatch, deleteLocalMatch, isLocalId, listLocalMatches, LOCAL_SEEDS, seedRules } from './localMatches';
+import { createLocalMatch, deleteLocalMatch, isLocalId, listLocalMatches, LOCAL_MATCHES_STORAGE_KEY, LOCAL_SEEDS, seedRules } from './localMatches';
 import type { LocalMatch } from './localMatches';
 import LocalTable from './LocalTable';
 import WizardSteps from './WizardSteps';
@@ -53,10 +53,14 @@ function LocalMatchList({ lobby = false }: { lobby?: boolean }) {
   const [matches, setMatches] = useState<LocalMatch[]>([]);
   const [error, setError] = useState('');
   useEffect(() => {
-    const refresh = () => { try { setMatches(listLocalMatches()); setError(''); } catch (cause) { setError(errorText(cause)); } };
+    const refresh = () => { try { setMatches(listLocalMatches()); setError(''); } catch (cause) { setMatches([]); setError(errorText(cause)); } };
+    const onStorage = (event: StorageEvent) => {
+      if (event.storageArea === localStorage && (event.key === LOCAL_MATCHES_STORAGE_KEY || event.key === null)) refresh();
+    };
     refresh();
     window.addEventListener('ichihime:local-matches', refresh);
-    return () => window.removeEventListener('ichihime:local-matches', refresh);
+    window.addEventListener('storage', onStorage);
+    return () => { window.removeEventListener('ichihime:local-matches', refresh); window.removeEventListener('storage', onStorage); };
   }, []);
   return <>{error && <div className="notice invalid" role="alert">读取本地战绩失败：{error}</div>}{!error && (matches.length ? <div className="history-list">{matches.map((match) =>
     <div className="history-row" key={match.id}><span className="tile-mini">中</span><div><strong>{match.name}</strong><small>{match.rules.playerCount} 麻 · {new Date(match.createdAt).toLocaleString('zh-CN')} · 仅此设备</small></div><span className="tag">本地</span><b>{matchLabels[match.status] ?? match.status}</b><Link to={`/table/${match.id}`}>{lobby && match.status === 'active' ? '继续对局 →' : '查看牌桌 →'}</Link><button type="button" className="text-button" onClick={() => {
@@ -155,9 +159,11 @@ function Create({ localTemplates, addTemplate, guest }: { localTemplates: RuleTe
   function select(name: string, config: TableRules, versionId?: string) {
     if (!discardCreated()) return;
     setChosen({ name, versionId, seedKey: guest && LOCAL_SEEDS.some((seed) => seed.key === versionId) ? versionId : undefined });
-    setRules({ ...config, uma: [...config.uma] }); setSaved(''); setError(''); setStep(2);
+    setRules({ ...config, uma: [...config.uma] }); setTemplateName(''); setSaved(''); setError(''); setStep(2);
   }
   async function create(config?: TableRules, versionId?: string) {
+    const directTemplate = versionId ? templates?.find((template) => template.versionId === versionId) : undefined;
+    if (directTemplate && !discardCreated()) return;
     setBusy(true); setError('');
     try {
       if (guest) {
@@ -169,8 +175,13 @@ function Create({ localTemplates, addTemplate, guest }: { localTemplates: RuleTe
         setStep(3);
       } else {
         const { match } = await post<{ match: { id: string; inviteCode: string; status: string } }>('/api/matches', config ? { config } : { rulesetVersionId: versionId });
-        setCreated({ id: match.id, template: chosen?.name ?? '牌桌' });
+        setCreated({ id: match.id, template: directTemplate?.name ?? chosen?.name ?? '牌桌' });
         setStep(3);
+      }
+      if (directTemplate) {
+        setChosen({ name: directTemplate.name, versionId: directTemplate.versionId, seedKey: guest ? directTemplate.versionId : undefined });
+        setRules({ ...directTemplate.config, uma: [...directTemplate.config.uma] });
+        setTemplateName(''); setSaved('');
       }
     } catch (cause) { setError(errorText(cause)); }
     finally { setBusy(false); }

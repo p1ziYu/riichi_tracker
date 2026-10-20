@@ -1,4 +1,4 @@
-const SHELL = 'ichihime-web-shell-v2';
+const SHELL = 'ichihime-web-shell-v3';
 
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
@@ -32,20 +32,35 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   const url = new URL(request.url);
-  if (url.origin !== self.location.origin || request.method !== 'GET' || url.pathname.startsWith('/api/')) return;
+  if (url.origin !== self.location.origin || request.method !== 'GET' ||
+      url.pathname === '/api' || url.pathname.startsWith('/api/') ||
+      url.pathname === '/ws' || url.pathname.startsWith('/ws/')) return;
   if (request.mode === 'navigate') {
-    event.respondWith(caches.match('/').then((cached) => cached || fetch(request)));
-    if (self.navigator.onLine) {
-      event.waitUntil(fetch(request).then(async (response) => {
-        if (response.ok) await (await caches.open(SHELL)).put('/', response);
-      }).catch(() => {}));
-    }
+    // Always ask the server for the current shell. A cache-first navigation can
+    // strand an installed client on the previous deploy indefinitely.
+    event.respondWith((async () => {
+      let response;
+      try {
+        response = await fetch(request);
+      } catch (error) {
+        const cached = await (await caches.open(SHELL)).match('/');
+        if (cached) return cached;
+        throw error;
+      }
+      if (response.ok && response.headers.get('content-type')?.includes('text/html')) {
+        await (await caches.open(SHELL)).put('/', response.clone());
+      }
+      return response;
+    })());
     return;
   }
-  event.respondWith(caches.match(request, { ignoreVary: true }).then(async (cached) => {
+  if (!url.pathname.startsWith('/assets/')) return;
+  event.respondWith((async () => {
+    const cache = await caches.open(SHELL);
+    const cached = await cache.match(request);
     if (cached) return cached;
     const response = await fetch(request);
-    if (response.ok) await (await caches.open(SHELL)).put(request, response.clone());
+    if (response.ok) await cache.put(request, response.clone());
     return response;
-  }));
+  })());
 });

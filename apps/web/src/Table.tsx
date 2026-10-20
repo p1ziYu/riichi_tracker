@@ -32,7 +32,7 @@ type CurrentHand = {
 type Score = { seatNo: number; points: number };
 type CheckIn = { seatNo?: number; memberId?: string; checkedIn?: boolean; isCheckedIn?: boolean; status?: string };
 type MatchState = {
-  match: { id: string; name?: string; ownerPrincipalId?: string; status: string; playerCount?: number; handsPlayed?: number; version?: Revision; settlementConfirmed?: boolean };
+  match: { id: string; name?: string; ownerPrincipalId?: string; status: string; playerCount?: number; handsPlayed?: number; version?: Revision; settlementConfirmed?: boolean; rulesSnapshot?: Record<string, unknown> };
   seats: Seat[];
   currentHand: CurrentHand | null;
   scoreboard: Score[] | Record<string, number>;
@@ -122,12 +122,14 @@ export default function Table() {
   const [qrError, setQrError] = useState('');
   const [copyStatus, setCopyStatus] = useState('');
   const [dialog, setDialog] = useState(false);
-  const [kind, setKind] = useState<'ron' | 'tsumo' | 'ryuukyoku'>('ron');
+  const [kind, setKind] = useState<'ron' | 'tsumo' | 'ryuukyoku' | 'nagashi_mangan'>('ron');
   const [winner, setWinner] = useState(0);
   const [dealIn, setDealIn] = useState(1);
   const [han, setHan] = useState(2);
   const [fu, setFu] = useState(30);
   const [tenpai, setTenpai] = useState<Record<number, boolean>>({});
+  const [nagashiRiver, setNagashiRiver] = useState('');
+  const [nagashiAttested, setNagashiAttested] = useState(false);
   const [draftPreview, setDraftPreview] = useState<DraftPreview | null>(null);
   const [terminalPreview, setTerminalPreview] = useState<{ id: string; stateKey: string; output: TerminalPreview } | null>(null);
 
@@ -295,9 +297,15 @@ export default function Table() {
   const matchInProgress = state?.match.status === 'active' || state?.match.status === 'in_progress';
   const activeHand = matchInProgress && hand && (!hand.status || ['active', 'open', 'in_progress'].includes(hand.status));
   const betweenHands = !hand || ['settled', 'completed', 'finished'].includes(hand.status ?? '');
+  const nagashiEnabled = state?.match.rulesSnapshot?.nagashiManganEnabled === true;
+  const nagashiTiles = nagashiRiver.trim().split(/[\s,，]+/).filter(Boolean);
   const input: ResultInput = kind === 'ryuukyoku'
     ? { kind, winners: [], tenpai: seats.map((seat) => !!tenpai[seat.seatNo]) }
-    : { kind, winners: [{ seatNo: winner, han, fu, ...(kind === 'ron' ? { dealInSeatNo: dealIn } : {}) }] };
+    : kind === 'nagashi_mangan'
+      ? { kind, winners: [{ seatNo: winner, han: 5, fu: 30 }],
+        tenpai: seats.map((seat) => !!tenpai[seat.seatNo]),
+        nagashiEligibility: [{ seatNo: winner, discards: nagashiTiles.map((tile) => ({ tile, called: false })) }] }
+      : { kind, winners: [{ seatNo: winner, han, fu, ...(kind === 'ron' ? { dealInSeatNo: dealIn } : {}) }] };
   const inputKey = JSON.stringify(input);
   const revision = hand?.markRevision == null ? '' : String(hand.markRevision);
   const handId = hand?.id ?? hand?.handId;
@@ -307,8 +315,10 @@ export default function Table() {
   const shownTerminalPreview = terminalPreview && terminalPreview.id === id && terminalPreview.stateKey === stateKey ? terminalPreview.output : null;
   const invalid = seats.length === 0 || (kind !== 'ryuukyoku' &&
     (!seats.some((seat) => seat.seatNo === winner) ||
-      !Number.isInteger(han) || han < 1 || !Number.isInteger(fu) || fu < 20 ||
-      (kind === 'ron' && (winner === dealIn || !seats.some((seat) => seat.seatNo === dealIn)))));
+      (kind === 'nagashi_mangan'
+        ? !nagashiEnabled || !nagashiAttested || nagashiTiles.length === 0 || nagashiTiles.some((tile) => !/^(?:[19][mps]|[1-7]z)$/.test(tile))
+        : !Number.isInteger(han) || han < 1 || !Number.isInteger(fu) || fu < 20 ||
+          (kind === 'ron' && (winner === dealIn || !seats.some((seat) => seat.seatNo === dealIn))))));
 
   const action = async (operation: () => Promise<void>) => {
     setBusy(true);
@@ -441,19 +451,20 @@ export default function Table() {
       <div className="table-layout"><section className="felt" aria-label="牌桌座位"><div className="felt-lines" aria-hidden="true" /><div className="seat-grid">{seats.map((seat) => {
         const inHand = handSeats.find((entry) => entry.seatNo === seat.seatNo);
         const points = pointsFor(seat);
-        return <article className={`seat seat-${seat.seatNo}`} key={seat.seatNo}><div className="seat-top"><span className="wind-badge">{winds[seat.seatNo]}</span><span className="seat-name">{seatLabel(seat)}{hand?.dealerSeatNo === seat.seatNo && <em>庄家</em>}</span></div><strong>{typeof points === 'number' ? pointText(points) : '点数未提供'}</strong>{!hand && <small className="seat-status">{checkInLabel(state.checkedIn, seat)}</small>}{activeHand && inHand ? <button type="button" className={inHand.isRiichi ? 'riichi marked' : 'riichi'} aria-pressed={!!inHand.isRiichi} disabled={busy || !handId || typeof inHand.isRiichi !== 'boolean' || (!inHand.isRiichi && typeof inHand.points === 'number' && inHand.points < 1000)} onClick={() => changeMark(inHand)}>{inHand.isRiichi ? '立直 · 已标记' : '标记立直'}</button> : hand && inHand && <small className="seat-status">{inHand.isRiichi == null ? '立直状态未提供' : inHand.isRiichi ? '立直 · 已标记' : '未立直'}</small>}</article>;
+        return <article className={`seat seat-${seat.seatNo}`} key={seat.seatNo}><div className="seat-top"><span className="wind-badge">{winds[seat.seatNo]}</span><span className="seat-name">{seatLabel(seat)}{hand?.dealerSeatNo === seat.seatNo && <em>庄家</em>}</span></div><strong>{typeof points === 'number' ? pointText(points) : '点数未提供'}</strong>{!hand && <small className="seat-status">{checkInLabel(state.checkedIn, seat)}</small>}{activeHand && inHand ? <button type="button" className={inHand.isRiichi ? 'riichi marked' : 'riichi'} aria-pressed={!!inHand.isRiichi} disabled={busy || !handId || typeof inHand.isRiichi !== 'boolean' || (!inHand.isRiichi && typeof inHand.points === 'number' && inHand.points < 1000 && state.match.rulesSnapshot?.allowLowPointRiichi !== true)} onClick={() => changeMark(inHand)}>{inHand.isRiichi ? '✓ 已标立直' : '立直标记'}</button> : null}</article>;
       })}<div className="table-center">{hand ? <><span>{hand.roundWind && typeof hand.roundNumber === 'number' ? `${({ E: '东', S: '南', W: '西' } as const)[hand.roundWind]}${['一', '二', '三', '四'][hand.roundNumber - 1] ?? hand.roundNumber}局` : '当前局'}</span><b>{typeof hand.honba === 'number' ? `${hand.honba} 本场` : '本场未提供'}</b><small>{typeof hand.riichiPool === 'number' ? `供托 ${hand.riichiPool} 根` : '供托未提供'}</small></> : <span>{['preparing', 'lobby'].includes(state.match.status) ? '等待座次确认' : '待开下一局'}</span>}</div></div></section>
       <aside className="panel table-aside"><h2>牌局操作</h2><div className="aside-stat"><span>牌桌状态</span><b>{statusText}</b></div>{hand && <div className="aside-stat"><span>立直标记版本</span><b>{revision || '未提供'}</b></div>}
         <p className="note">立直标记同步至同桌，确认本局结果时才由服务端结算点数。{activeHand && !handId && '当前局标识未提供，无法操作本局。'}</p>
         {matchInProgress && betweenHands && <button type="button" className="primary" disabled={busy} onClick={() => void action(async () => { await post(`${base}/hands`, {}); await refresh(); })}>新开一局</button>}
         {matchInProgress && activeHand && <button type="button" className="primary" disabled={busy || !handId} onClick={() => { setActionError(''); setDraftPreview(null); setDialog(true); }}>录入本局结果 →</button>}
-        {isOwner && matchInProgress && betweenHands && <button type="button" disabled={busy} onClick={() => void action(async () => { await post(`${base}/finish`, {}); await refresh(); setTerminalPreview(null); })}>终局</button>}
+        {isOwner && matchInProgress && betweenHands && state.match.rulesSnapshot?.automaticEndPolicy !== 'ranked_sanma' && <button type="button" disabled={busy} onClick={() => void action(async () => { await post(`${base}/finish`, {}); await refresh(); setTerminalPreview(null); })}>终局</button>}
         {state.match.status === 'finished' && <><button type="button" disabled={busy} onClick={fetchTerminalPreview}>预览终局成绩</button>{shownTerminalPreview && <><div className="payment-list">{seats.map((seat, index) => <div className="payment-row" key={seat.seatNo}><span>{winds[seat.seatNo]}家</span><strong>{(shownTerminalPreview.terminalTenths[index] / 10).toFixed(1)}</strong><small>{seatLabel(seat)} · 终局成绩</small></div>)}</div>{isOwner && <button type="button" className="primary" disabled={busy || state.match.settlementConfirmed === true} onClick={() => void action(async () => { await post(`${base}/settlement/confirm`, {}); await refresh(); setTerminalPreview(null); })}>{state.match.settlementConfirmed ? '终局已确认' : '确认终局成绩'}</button>}</>}</>}
       </aside></div>
     </>}
-    {dialog && hand && activeHand && <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setDialog(false); }}><section className="dialog panel" role="dialog" aria-modal="true" aria-label="录入结算"><div className="dialog-head"><div><p className="eyebrow">SETTLEMENT / 本局结算</p><h2>支付确认</h2></div><button type="button" className="close" aria-label="关闭" disabled={busy} onClick={() => setDialog(false)}>×</button></div><p className="muted">支付明细来自服务端；立直标记或输入变化后需重新预览。</p><div className="segmented" role="group" aria-label="结果类型">{(['ron', 'tsumo', 'ryuukyoku'] as const).map((value) => <button type="button" key={value} className={kind === value ? 'selected' : ''} onClick={() => { setKind(value); setActionError(''); }}>{({ ron: '荣和', tsumo: '自摸', ryuukyoku: '荒牌流局' })[value]}</button>)}</div>
-      {kind === 'ryuukyoku' ? <div className="tenpai-grid">{seats.map((seat) => <label className="toggle" key={seat.seatNo}><span>{winds[seat.seatNo]}家听牌</span><input type="checkbox" checked={!!tenpai[seat.seatNo]} onChange={(event) => setTenpai((current) => ({ ...current, [seat.seatNo]: event.target.checked }))} /></label>)}</div> : <div className="field-grid"><label>和牌座位<select value={winner} onChange={(event) => setWinner(Number(event.target.value))}>{seats.map((seat) => <option key={seat.seatNo} value={seat.seatNo}>{winds[seat.seatNo]}家 · {seatLabel(seat)}</option>)}</select></label>{kind === 'ron' && <label>放铳座位<select value={dealIn} onChange={(event) => setDealIn(Number(event.target.value))}>{seats.map((seat) => <option key={seat.seatNo} value={seat.seatNo}>{winds[seat.seatNo]}家 · {seatLabel(seat)}</option>)}</select></label>}<label>番<input type="number" inputMode="numeric" step={1} value={Number.isNaN(han) ? '' : han} onChange={(event) => setHan(event.target.value === '' ? NaN : Number(event.target.value))} /></label><label>符<input type="number" inputMode="numeric" step={1} value={Number.isNaN(fu) ? '' : fu} onChange={(event) => setFu(event.target.value === '' ? NaN : Number(event.target.value))} /></label></div>}
-      {invalid && <div className="notice invalid" role="alert">请输入有效座位与番符；荣和的胜者与放铳者不可相同。</div>}
+    {dialog && hand && activeHand && <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setDialog(false); }}><section className="dialog panel" role="dialog" aria-modal="true" aria-label="录入结算"><div className="dialog-head"><div><p className="eyebrow">SETTLEMENT / 本局结算</p><h2>支付确认</h2></div><button type="button" className="close" aria-label="关闭" disabled={busy} onClick={() => setDialog(false)}>×</button></div><p className="muted">支付明细来自服务端；立直标记或输入变化后需重新预览。</p><div className="segmented" role="group" aria-label="结果类型">{(['ron', 'tsumo', 'ryuukyoku', ...(nagashiEnabled ? ['nagashi_mangan' as const] : [])] as const).map((value) => <button type="button" key={value} className={kind === value ? 'selected' : ''} onClick={() => { setKind(value); setActionError(''); }}>{({ ron: '荣和', tsumo: '自摸', ryuukyoku: '荒牌流局', nagashi_mangan: '流局满贯' })[value]}</button>)}</div>
+      {kind === 'ryuukyoku' ? <div className="tenpai-grid">{seats.map((seat) => <label className="toggle" key={seat.seatNo}><span>{winds[seat.seatNo]}家听牌</span><input type="checkbox" checked={!!tenpai[seat.seatNo]} onChange={(event) => setTenpai((current) => ({ ...current, [seat.seatNo]: event.target.checked }))} /></label>)}</div> : <div className="field-grid"><label>{kind === 'nagashi_mangan' ? '流局满贯座位' : '和牌座位'}<select value={winner} onChange={(event) => setWinner(Number(event.target.value))}>{seats.map((seat) => <option key={seat.seatNo} value={seat.seatNo}>{winds[seat.seatNo]}家 · {seatLabel(seat)}</option>)}</select></label>{kind === 'ron' && <label>放铳座位<select value={dealIn} onChange={(event) => setDealIn(Number(event.target.value))}>{seats.map((seat) => <option key={seat.seatNo} value={seat.seatNo}>{winds[seat.seatNo]}家 · {seatLabel(seat)}</option>)}</select></label>}{kind === 'nagashi_mangan' ? <><label>完整弃牌（逗号或空格分隔，例如 1m 9p 1z）<input value={nagashiRiver} onChange={(event) => setNagashiRiver(event.target.value)} /></label><label className="toggle"><input type="checkbox" checked={nagashiAttested} onChange={(event) => setNagashiAttested(event.target.checked)} />确认以上为全部弃牌，均为幺九且未被他家鸣走</label></> : <><label>番<input type="number" inputMode="numeric" step={1} value={Number.isNaN(han) ? '' : han} onChange={(event) => setHan(event.target.value === '' ? NaN : Number(event.target.value))} /></label><label>符<input type="number" inputMode="numeric" step={1} value={Number.isNaN(fu) ? '' : fu} onChange={(event) => setFu(event.target.value === '' ? NaN : Number(event.target.value))} /></label></>}</div>}
+      {kind === 'nagashi_mangan' && <div className="tenpai-grid">{seats.map((seat) => <label className="toggle" key={seat.seatNo}><span>{winds[seat.seatNo]}家听牌（庄家听牌连庄）</span><input type="checkbox" checked={!!tenpai[seat.seatNo]} onChange={(event) => setTenpai((current) => ({ ...current, [seat.seatNo]: event.target.checked }))} /></label>)}</div>}
+      {invalid && <div className="notice invalid" role="alert">{kind === 'nagashi_mangan' ? '请填写完整的未被鸣走的幺九弃牌，并确认记录完整。' : '请输入有效座位与番符；荣和的胜者与放铳者不可相同。'}</div>}
       {(!handId || revision === '') && <div className="notice invalid" role="alert">服务端未提供当前局标识或立直标记版本，无法提交结算。</div>}
       {shownPreview && <><h3>逐座支付</h3><Payments output={shownPreview} /><p className="rule-detail">下一局：{nextHandText(shownPreview.nextHand)}</p></>}
       {actionError && <div className="notice invalid" role="alert">{actionError}</div>}
