@@ -26,7 +26,7 @@ export async function buildApp() {
         cb(null, false);
         return;
       }
-      cb(null, ALLOWED_CORS_ORIGINS[origin] ? origin : false);
+      cb(null, ALLOWED_CORS_ORIGINS[origin] === true ? origin : false);
     },
     credentials: true,
   });

@@ -104,6 +104,7 @@ function validateAndNormalizeResultInput(
         han: rawObj.han,
         fu: rawObj.fu,
         yakumanCount: rawObj.yakumanCount,
+        doubleYakumanCount: rawObj.doubleYakumanCount,
         dealInSeatNo: topDealIn,
         isRiichiDeclarationDealIn: topRiichiDealIn,
       },
@@ -174,6 +175,21 @@ function validateAndNormalizeResultInput(
       }
       yakumanCount = w.yakumanCount;
     }
+    let doubleYakumanCount: number | undefined;
+    if (w.doubleYakumanCount !== undefined && w.doubleYakumanCount !== null) {
+      if (
+        typeof w.doubleYakumanCount !== 'number' ||
+        !Number.isInteger(w.doubleYakumanCount) ||
+        w.doubleYakumanCount < 0 ||
+        w.doubleYakumanCount > 10
+      ) {
+        throw new ResultValidationError('invalid_double_yakuman_count', 'Invalid doubleYakumanCount');
+      }
+      if (w.doubleYakumanCount > 0 && !config.doubleYakuman) {
+        throw new ResultValidationError('double_yakuman_disabled', 'Special double yakuman is disabled by this ruleset');
+      }
+      doubleYakumanCount = w.doubleYakumanCount;
+    }
 
     let han = 5;
     let fu = 30;
@@ -183,7 +199,7 @@ function validateAndNormalizeResultInput(
       }
       han = w.han;
 
-      if ((w.fu === undefined || w.fu === null) && yakumanCount !== undefined && yakumanCount >= 1) {
+      if ((w.fu === undefined || w.fu === null) && ((yakumanCount ?? 0) > 0 || (doubleYakumanCount ?? 0) > 0)) {
         fu = 30;
       } else if (
         typeof w.fu !== 'number' ||
@@ -257,6 +273,7 @@ function validateAndNormalizeResultInput(
       han,
       fu,
       ...(yakumanCount !== undefined ? { yakumanCount } : {}),
+      ...(doubleYakumanCount !== undefined ? { doubleYakumanCount } : {}),
       ...(dealInSeatNo !== undefined ? { dealInSeatNo } : {}),
       ...(isRiichiDeclarationDealIn !== undefined ? { isRiichiDeclarationDealIn } : {}),
     });
@@ -284,6 +301,15 @@ function validateAndNormalizeResultInput(
     riichiDeclarationDealInSeatNo !== null ||
     topRiichiDealIn === true ||
     anyWinnerFlaggedRiichiDealIn;
+  if (
+    hasRiichiDeclarationCancel &&
+    (topRiichiDealIn === false || winners.some((w) => w.isRiichiDeclarationDealIn === false))
+  ) {
+    throw new ResultValidationError(
+      'invalid_riichi_declaration_deal_in',
+      'Conflicting riichi declaration deal-in flags for the same ron discard',
+    );
+  }
 
   if (hasRiichiDeclarationCancel) {
     if (kind !== 'ron' || sharedDealInSeatNo === null) {
@@ -986,11 +1012,6 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         return reply.code(403).send({ error: 'forbidden', message: 'Only checked-in participants can submit hand results' });
       }
 
-      if (match.state !== 'active') {
-        await client.query('ROLLBACK');
-        return reply.code(409).send({ error: 'match_not_active', message: 'Match is not active' });
-      }
-
       // 3. Lock hand FOR UPDATE
       const hRes = await client.query<{
         id: string;
@@ -1043,6 +1064,11 @@ export function registerHandsRoutes(app: FastifyInstance): void {
             message: 'clientEventId has already been used for a different request',
           });
         }
+      }
+
+      if (match.state !== 'active') {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({ error: 'match_not_active', message: 'Match is not active' });
       }
 
       // Guard re-settle (unique index uq_active_hand_result + state check)
@@ -1273,7 +1299,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
                result_id, seat_no, han, fu, yakuman_count, deal_in_seat_no
              )
              VALUES ($1, $2, $3, $4, $5, $6)`,
-            [resultId, w.seatNo, w.han ?? 0, fuVal, w.yakumanCount ?? 0, dealIn],
+            [resultId, w.seatNo, w.han ?? 0, fuVal, (w.yakumanCount ?? 0) + 2 * (w.doubleYakumanCount ?? 0), dealIn],
           );
         }
       }

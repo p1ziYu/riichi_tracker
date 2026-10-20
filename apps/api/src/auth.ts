@@ -246,6 +246,12 @@ export function toWebHeaders(req: FastifyRequest): Headers {
       headers.set(key, value);
     }
   }
+  // An explicitly supplied bearer credential must never fall back to a different
+  // account's cookie if the bearer signature, session or expiry is invalid.
+  // The bearer plugin injects its verified token as the session cookie itself.
+  if (/^Bearer(?:\s|$)/i.test(headers.get('authorization') ?? '')) {
+    headers.delete('cookie');
+  }
   return headers;
 }
 
@@ -293,7 +299,7 @@ export function registerAuthRoutes(app: FastifyInstance): void {
   const handleAuthRequest = async (req: FastifyRequest, reply: FastifyReply) => {
     if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
       const reqOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
-      if (reqOrigin && !ALLOWED_AUTH_ORIGINS[reqOrigin]) {
+      if (reqOrigin && ALLOWED_AUTH_ORIGINS[reqOrigin] !== true) {
         return reply.code(403).send({ error: 'invalid_origin', message: 'Untrusted origin' });
       }
     }

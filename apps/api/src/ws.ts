@@ -15,16 +15,52 @@ export type WsEventType =
   | 'match_finished'
   | 'settlement_confirmed';
 
-const matchRooms = new Map<string, Set<WebSocket>>();
+interface MatchConnection {
+  socket: WebSocket;
+  principalId: string;
+  authSessionRef: string;
+  pending: Promise<void>;
+}
+
+const matchRooms = new Map<string, Set<MatchConnection>>();
+
+async function hasLiveSession(authSessionRef: string, principalId: string): Promise<boolean> {
+  const res = await pool.query(
+    `SELECT 1
+     FROM public."session" s
+     JOIN public."user" u ON u."id" = s."userId"
+     LEFT JOIN public.auth_principal_map apm ON apm.auth_user_id = u."id"
+     JOIN app.principals p ON p.id = $2
+     WHERE s."id" = $1
+       AND s."expiresAt" > now()
+       AND p.status = 'active'
+       AND (p.auth_user_id = u."id" OR apm.principal_id = p.id)
+     LIMIT 1`,
+    [authSessionRef, principalId],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
 
 export function broadcastMatchEvent(matchId: string, type: WsEventType, payload: unknown): void {
   const room = matchRooms.get(matchId);
   if (!room || room.size === 0) return;
   const message = JSON.stringify({ type, payload });
-  for (const socket of room) {
-    if (socket.readyState === 1) {
-      socket.send(message);
-    }
+  for (const connection of room) {
+    // Tickets authorize an upgrade, not indefinite access to future events.
+    // Chain checks per connection to preserve broadcast order.
+    connection.pending = connection.pending.then(async () => {
+      if (connection.socket.readyState !== 1) return;
+      if (
+        !(await hasLiveSession(connection.authSessionRef, connection.principalId)) ||
+        (await checkMatchAccess(matchId, connection.principalId)) !== 'allowed'
+      ) {
+        connection.socket.close(1008, 'Session revoked or match access denied');
+        return;
+      }
+      if (connection.socket.readyState === 1) connection.socket.send(message);
+    }).catch(() => {
+      connection.socket.close(1011, 'Subscription validation error');
+    });
   }
 }
 
@@ -76,6 +112,7 @@ export function registerWsRoutes(app: FastifyInstance): void {
       }
 
       const tokenHash = createHash('sha256').update(ticket).digest('hex');
+      let connection: MatchConnection;
       try {
         const res = await pool.query<{ principal_id: string; auth_session_ref: string }>(
           `UPDATE app.ws_tickets
@@ -94,49 +131,35 @@ export function registerWsRoutes(app: FastifyInstance): void {
         }
 
         const { principal_id: principalId, auth_session_ref: authSessionRef } = res.rows[0];
-
-        // Verify stored session is still valid in Better Auth's session store (not revoked/expired)
-        // and belongs to this active principal.
-        const sessRes = await pool.query<{ id: string }>(
-          `SELECT s."id"
-           FROM public."session" s
-           JOIN public."user" u ON u."id" = s."userId"
-           LEFT JOIN public.auth_principal_map apm ON apm.auth_user_id = u."id"
-           JOIN app.principals p ON p.id = $2
-           WHERE (s."id" = $1 OR s."token" = $1)
-             AND s."expiresAt" > now()
-             AND p.status = 'active'
-             AND (p.auth_user_id = u."id" OR apm.principal_id = p.id)
-           LIMIT 1`,
-          [authSessionRef, principalId],
-        );
-        if ((sessRes.rowCount ?? 0) === 0) {
+        if (!(await hasLiveSession(authSessionRef, principalId))) {
           socket.close(1008, 'Session revoked or expired');
           return;
         }
 
-        // Verify principal still has access to the match
         const access = await checkMatchAccess(matchId, principalId);
         if (access !== 'allowed') {
           socket.close(1008, 'Match access denied');
           return;
         }
+        connection = { socket, principalId, authSessionRef, pending: Promise.resolve() };
+
       } catch {
         socket.close(1011, 'Ticket validation error');
         return;
       }
 
+      if (socket.readyState !== 1) return;
       let room = matchRooms.get(matchId);
       if (!room) {
-        room = new Set<WebSocket>();
+        room = new Set<MatchConnection>();
         matchRooms.set(matchId, room);
       }
-      room.add(socket);
+      room.add(connection);
 
       const cleanup = () => {
         const currentRoom = matchRooms.get(matchId);
         if (currentRoom) {
-          currentRoom.delete(socket);
+          currentRoom.delete(connection);
           if (currentRoom.size === 0) {
             matchRooms.delete(matchId);
           }

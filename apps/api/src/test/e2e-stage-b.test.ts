@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import '../env.js';
 import { ensureAuthSchema, pool } from '../db.js';
@@ -73,6 +73,19 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       checkEq(preflight.headers.get('access-control-allow-origin'), origin, `Native CORS origin echoed for ${origin}`);
       check(preflight.headers.get('access-control-allow-headers')?.toLowerCase().includes('authorization'), `Native bearer preflight accepted for ${origin}`);
     }
+    const inheritedOrigin = await fetch(`${baseUrl}/api/me`, {
+      method: 'OPTIONS',
+      headers: { origin: 'constructor', 'access-control-request-method': 'GET' },
+    });
+    checkEq(inheritedOrigin.headers.get('access-control-allow-origin'), null,
+      'Prototype property names never pass the CORS allowlist');
+    const inheritedAuthOrigin = await requestJson<{ error: string }>('/api/auth/sign-in/anonymous', {
+      method: 'POST',
+      origin: 'constructor',
+      body: {},
+    });
+    checkEq(inheritedAuthOrigin.status, 403, 'Prototype property names never pass the auth origin allowlist');
+    checkEq(inheritedAuthOrigin.data.error, 'invalid_origin', 'Auth origin denial uses the trusted-origin error');
 
     // 0. Unauthenticated /api/me must return 401
     const unauthMe = await requestJson('/api/me');
@@ -167,6 +180,39 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     checkEq(verRes.status, 200, 'GET /api/rulesets/versions/:versionId returns 200');
     checkEq(verRes.data.versionId, house4p!.versionId, 'Version ID matches house_4p versionId');
     check(verRes.data.configHash.length === 64, 'configHash is 64-char sha256 hex');
+    const privateTemplate = await pool.query<{ id: string }>(
+      `INSERT INTO app.ruleset_templates (owner_principal_id, scope, name, player_count, review_status)
+       VALUES ($1, 'private', 'Private authorization probe', 4, 'not_applicable')
+       RETURNING id`,
+      [acct1.principalId],
+    );
+    const privateVersion = await pool.query<{ id: string }>(
+      `INSERT INTO app.ruleset_versions (
+         template_id, version, player_count, config, config_hash, config_schema_version, engine_version
+       )
+       SELECT $1, 1, player_count, config, config_hash, config_schema_version, engine_version
+       FROM app.ruleset_versions WHERE id = $2
+       RETURNING id`,
+      [privateTemplate.rows[0].id, house4p!.versionId],
+    );
+    const privateVersionId = privateVersion.rows[0].id;
+    const ownerTemplates = await requestJson<typeof tplRes.data>('/api/rulesets/templates', { cookie: acct1.cookie });
+    const outsiderTemplates = await requestJson<typeof tplRes.data>('/api/rulesets/templates', { cookie: acct2.cookie });
+    check(ownerTemplates.data.some((template) => template.versionId === privateVersionId),
+      'Owner can list their private ruleset');
+    check(!outsiderTemplates.data.some((template) => template.versionId === privateVersionId),
+      'Other accounts cannot list a private ruleset');
+    const anonymousTemplates = await requestJson<typeof tplRes.data>('/api/rulesets/templates');
+    check(!anonymousTemplates.data.some((template) => template.versionId === privateVersionId),
+      'Anonymous template list contains no private rulesets');
+    const outsiderVersion = await requestJson(`/api/rulesets/versions/${privateVersionId}`, { cookie: acct2.cookie });
+    const ownerVersion = await requestJson(`/api/rulesets/versions/${privateVersionId}`, { cookie: acct1.cookie });
+    checkEq(outsiderVersion.status, 403, 'Other accounts cannot fetch a private ruleset by UUID');
+    checkEq(ownerVersion.status, 200, 'Owner can fetch their private ruleset by UUID');
+    const outsiderUse = await requestJson('/api/matches', {
+      method: 'POST', cookie: acct2.cookie, body: { rulesetVersionId: privateVersionId },
+    });
+    checkEq(outsiderUse.status, 403, 'Other accounts cannot create a match from private ruleset UUID');
 
     // 3. Create match (4p house template) as acct1 (owner)
     const createRes = await requestJson<{
@@ -180,6 +226,13 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     const matchId = createRes.data.match.id;
     check(Boolean(matchId), 'Match ID returned');
     checkEq(createRes.data.match.status, 'preparing', 'Initial match status is preparing');
+    const anonymousHead = await fetch(`${baseUrl}/api/matches/${matchId}`, { method: 'HEAD' });
+    checkEq(anonymousHead.status, 401, 'Implicit HEAD route preserves GET match authentication');
+    const unsupportedDelete = await fetch(`${baseUrl}/api/matches/${matchId}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${acct1.token}` },
+    });
+    checkEq(unsupportedDelete.status, 404, 'Unsupported write method does not reach match handlers');
 
     // M8: ad-hoc configs retain only canonical honba/ryuukyoku fields;
     // stale aliases from the enriched template must not override edits.
@@ -275,6 +328,12 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       }
     });
     await wsOpen.promise;
+    const replayedWs = new WebSocket(`${wsBaseUrl}/ws/matches/${matchId}?ticket=${encodeURIComponent(wsTicketRes.data.ticket)}`);
+    const replayedClose = await new Promise<number>((resolve) => {
+      replayedWs.addEventListener('error', () => {});
+      replayedWs.addEventListener('close', (event) => resolve(event.code));
+    });
+    checkEq(replayedClose, 1008, 'A consumed WebSocket ticket cannot open a second subscription');
 
     // 3b. F1 check: unapproved check-in with a valid token must be rejected with 403 {error:'check_in_not_approved'}
     const unapprovedTokRes = await requestJson<{ token: string; expiresAt: string }>(
@@ -329,7 +388,7 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       );
       checkEq(tokRes.status, 200, `POST check-in-tokens for seat ${p.expectedSeatNo} returns 200`);
 
-      const ciRes = await requestJson<{ seat: { seatNo: number }; grantId: string }>(
+      const checkIn = () => requestJson<{ seat: { seatNo: number }; grantId: string }>(
         `/api/matches/${matchId}/check-ins`,
         {
           method: 'POST',
@@ -340,11 +399,26 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
           },
         },
       );
+      const attempts = p.expectedSeatNo === 0
+        ? await Promise.all([checkIn(), checkIn()])
+        : [await checkIn()];
+      const ciRes = attempts.find((attempt) => attempt.status === 200)!;
+      if (p.expectedSeatNo === 0) {
+        checkEq(attempts.map((attempt) => attempt.status).sort(), [200, 400],
+          'Concurrent use of the same check-in token admits exactly one request');
+        const activeCheckIns = await pool.query<{ count: number }>(
+          `SELECT COUNT(*)::int AS count FROM app.check_ins
+           WHERE match_id = $1 AND seat_assignment_id IN (
+             SELECT id FROM app.seat_assignments WHERE match_id = $1 AND seat_no = 0
+           ) AND invalidated_at IS NULL`,
+          [matchId],
+        );
+        checkEq(activeCheckIns.rows[0].count, 1, 'Check-in race leaves one active seat check-in');
+      }
       checkEq(ciRes.status, 200, `POST check-ins for seat ${p.expectedSeatNo} returns 200`);
       checkEq(ciRes.data.seat.seatNo, p.expectedSeatNo, `Checked-in seatNo matches ${p.expectedSeatNo}`);
       check(Boolean(ciRes.data.grantId), `grantId returned for seat ${p.expectedSeatNo}`);
 
-      // Single-use token check: re-using same token must fail (400)
       const replayRes = await requestJson(`/api/matches/${matchId}/check-ins`, {
         method: 'POST',
         cookie: p.session.cookie,
@@ -419,18 +493,54 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       body: { seatNo: 0, riichi: true },
     });
     checkEq(spectatorMark.status, 403, 'Spectator cannot write a mark');
+    const spectatorTicket = await requestJson<{ ticket: string }>(
+      `/api/matches/${matchId}/ws-tickets`,
+      { method: 'POST', cookie: spectator.cookie, body: {} },
+    );
+    checkEq(spectatorTicket.status, 200, 'Spectator can subscribe to match events while authorized');
+    const spectatorWs = new WebSocket(
+      `${wsBaseUrl}/ws/matches/${matchId}?ticket=${encodeURIComponent(spectatorTicket.data.ticket)}`,
+    );
+    const spectatorOpen = Promise.withResolvers<void>();
+    const spectatorFirstEvent = Promise.withResolvers<void>();
+    const spectatorClosed = Promise.withResolvers<number>();
+    const spectatorEvents: string[] = [];
+    spectatorWs.addEventListener('open', () => spectatorOpen.resolve());
+    spectatorWs.addEventListener('error', (error) => spectatorOpen.reject(error));
+    spectatorWs.addEventListener('message', (event) => {
+      const { type } = JSON.parse(String(event.data)) as { type: string };
+      spectatorEvents.push(type);
+      if (type === 'marks_changed') spectatorFirstEvent.resolve();
+    });
+    spectatorWs.addEventListener('close', (event) => spectatorClosed.resolve(event.code));
+    await spectatorOpen.promise;
 
     // Mark seat 0 riichi
-    const h1Mark = await requestJson<{ markRevision: number }>(
-      `/api/matches/${matchId}/hands/${hand1Id}/marks`,
-      {
-        method: 'POST',
-        cookie: acct1.cookie,
-        body: { seatNo: 0, riichi: true },
-      },
-    );
+    const markRequest = {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: { seatNo: 0, riichi: true, expectedMarkRevision: 0 },
+    };
+    const concurrentMarks = await Promise.all([
+      requestJson<{ markRevision: number; error?: string }>(
+        `/api/matches/${matchId}/hands/${hand1Id}/marks`, markRequest,
+      ),
+      requestJson<{ markRevision: number; error?: string }>(
+        `/api/matches/${matchId}/hands/${hand1Id}/marks`, markRequest,
+      ),
+    ]);
+    checkEq(concurrentMarks.map((res) => res.status).sort(), [200, 409],
+      'Concurrent marks compare-and-swap permits one mutation');
+    checkEq(concurrentMarks.find((res) => res.status === 409)?.data.error,
+      'stale_mark_revision', 'Losing concurrent mark reports stale revision');
+    const h1Mark = concurrentMarks.find((res) => res.status === 200)!;
     checkEq(h1Mark.status, 200, 'POST marks seat 0 riichi returns 200');
     checkEq(h1Mark.data.markRevision, 1, 'markRevision bumped to 1');
+    await spectatorFirstEvent.promise;
+    const spectatorSignOut = await requestJson('/api/auth/sign-out', {
+      method: 'POST', cookie: spectator.cookie, body: {},
+    });
+    checkEq(spectatorSignOut.status, 200, 'Spectator signs out while WebSocket remains connected');
 
     // Idempotent mark repeat by same principal
     const h1MarkRepeat = await requestJson<{ markRevision: number }>(
@@ -488,6 +598,49 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       'invalid_riichi_declaration_deal_in',
       'riichiDeclarationDealInSeatNo context validation error code matches',
     );
+    for (const contradictingInput of [
+      {
+        kind: 'ron',
+        winners: [{ seatNo: 1, han: 3, fu: 30, dealInSeatNo: 0, isRiichiDeclarationDealIn: false }],
+        riichiDeclarationDealInSeatNo: 0,
+      },
+      {
+        kind: 'ron',
+        winners: [
+          { seatNo: 1, han: 3, fu: 30, dealInSeatNo: 0, isRiichiDeclarationDealIn: true },
+          { seatNo: 2, han: 3, fu: 30, dealInSeatNo: 0, isRiichiDeclarationDealIn: false },
+        ],
+      },
+      {
+        kind: 'ron',
+        isRiichiDeclarationDealIn: false,
+        winners: [{ seatNo: 1, han: 3, fu: 30, dealInSeatNo: 0, isRiichiDeclarationDealIn: true }],
+      },
+    ]) {
+      const contradictory = await requestJson<{ error: string }>(
+        `/api/matches/${matchId}/hands/${hand1Id}/preview`,
+        { method: 'POST', cookie: acct1.cookie, body: { resultInput: contradictingInput } },
+      );
+      checkEq(contradictory.status, 400, 'Shared ron discard cannot have contradictory riichi declaration flags');
+      checkEq(contradictory.data.error, 'invalid_riichi_declaration_deal_in',
+        'Contradictory declaration returns a specific validation error');
+    }
+
+    const disabledDouble = await requestJson<{ error: string }>(
+      `/api/matches/${matchId}/hands/${hand1Id}/preview`,
+      {
+        method: 'POST',
+        cookie: acct1.cookie,
+        body: {
+          resultInput: {
+            kind: 'ron',
+            winners: [{ seatNo: 1, han: 13, fu: 30, yakumanCount: 0, doubleYakumanCount: 1, dealInSeatNo: 2 }],
+          },
+        },
+      },
+    );
+    checkEq(disabledDouble.status, 400, 'Special double yakuman is rejected when ruleset disables it');
+    checkEq(disabledDouble.data.error, 'double_yakuman_disabled', 'Disabled special double returns a specific error');
 
     const rawFuPreview = await requestJson<{ perSeat: { netPoints: number }[] }>(
       `/api/matches/${matchId}/hands/${hand1Id}/preview`,
@@ -549,20 +702,29 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
 
     // Settle Hand 1 with clientEventId
     const h1ClientEventId = randomUUID();
-    const h1Result = await requestJson<{
+    const h1Settlements = await Promise.all([0, 1].map(() => requestJson<{
       perSeat: { seatNo: number; netPoints: number }[];
       nextHand: { dealerSeatNo: number; honba: number; riichiPool: number };
     }>(`/api/matches/${matchId}/hands/${hand1Id}/results`, {
       method: 'POST',
       cookie: acct1.cookie,
       body: { resultInput: h1Input, confirmedMarkRevision: 1, clientEventId: h1ClientEventId },
-    });
+    })));
+    const [h1Result, simultaneousRetry] = h1Settlements;
+    checkEq(h1Settlements.map((result) => result.status), [200, 200],
+      'Concurrent identical result submissions return two successful responses');
+    checkEq(simultaneousRetry.data, h1Result.data,
+      'Concurrent identical result submissions return the same original settlement');
     checkEq(h1Result.status, 200, 'POST Hand 1 results returns 200');
     checkEq(
       h1Result.data.perSeat.map((s) => s.netPoints),
       [6000, -2000, -2000, -2000],
       'Hand 1 settled netPoints match preview',
     );
+    checkEq(await spectatorClosed.promise, 1008,
+      'Sign-out terminates a previously connected socket before subsequent broadcasts');
+    checkEq(spectatorEvents, ['marks_changed'],
+      'The signed-out socket receives no later hand-settled event');
 
     // F7 check: Retry with the SAME clientEventId returns 200 with the ORIGINAL settlement payload
     const h1IdempotentRetry = await requestJson<{
@@ -694,6 +856,16 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       ],
       'Provisional rankings match expected final points [31000, 28200, 22000, 18800]',
     );
+    const postFinishRetry = await requestJson<typeof h1Result.data>(
+      `/api/matches/${matchId}/hands/${hand1Id}/results`,
+      {
+        method: 'POST',
+        cookie: acct1.cookie,
+        body: { resultInput: h1Input, confirmedMarkRevision: 1, clientEventId: h1ClientEventId },
+      },
+    );
+    checkEq(postFinishRetry.status, 200, 'Identical result retry remains idempotent after match finish');
+    checkEq(postFinishRetry.data, h1Result.data, 'Late result retry returns its original committed payload');
 
     // 10. Settlement preview & confirm
     const settlePreview = await requestJson<{
@@ -826,6 +998,123 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     }
 
     ws.close();
+    // A configured special double reaches the engine and survives result persistence.
+    const doublePlayer = await registerEmailAccount(`double_${runId}@example.com`, '特殊役满');
+    const doubleMatch = await requestJson<{ match: { id: string } }>('/api/matches', {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: { config: { playerCount: 3, doubleYakuman: true } },
+    });
+    checkEq(doubleMatch.status, 200, 'A three-player special-double ruleset creates a match');
+    const doubleMatchId = doubleMatch.data.match.id;
+    for (const [participant, seatNo] of [[acct2, 1], [doublePlayer, 2]] as const) {
+      const join = await requestJson<{ joinRequestId: string }>(`/api/matches/${doubleMatchId}/join-requests`, {
+        method: 'POST', cookie: participant.cookie, body: {},
+      });
+      checkEq(join.status, 200, 'Double-yakuman match accepts a join request');
+      const approve = await requestJson(`/api/matches/${doubleMatchId}/join-requests/${join.data.joinRequestId}/approve`, {
+        method: 'POST', cookie: acct1.cookie, body: { seatNo },
+      });
+      checkEq(approve.status, 200, 'Owner approves a special-double match seat');
+    }
+    for (const participant of [acct1, acct2, doublePlayer]) {
+      const tokenResponse = await requestJson<{ token: string }>(`/api/matches/${doubleMatchId}/check-in-tokens`, {
+        method: 'POST', cookie: acct1.cookie, body: {},
+      });
+      checkEq(tokenResponse.status, 200, 'Owner issues a check-in token in special-double match');
+      const checked = await requestJson(`/api/matches/${doubleMatchId}/check-ins`, {
+        method: 'POST', cookie: participant.cookie, body: { token: tokenResponse.data.token },
+      });
+      checkEq(checked.status, 200, 'Approved special-double match seat checks in');
+    }
+    const doubleFinalize = await requestJson(`/api/matches/${doubleMatchId}/seats/finalize`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq(doubleFinalize.status, 200, 'Special-double match seats finalize');
+    const doubleStart = await requestJson<{ hand: { id: string } }>(`/api/matches/${doubleMatchId}/hands`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq(doubleStart.status, 200, 'Special-double hand opens');
+    const doubleHandId = doubleStart.data.hand.id;
+    const specialDoubleInput = {
+      kind: 'ron',
+      winners: [{ seatNo: 1, han: 13, yakumanCount: 0, doubleYakumanCount: 1, dealInSeatNo: 2 }],
+    };
+    const doublePreview = await requestJson<{ perSeat: { netPoints: number }[] }>(
+      `/api/matches/${doubleMatchId}/hands/${doubleHandId}/preview`,
+      { method: 'POST', cookie: acct2.cookie, body: { resultInput: specialDoubleInput } },
+    );
+    checkEq(doublePreview.status, 200, 'Enabled special double yakuman previews successfully');
+    checkEq(doublePreview.data.perSeat.map((seat) => seat.netPoints), [0, 64000, -64000],
+      'Special double yakuman transfers two yakuman, not one');
+    const aliasDoublePreview = await requestJson<{ perSeat: { netPoints: number }[] }>(
+      `/api/matches/${doubleMatchId}/hands/${doubleHandId}/preview`,
+      {
+        method: 'POST',
+        cookie: acct2.cookie,
+        body: { resultInput: { kind: 'ron', winnerSeatNo: 1, dealInSeatNo: 2, han: 13, doubleYakumanCount: 1 } },
+      },
+    );
+    checkEq(aliasDoublePreview.status, 200, 'Single-winner alias forwards special double yakuman');
+    checkEq(aliasDoublePreview.data.perSeat, doublePreview.data.perSeat,
+      'Single-winner special double preview matches winner-array input');
+    const doubleResult = await requestJson<{ perSeat: { netPoints: number }[] }>(
+      `/api/matches/${doubleMatchId}/hands/${doubleHandId}/results`,
+      { method: 'POST', cookie: acct2.cookie, body: { resultInput: specialDoubleInput, confirmedMarkRevision: 0 } },
+    );
+    checkEq(doubleResult.status, 200, 'Enabled special double yakuman settles successfully');
+    checkEq(doubleResult.data.perSeat, doublePreview.data.perSeat,
+      'Special double settlement matches preview');
+    const storedDouble = await pool.query<{ double_count: number; multiplier: number }>(
+      `SELECT (hr.input->'winners'->0->>'doubleYakumanCount')::int AS double_count,
+              rw.yakuman_count::int AS multiplier
+       FROM app.hand_results hr
+       JOIN app.result_winners rw ON rw.result_id = hr.id
+       WHERE hr.hand_id = $1 AND rw.seat_no = 1`,
+      [doubleHandId],
+    );
+    checkEq(storedDouble.rows[0], { double_count: 1, multiplier: 2 },
+      'Persisted result retains special count and total yakuman multiplier');
+    const expiryProbe = await registerEmailAccount(`expiry_${runId}@example.com`, '会话过期');
+    const liveBearer = await requestJson('/api/me', { token: expiryProbe.token });
+    checkEq(liveBearer.status, 200, 'Bearer-only session authenticates before expiration');
+    const bearerOverCookie = await requestJson<{ principal: { id: string } }>('/api/me', {
+      token: acct2.token, cookie: acct1.cookie,
+    });
+    checkEq(bearerOverCookie.status, 200, 'A valid bearer takes precedence over another account cookie');
+    checkEq(bearerOverCookie.data.principal.id, acct2.principalId,
+      'Combined credentials resolve to the bearer principal');
+    const expiryUpdate = await pool.query(
+      `UPDATE public."session" SET "expiresAt" = now() - interval '1 minute'
+       WHERE "token" = $1`,
+      [expiryProbe.token],
+    );
+    checkEq(expiryUpdate.rowCount, 1, 'Expiration probe modifies exactly its own session');
+    const expiredBearer = await requestJson('/api/me', { token: expiryProbe.token });
+    const expiredCookie = await requestJson('/api/me', { cookie: expiryProbe.cookie });
+    checkEq(expiredBearer.status, 401, 'Expired bearer session no longer authenticates');
+    checkEq(expiredCookie.status, 401, 'Expired cookie session no longer authenticates');
+    const expiredBearerWithCookie = await requestJson('/api/me', {
+      token: expiryProbe.token, cookie: acct1.cookie,
+    });
+    checkEq(expiredBearerWithCookie.status, 401,
+      'An expired bearer cannot silently fall back to another valid cookie');
+
+    const expiringTicket = await requestJson<{ ticket: string }>(`/api/matches/${matchId}/ws-tickets`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq(expiringTicket.status, 200, 'Owner mints a WebSocket ticket to test expiry');
+    const expiringHash = createHash('sha256').update(expiringTicket.data.ticket).digest('hex');
+    await pool.query(`UPDATE app.ws_tickets SET expires_at = now() - interval '1 second' WHERE token_hash = $1`, [expiringHash]);
+    const expiredWs = new WebSocket(
+      `${wsBaseUrl}/ws/matches/${matchId}?ticket=${encodeURIComponent(expiringTicket.data.ticket)}`,
+    );
+    const expiredWsCode = await new Promise<number>((resolve) => {
+      expiredWs.addEventListener('error', () => {});
+      expiredWs.addEventListener('close', (event) => resolve(event.code));
+    });
+    checkEq(expiredWsCode, 1008, 'Expired WebSocket ticket cannot open a subscription');
+
     const revokedTicket = await requestJson<{ ticket: string }>(
       `/api/matches/${matchId}/ws-tickets`,
       { method: 'POST', cookie: acct2.cookie, body: {} },
@@ -835,6 +1124,13 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       method: 'POST', cookie: acct2.cookie, body: {},
     });
     checkEq(signOut.status, 200, 'Participant signs out before using the WS ticket');
+    const signedOutBearer = await requestJson('/api/me', { token: acct2.token });
+    checkEq(signedOutBearer.status, 401, 'Signing out a cookie revokes its bearer token too');
+    const revokedBearerWithCookie = await requestJson('/api/me', {
+      token: acct2.token, cookie: acct1.cookie,
+    });
+    checkEq(revokedBearerWithCookie.status, 401,
+      'A revoked bearer cannot silently fall back to another valid cookie');
     const blockedWs = new WebSocket(`${wsBaseUrl}/ws/matches/${matchId}?ticket=${encodeURIComponent(revokedTicket.data.ticket)}`);
     const closeCode = await new Promise<number>((resolve) => {
       blockedWs.addEventListener('error', () => { /* A rejected upgrade may emit an error before close. */ });
