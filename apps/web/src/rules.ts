@@ -22,23 +22,6 @@ export interface TableRules {
 }
 export interface RuleTemplate { id: string; name: string; source: string; difference: string; rules: TableRules; }
 
-const four: TableRules = {
-  playerCount: 4, startPoints: 30000, returnPoints: 30000, uma: [15, 5, -5, -15],
-  ryuukyokuPoolTotal: 3000, honbaPerPayer: 100, roundLength: 'south', endTarget: 30000,
-  maxRounds: 12, dealerFinish: true, bustEndsMatch: true, openTanyao: true, redFives: 0,
-  kiriageMangan: false, kazoeYakuman: true, sanmaTsumoLoss: false, doubleRon: false,
-};
-const three: TableRules = {
-  ...four, playerCount: 3, startPoints: 35000, returnPoints: 40000, uma: [20, 0, -20],
-  ryuukyokuPoolTotal: 2000, honbaPerPayer: 100, endTarget: 40000, redFives: 2,
-  sanmaTsumoLoss: true, doubleRon: true,
-};
-export const presets: RuleTemplate[] = [
-  { id: 'wrc-ref', name: '四麻国际竞技参考 v1', source: '对照 WRC 2025 · 参考／待验证', difference: '低点立直、负分续行、同点马点、终局供托与比赛处罚未完全覆盖；不可视为 WRC 兼容。', rules: four },
-  { id: 'sanma-ref', name: '三麻常见玩法参考 v1', source: '对照天凤三麻说明 · 参考／待验证', difference: '流局罚符 2,000 为产品候选值；拔北、宝牌及支付差异待核对，非平台官方规则。', rules: three },
-  { id: 'four-home', name: '四麻家规 v1', source: '本产品家规示例', difference: '25,000 起／30,000 返；赤五三枚；双响成立。', rules: { ...four, startPoints: 25000, uma: [20, 10, -10, -20], redFives: 3, doubleRon: true } },
-  { id: 'three-home', name: '三麻家规 v1', source: '本产品家规示例', difference: '3,000 流局罚符；自摸损；双响成立。', rules: { ...three, ryuukyokuPoolTotal: 3000 } },
-];
 
 export const winds = ['东', '南', '西', '北'];
 export const pointText = (n: number) => n.toLocaleString('zh-CN');
