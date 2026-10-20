@@ -1,12 +1,11 @@
 import type { TableRules } from './rules';
 import { oka, pointText, ruleOverrides } from './rules';
+import Segmented from './Segmented';
 
 function Choices<T extends string | boolean>({ label, value, options, onChange }: {
   label: string; value: T; options: { value: T; label: string }[]; onChange: (value: T) => void;
 }) {
-  return <div className="rule-choice"><span>{label}</span><div className="segmented" role="group" aria-label={label}>{options.map((option) =>
-    <button type="button" key={String(option.value)} className={value === option.value ? 'selected' : ''}
-      aria-pressed={value === option.value} onClick={() => onChange(option.value)}>{option.label}</button>)}</div></div>;
+  return <div className="rule-choice"><span>{label}</span><Segmented label={label} options={options} value={value} onChange={onChange} /></div>;
 }
 const yesNo = [{ value: true, label: '开启' }, { value: false, label: '关闭' }];
 const umaPresets = {
@@ -66,7 +65,7 @@ export default function RulesAdjustment({ base, rules, onChange }: {
       {numeric('honbaPerPayer', '本场自摸每付款者', [100, 200])}
     </div>
     {choice('multiRon', '多家荣和', [{ value: 'head_bump', label: '头跳' }, { value: 'double_ron', label: '双响' }, { value: 'allow_all', label: '允许全部' }])}
-    {rules.multiRon !== 'head_bump' && choice('doubleRonHonbaPolicy', '双响本场分配', [{ value: 'nearest_only', label: '最近胜者' }, { value: 'each_winner', label: '每位胜者' }])}
+    {rules.multiRon !== 'head_bump' && choice('doubleRonHonbaPolicy', '双响本场分配', [{ value: 'nearest_only', label: '仅最近一家' }, { value: 'each_winner', label: '每位赢家各一份' }])}
     {rules.multiRon !== 'head_bump' && <p className="rule-detail">双荣供托固定由距离放铳者最近的赢家领取；上述选项只决定每本本场支付给几位赢家。</p>}
     {choice('allowLowPointRiichi', '低于 1,000 点可立直', yesNo)}
     {choice('nagashiManganEnabled', '流局满贯', yesNo)}

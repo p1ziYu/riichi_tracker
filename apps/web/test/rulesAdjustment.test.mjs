@@ -5,9 +5,10 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer } from 'vite';
 
 const vite = await createServer({ server: { middlewareMode: true }, appType: 'custom' });
-const [{ default: RulesAdjustment }, { seedRules, LOCAL_SEEDS }] = await Promise.all([
+const [{ default: RulesAdjustment }, { seedRules, LOCAL_SEEDS }, { segmentedSize }] = await Promise.all([
   vite.ssrLoadModule('/src/RulesAdjustment.tsx'),
   vite.ssrLoadModule('/src/localMatches.ts'),
+  vite.ssrLoadModule('/src/Segmented.tsx'),
 ]);
 
 test.after(async () => { await vite.close(); });
@@ -27,6 +28,19 @@ test('shared adjustment starts collapsed with template values and enabled policy
   assert.match(html, /aria-label="多家荣和"><button[^>]*aria-pressed="true"[^>]*>头跳<\/button>/);
   assert.match(html, /aria-label="马点预设"/);
   assert.match(html, /1 位马点<input type="number" step="0.1" value="15"/);
+});
+
+test('segmented size follows the longest option and the number of equal-width boxes', () => {
+  const short = [{ value: 'a', label: '开启' }, { value: 'b', label: '关闭' }];
+  assert.equal(segmentedSize(short), '');
+  assert.equal(segmentedSize([...short, { value: 'c', label: '每位赢家各一份' }]), 'segmented--small');
+  assert.equal(segmentedSize([{ value: 'a', label: '仅最近一家' }, { value: 'b', label: '每位赢家各一份' }]), 'segmented--medium');
+  assert.equal(segmentedSize([{ value: 'a', label: '荣和' }, { value: 'b', label: '自摸' },
+    { value: 'c', label: '荒牌流局' }, { value: 'd', label: '流局满贯' }]), 'segmented--small');
+  const base = seedRules(LOCAL_SEEDS[0]);
+  const html = rendered(base, { ...base, multiRon: 'double_ron' });
+  assert.match(html, /class="segmented segmented--medium" role="group" aria-label="双响本场分配"/);
+  assert.match(html, /仅最近一家<\/button><button[^>]*>每位赢家各一份<\/button>/);
 });
 
 test('diff count and reset/switch props render the current template rather than prior edits', () => {
