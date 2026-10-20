@@ -506,19 +506,18 @@ describe('Ryuukyoku tenpai splits (4p & 3p) and dealer progression', () => {
     assert.equal(t4.nextHand.honba, 1);
   });
 
-  it('supports 4p config with notenPenaltyTotal = 2000 (1000 each way)', () => {
-    const rules4p2000 = makeRules({ ...HOUSE_4P_V1, notenPenaltyTotal: 2000 });
-    const out = calculateSettlement(
-      rules4p2000,
-      make4pHand(),
-      { kind: 'ryuukyoku', winners: [], tenpai: [true, false, true, false] },
-      ENGINE_VERSION,
-    );
-    assert.deepEqual(
-      out.perSeat.map((s) => s.netPoints),
-      [1000, -1000, 1000, -1000],
-    );
-    assertZeroSumWithPool(out, 0);
+  it('honors a divisible custom 4p noten total across every nontrivial split', () => {
+    const rules = makeRules({ ...HOUSE_4P_V1, notenPenaltyTotal: 600 });
+    for (const [tenpai, expected] of [
+      [[true, false, false, false], [600, -200, -200, -200]],
+      [[true, true, false, false], [300, 300, -300, -300]],
+      [[true, true, true, false], [200, 200, 200, -600]],
+    ] as const) {
+      const out = calculateSettlement(rules, make4pHand(),
+        { kind: 'ryuukyoku', winners: [], tenpai: [...tenpai] }, ENGINE_VERSION);
+      assert.deepEqual(out.perSeat.map((seat) => seat.netPoints), expected);
+      assertZeroSumWithPool(out, 0);
+    }
   });
 
   it('splits 3p ryuukyoku for both 3000 template (HOUSE_3P_V1) and 2000 template (COMMON_3P_REF_V1)', () => {
@@ -601,7 +600,7 @@ describe('Ryuukyoku tenpai splits (4p & 3p) and dealer progression', () => {
 
 describe('Nagashi Mangan and Chombo', () => {
   it('pays nagashi mangan as tsumo mangan and carries over riichi pool by default', () => {
-    const rules4p = makeRules({ ...HOUSE_4P_V1 });
+    const rules4p = makeRules({ ...HOUSE_4P_V1, nagashiManganEnabled: true });
     const hand = make4pHand({
       honba: 2,
       riichiPool: 1000,
@@ -630,7 +629,7 @@ describe('Nagashi Mangan and Chombo', () => {
 
     // When config.nagashiCollectsRiichiPool is true, winner collects the 2000 pool
     const outCollect = calculateSettlement(
-      makeRules({ ...HOUSE_4P_V1, nagashiCollectsRiichiPool: true }),
+      makeRules({ ...HOUSE_4P_V1, nagashiManganEnabled: true, nagashiCollectsRiichiPool: true }),
       hand,
       { kind: 'nagashi_mangan', winners: [{ seatNo: 1, han: 5, fu: 30 }] },
       ENGINE_VERSION,
@@ -709,13 +708,8 @@ describe('Terminal Settlement (calculateTerminalSettlement)', () => {
     );
   });
 
-  it('determines game end using actual points EXCLUDING unclaimed riichi pool and transfers pool to provisional #1 by tie-breaker (§4.5 & §12.1)', () => {
+  it('keeps the pool untouched and awards no final score while the match continues (§4.5 & §12.1)', () => {
     const rules = makeRules({ ...HOUSE_4P_V1 });
-
-    // Tie case with unclaimed riichi pool:
-    // Seats 1 and 2 are tied at 29,000; startingDealerSeatNo is 2, so Seat 2 has priority over Seat 1!
-    // Unclaimed pool is 2,000 (total points = 21000 + 29000 + 29000 + 19000 + 2000 = 100,000).
-    // Note: max actual points before pool is 29,000 (< 30,000 targetPoints), so with requireTargetPoints: true, isGameEnd is false!
     const res = calculateTerminalSettlement(
       [
         { seatNo: 0, points: 21000 },
@@ -726,29 +720,20 @@ describe('Terminal Settlement (calculateTerminalSettlement)', () => {
       rules,
       { riichiPool: 2000, startingDealerSeatNo: 2, requireTargetPoints: true },
     );
-
-    // Game end evaluated BEFORE adding the 2000 pool (29000 < 30000)
     assert.equal(res.isGameEnd, false);
     assert.equal(res.gameEndReason, 'not_ended');
-
-    // Provisional #1 is Seat 2 (earliest from startingDealerSeatNo=2), receives +2000 => 31000
-    assert.equal(res.poolRecipientSeatNo, 2);
-    assert.equal(res.perSeat[2].finalPoints, 31000);
-    assert.equal(res.perSeat[2].rank, 1);
-    assert.equal(res.perSeat[1].finalPoints, 29000);
-    assert.equal(res.perSeat[1].rank, 2);
-    assert.equal(res.perSeat[0].rank, 3);
-    assert.equal(res.perSeat[3].rank, 4);
-    assert.equal(
-      res.perSeat.reduce((acc, s) => acc + s.totalTenths, 0),
-      0,
-    );
+    assert.equal(res.poolRecipientSeatNo, null);
+    assert.equal(res.unclaimedRiichiPoints, 2000);
+    assert.deepEqual(res.perSeat.map((s) => s.finalPoints), [21000, 29000, 29000, 19000]);
+    assert.deepEqual(res.standings, []);
+    assert.deepEqual(res.tenths, []);
   });
 
   it('handles 3-player terminal settlement with tie-breaking and zero-sum tenths', () => {
     const rules3p = makeRules({ ...HOUSE_3P_V1 });
     // 3 * 35,000 = 105,000 total; Seat 0 and Seat 1 tied at 40,000, Seat 2 at 25,000
     const res = calculateTerminalSettlement([40000, 40000, 25000], rules3p, { startingDealerSeatNo: 1 });
+    if (!res.isGameEnd) throw new Error('This terminal case must finish.');
     // Starting dealer is Seat 1 => Seat 1 gets rank 1 (+150 oka + 200 uma + 0 base = +350 tenths)
     // Seat 0 gets rank 2 (0 oka + 0 uma + 0 base = 0 tenths)
     // Seat 2 gets rank 3 (0 oka - 200 uma - 150 base = -350 tenths)

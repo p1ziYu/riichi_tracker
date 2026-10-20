@@ -41,8 +41,11 @@ export interface WinnerInput {
   seatNo: number;
   han: number;
   fu: number;
+  /** Number of ordinary single yakuman; special doubles use doubleYakumanCount instead. */
   yakumanCount?: number;
   dealInSeatNo?: number | null;
+  /** Number of special double yakuman; requires the separate doubleYakuman switch. */
+  doubleYakumanCount?: number;
   /**
    * If true, the winning tile on a ron was the discarder's riichi declaration tile.
    * Per docs §4.4 / §12.1, a riichi declaration whose tile is ron'd does NOT stand (no 1,000 deducted).
@@ -57,14 +60,13 @@ export interface ResultInput {
   tenpai?: boolean[] | null;
   chomboRole?: Record<number, 'offender' | 'victim'> | null;
   /**
-   * Optional seat number whose riichi declaration tile was ron'd (deal-in on riichi declaration).
-   * When set (or when WinnerInput.isRiichiDeclarationDealIn is true), the deal-in seat's riichi mark
-   * does NOT stand and no 1,000 stick is deducted from that seat.
+   * Only valid on ron when this marked seat is the winner's actual discarder;
+   * its 1,000-point stick does not stand (§4.4 / §12.1).
    */
   riichiDeclarationDealInSeatNo?: number | null;
   /**
-   * Optional per-seat manual net point deltas for P0 chombo manual adjudication.
-   * Keys are seatNo, values are integer point deltas; must sum to 0 across all seats.
+   * Optional per-seat manual net point deltas for P0 chombo adjudication.
+   * Every keyed seat must exist; values must be multiples of 100 and sum to zero (§4.2 / §4.4).
    */
   manualPayments?: Record<number, number> | null;
 }
@@ -100,12 +102,17 @@ export interface EngineRulesConfig {
   oka: number;
   honbaPerPayer: number;
   honbaRon: number;
+  /** Configured draw total, divisible into legal 100-point payments for every tenpai split (§4.2 / §12.1). */
   notenPenaltyTotal: number;
   kiriageMangan: boolean;
   kazoeYakuman: boolean;
+  /** Count multiple ordinary single yakuman; disabled caps yakumanCount at one. */
   compositeYakuman: boolean;
+  /** Count explicitly identified special doubles via WinnerInput.doubleYakumanCount. */
   doubleYakuman: boolean;
-  /** 3p tsumo payment mode: true = tsumo loss (自摸损, default per §4.2), false = full total split */
+  /** Enable automated nagashi mangan; P0 templates leave it disabled (§4.2). */
+  nagashiManganEnabled: boolean;
+  /** 3p: true = tsumo loss; false = rounded full 4p total split between two payers (§4.2 / §4.3). */
   tsumoLoss: boolean;
   /** Multi-ron policy: 'double_ron' (default house rule: 2 winners allowed, 3 winners abortive draw in 4p) | 'head_bump' | 'allow_all' */
   multiRon: 'double_ron' | 'head_bump' | 'allow_all';
@@ -142,6 +149,7 @@ export const HOUSE_4P_V1: Readonly<EngineRulesConfig> = Object.freeze({
   multiRon: 'double_ron',
   doubleRonHonbaPolicy: 'each_winner',
   nagashiCollectsRiichiPool: false,
+  nagashiManganEnabled: false,
   bustEndsGame: true,
   allowLowPointRiichi: false,
 });
@@ -165,6 +173,7 @@ export const WRC_4P_REF_V1: Readonly<EngineRulesConfig> = Object.freeze({
   multiRon: 'head_bump',
   doubleRonHonbaPolicy: 'nearest_only',
   nagashiCollectsRiichiPool: false,
+  nagashiManganEnabled: false,
   bustEndsGame: false,
   allowLowPointRiichi: true,
 });
@@ -188,6 +197,7 @@ export const HOUSE_3P_V1: Readonly<EngineRulesConfig> = Object.freeze({
   multiRon: 'double_ron',
   doubleRonHonbaPolicy: 'each_winner',
   nagashiCollectsRiichiPool: false,
+  nagashiManganEnabled: false,
   bustEndsGame: true,
   allowLowPointRiichi: false,
 });
@@ -211,6 +221,7 @@ export const COMMON_3P_REF_V1: Readonly<EngineRulesConfig> = Object.freeze({
   multiRon: 'double_ron',
   doubleRonHonbaPolicy: 'each_winner',
   nagashiCollectsRiichiPool: false,
+  nagashiManganEnabled: false,
   bustEndsGame: true,
   allowLowPointRiichi: false,
 });
@@ -243,23 +254,30 @@ function calculateBasicPoints(
   han: number,
   fu: number,
   yakumanCount: number | undefined,
+  doubleYakumanCount: number | undefined,
   config: EngineRulesConfig,
 ): number {
   if (!Number.isFinite(han) || !Number.isInteger(han) || han < 1) {
     throw new Error(`Invalid han: ${han}. Must be an integer >= 1.`);
   }
-  if (yakumanCount !== undefined && yakumanCount !== null) {
-    if (!Number.isFinite(yakumanCount) || !Number.isInteger(yakumanCount) || yakumanCount < 0) {
-      throw new Error(`Invalid yakumanCount: ${yakumanCount}.`);
-    }
-    if (yakumanCount >= 1) {
-      const multiplier = config.compositeYakuman || config.doubleYakuman ? yakumanCount : 1;
-      return 8000 * multiplier;
+  // Fu does not affect yakuman points, but malformed submitted fu must not bypass validation.
+  const effectiveFu = fu === undefined ? undefined : resolveEffectiveFu(fu);
+  for (const [name, count] of [['yakumanCount', yakumanCount], ['doubleYakumanCount', doubleYakumanCount]] as const) {
+    if (count !== undefined && (!Number.isInteger(count) || count < 0)) {
+      throw new Error(`Invalid ${name}: ${count}.`);
     }
   }
-
-  const effectiveFu = resolveEffectiveFu(fu);
-
+  if ((doubleYakumanCount ?? 0) > 0 && !config.doubleYakuman) {
+    throw new Error('Special double yakuman is disabled by this ruleset.');
+  }
+  const multiplier = (config.compositeYakuman ? yakumanCount ?? 0 : Math.min(yakumanCount ?? 0, 1)) +
+    2 * (doubleYakumanCount ?? 0);
+  if (multiplier > 0) {
+    return 8000 * (config.compositeYakuman ? multiplier : Math.min(multiplier, 2));
+  }
+  if (effectiveFu === undefined) {
+    throw new Error('Invalid fu: a non-yakuman hand requires fu.');
+  }
   if (han >= 13) {
     return config.kazoeYakuman ? 8000 : 6000;
   }
@@ -331,18 +349,17 @@ export function normalizeRulesConfig(
       `Seat count mismatch: config specifies ${explicitPlayerCount} players, but received ${inferredPlayerCount} seats.`,
     );
   }
+  if (templateBase && (explicitPlayerCount !== undefined && explicitPlayerCount !== templateBase.playerCount ||
+    inferredPlayerCount !== undefined && inferredPlayerCount !== templateBase.playerCount)) {
+    throw new Error(`Seat count mismatch: template ${templateKey} requires ${templateBase.playerCount} players.`);
+  }
 
   const resolvedCount = explicitPlayerCount ?? templateBase?.playerCount ?? inferredPlayerCount ?? 4;
   if (resolvedCount !== 3 && resolvedCount !== 4) {
     throw new Error(`Invalid player count: ${resolvedCount}. Expected 3 or 4.`);
   }
   const playerCount: 3 | 4 = resolvedCount;
-  const base: Readonly<EngineRulesConfig> =
-    templateBase && templateBase.playerCount === playerCount
-      ? templateBase
-      : playerCount === 3
-        ? HOUSE_3P_V1
-        : HOUSE_4P_V1;
+  const base: Readonly<EngineRulesConfig> = templateBase ?? (playerCount === 3 ? HOUSE_3P_V1 : HOUSE_4P_V1);
 
   const startingPoints =
     pickNumber(rawConfig, ['startingPoints', 'startPoints', 'initialPoints', 'openingBalance']) ?? base.startingPoints;
@@ -443,15 +460,17 @@ export function normalizeRulesConfig(
   if (!Number.isInteger(notenPenaltyTotal) || notenPenaltyTotal < 0 || notenPenaltyTotal % 100 !== 0) {
     throw new Error(`Invalid notenPenaltyTotal: ${notenPenaltyTotal}. Must be a non-negative multiple of 100.`);
   }
-  // For 3p, every valid split (1 or 2 tenpai) must divide evenly into 100-point units per §12.1
-  if (playerCount === 3 && (notenPenaltyTotal / 2) % 100 !== 0) {
-    throw new Error(`Invalid 3p notenPenaltyTotal: ${notenPenaltyTotal} is not evenly divisible by 2 into 100-point units.`);
+  // Every possible tenpai/noten split must conserve the configured total in 100-point units.
+  const unit = playerCount === 3 ? 200 : 600; // 4p needs both 1/3 and 2/2 splits.
+  if (notenPenaltyTotal % unit !== 0) {
+    throw new Error(`Invalid ${playerCount}p notenPenaltyTotal: ${notenPenaltyTotal} must be divisible by ${unit}.`);
   }
 
   const kiriageMangan = pickBoolean(rawConfig, ['kiriageMangan', 'kiriage']) ?? base.kiriageMangan;
   const kazoeYakuman = pickBoolean(rawConfig, ['kazoeYakuman']) ?? base.kazoeYakuman;
   const compositeYakuman = pickBoolean(rawConfig, ['compositeYakuman']) ?? base.compositeYakuman;
   const doubleYakuman = pickBoolean(rawConfig, ['doubleYakuman']) ?? base.doubleYakuman;
+  const nagashiManganEnabled = pickBoolean(rawConfig, ['nagashiManganEnabled']) ?? base.nagashiManganEnabled;
 
   let tsumoLoss = pickBoolean(rawConfig, ['tsumoLoss']) ?? base.tsumoLoss;
   if (typeof rawConfig.tsumoPaymentMode === 'string') {
@@ -496,6 +515,7 @@ export function normalizeRulesConfig(
     kazoeYakuman,
     compositeYakuman,
     doubleYakuman,
+    nagashiManganEnabled,
     tsumoLoss,
     multiRon,
     doubleRonHonbaPolicy,
@@ -570,10 +590,11 @@ function computeTsumoPaymentsForWinner(
   } else {
     // 3p without tsumo-loss (full 4p total compensated by the 2 payers):
     if (isDealerWinner) {
-      const perPayer = roundUp100(3 * basicPoints);
-      for (const payerSeatNo of nonWinners) {
-        payments.set(payerSeatNo, perPayer);
-      }
+      // Compute the fourth-player total after rounding each of the three original payers.
+      const total4p = 3 * roundUp100(2 * basicPoints);
+      const firstShare = roundUp100(total4p / 2);
+      payments.set(nonWinners[0], firstShare);
+      payments.set(nonWinners[1], total4p - firstShare);
     } else {
       const total4p = roundUp100(2 * basicPoints) + 2 * roundUp100(basicPoints);
       const nonDealerShare = roundUp100(total4p / 3);
@@ -658,18 +679,33 @@ export function calculateSettlement(
   };
 
   const kind = resultInput.kind;
+  const declarationSeatNo = resultInput.riichiDeclarationDealInSeatNo;
+  if (declarationSeatNo !== undefined && declarationSeatNo !== null) {
+    if (kind !== 'ron' || !Array.isArray(resultInput.winners) ||
+      !seatMap.get(declarationSeatNo)?.isRiichi ||
+      !resultInput.winners.some((w) => w.dealInSeatNo === declarationSeatNo && w.seatNo !== declarationSeatNo)) {
+      throw new Error('riichiDeclarationDealInSeatNo must be a marked seat that dealt in on a ron.');
+    }
+  }
+  if (Array.isArray(resultInput.winners) && resultInput.winners.some((w) =>
+    w.isRiichiDeclarationDealIn && (kind !== 'ron' || !seatMap.get(w.dealInSeatNo!)?.isRiichi))) {
+    throw new Error('isRiichiDeclarationDealIn requires a marked ron deal-in seat.');
+  }
 
   // Handle Chombo first (P0: void/replay or manual adjudication)
   if (kind === 'chombo') {
     if (resultInput.manualPayments && Object.keys(resultInput.manualPayments).length > 0) {
       let manualSum = 0;
-      for (const s of handState.seats) {
-        const delta = resultInput.manualPayments[s.seatNo] ?? 0;
-        if (!Number.isFinite(delta) || !Number.isInteger(delta)) {
-          throw new Error(`Invalid manual payment for seat ${s.seatNo}: ${delta}.`);
+      for (const [key, delta] of Object.entries(resultInput.manualPayments)) {
+        const seatNo = Number(key);
+        if (!Number.isInteger(seatNo) || String(seatNo) !== key || !seatMap.has(seatNo)) {
+          throw new Error(`Invalid manual payment seat: ${key}.`);
+        }
+        if (!Number.isFinite(delta) || !Number.isInteger(delta) || delta % 100 !== 0) {
+          throw new Error(`Invalid manual payment for seat ${seatNo}: ${delta}. Must be a multiple of 100.`);
         }
         manualSum += delta;
-        addEntry(s.seatNo, 'manual_adjudication', delta);
+        addEntry(seatNo, 'manual_adjudication', delta);
       }
       if (manualSum !== 0) {
         throw new Error(`Invalid chombo manualPayments: sum must be 0, got ${manualSum}.`);
@@ -700,11 +736,8 @@ export function calculateSettlement(
 
   // Determine which seats have a voided riichi due to deal-in on their riichi declaration tile (§4.4 / §12.1)
   const voidedRiichiSeats = new Set<number>();
-  if (
-    resultInput.riichiDeclarationDealInSeatNo !== undefined &&
-    resultInput.riichiDeclarationDealInSeatNo !== null
-  ) {
-    voidedRiichiSeats.add(resultInput.riichiDeclarationDealInSeatNo);
+  if (declarationSeatNo !== undefined && declarationSeatNo !== null) {
+    voidedRiichiSeats.add(declarationSeatNo);
   }
   if (kind === 'ron' && Array.isArray(resultInput.winners)) {
     for (const w of resultInput.winners) {
@@ -757,7 +790,7 @@ export function calculateSettlement(
         throw new Error(`All winners in a multi-ron must share the same dealInSeatNo.`);
       }
       // Validate han/fu on all submitted winners even if triple-ron becomes abortive draw
-      calculateBasicPoints(w.han, w.fu, w.yakumanCount, config);
+      calculateBasicPoints(w.han, w.fu, w.yakumanCount, w.doubleYakumanCount, config);
     }
 
     // 4p Triple Ron abortive draw per §4.2 ("三家荣和按途中流局") and §4.4 ("模板允许的途中流局: 连庄, +1, 保留")
@@ -791,7 +824,7 @@ export function calculateSettlement(
     const nearestWinnerSeatNo = activeWinners[0].seatNo;
 
     for (const w of activeWinners) {
-      const basicPoints = calculateBasicPoints(w.han, w.fu, w.yakumanCount, config);
+      const basicPoints = calculateBasicPoints(w.han, w.fu, w.yakumanCount, w.doubleYakumanCount, config);
       const isDealerWinner = w.seatNo === handState.dealerSeatNo;
       const handPoints = roundUp100((isDealerWinner ? 6 : 4) * basicPoints);
 
@@ -836,7 +869,7 @@ export function calculateSettlement(
       throw new Error('Tsumo winner must not have a dealInSeatNo.');
     }
 
-    const basicPoints = calculateBasicPoints(w.han, w.fu, w.yakumanCount, config);
+    const basicPoints = calculateBasicPoints(w.han, w.fu, w.yakumanCount, w.doubleYakumanCount, config);
     const basePayments = computeTsumoPaymentsForWinner(
       w.seatNo,
       basicPoints,
@@ -883,6 +916,11 @@ export function calculateSettlement(
       throw new Error('Ryuukyoku must not have winners.');
     }
     const tenpaiMap = resolveTenpaiMap(handState, resultInput, playerCount);
+    for (const s of handState.seats) {
+      if (s.isRiichi && !tenpaiMap.get(s.seatNo)) {
+        throw new Error(`Riichi seat ${s.seatNo} is noten: manual adjudication required.`);
+      }
+    }
     const tenpaiSeats = seatOrder.filter((s) => tenpaiMap.get(s) === true);
     const notenSeats = seatOrder.filter((s) => !tenpaiMap.get(s));
     const tenpaiCount = tenpaiSeats.length;
@@ -890,30 +928,8 @@ export function calculateSettlement(
 
     if (tenpaiCount > 0 && tenpaiCount < playerCount && config.notenPenaltyTotal > 0) {
       const totalPenalty = config.notenPenaltyTotal;
-      let receivePerTenpai: number;
-      let payPerNoten: number;
-
-      if (playerCount === 4 && totalPenalty === 2000 && (tenpaiCount === 1 || tenpaiCount === 3)) {
-        // When 4p config overrides total to 2000 ("1000 each way" per Deliverable 1):
-        // 2 tenpai / 2 noten: each noten pays 1000, each tenpai gets 1000 (total 2000).
-        // 1 tenpai / 3 noten: each noten pays 1000, the 1 tenpai gets 3000 (or if 3 tenpai: noten pays 3000, each tenpai gets 1000).
-        // However, if totalPenalty is evenly divisible into 100-point shares, use exact totalPenalty split.
-        if (tenpaiCount === 1) {
-          payPerNoten = 1000;
-          receivePerTenpai = 3000;
-        } else {
-          payPerNoten = 3000;
-          receivePerTenpai = 1000;
-        }
-      } else {
-        receivePerTenpai = totalPenalty / tenpaiCount;
-        payPerNoten = totalPenalty / notenCount;
-        if (receivePerTenpai % 100 !== 0 || payPerNoten % 100 !== 0) {
-          throw new Error(
-            `notenPenaltyTotal (${totalPenalty}) cannot be evenly split into 100-point units for ${tenpaiCount} tenpai / ${notenCount} noten.`,
-          );
-        }
-      }
+      const receivePerTenpai = totalPenalty / tenpaiCount;
+      const payPerNoten = totalPenalty / notenCount;
 
       for (const s of tenpaiSeats) {
         addEntry(s, 'tenpai_receipt', receivePerTenpai);
@@ -942,6 +958,9 @@ export function calculateSettlement(
   }
 
   if (kind === 'nagashi_mangan') {
+    if (!config.nagashiManganEnabled) {
+      throw new Error('Automatic nagashi mangan is disabled: manual adjudication required.');
+    }
     if (!Array.isArray(resultInput.winners) || resultInput.winners.length < 1) {
       throw new Error('Nagashi mangan requires at least one winner.');
     }
@@ -1085,23 +1104,27 @@ export interface TerminalSeatResult {
   competencyPoints: number;
 }
 
-export interface TerminalSettlementOutput {
-  /**
-   * Whether the game end condition is satisfied based on ACTUAL points EXCLUDING the riichi pool (§4.5).
-   */
-  isGameEnd: boolean;
-  gameEndReason: 'bust' | 'target_reached' | 'final_round_complete' | 'not_ended';
-  /** Unclaimed riichi pool points transferred to provisional #1 */
-  unclaimedRiichiPoints: number;
-  /** Seat number of the provisional #1 who received the unclaimed riichi pool */
-  poolRecipientSeatNo: number;
-  /** Per-seat terminal settlement results in input seat order */
-  perSeat: TerminalSeatResult[];
-  /** Per-seat terminal settlement results ordered by final rank (1..playerCount) */
-  standings: TerminalSeatResult[];
-  /** Convenience array of totalTenths in input seat order */
-  tenths: number[];
-}
+export type TerminalSettlementOutput =
+  | {
+      isGameEnd: false;
+      gameEndReason: 'not_ended';
+      /** Pool remains on the table; no seat receives it yet. */
+      unclaimedRiichiPoints: number;
+      poolRecipientSeatNo: null;
+      perSeat: { seatNo: number; rawPoints: number; finalPoints: number }[];
+      standings: [];
+      tenths: [];
+    }
+  | {
+      isGameEnd: true;
+      gameEndReason: 'bust' | 'target_reached' | 'final_round_complete';
+      /** Pool transferred from the table to provisional first place. */
+      unclaimedRiichiPoints: number;
+      poolRecipientSeatNo: number;
+      perSeat: TerminalSeatResult[];
+      standings: TerminalSeatResult[];
+      tenths: number[];
+    };
 
 export function calculateTerminalSettlement(
   finalPoints: TerminalPointsInput,
@@ -1214,17 +1237,28 @@ export function calculateTerminalSettlement(
     pickBoolean(rawConfig, ['requireTargetPoints']) ??
     false;
 
-  let isGameEnd = true;
-  let gameEndReason: 'bust' | 'target_reached' | 'final_round_complete' | 'not_ended' = 'final_round_complete';
-  if (anyBust) {
-    isGameEnd = true;
-    gameEndReason = 'bust';
-  } else if (maxActualPoints >= config.targetPoints) {
-    isGameEnd = true;
-    gameEndReason = 'target_reached';
-  } else if (requireTargetPoints) {
-    isGameEnd = false;
-    gameEndReason = 'not_ended';
+  const gameEndReason = anyBust ? 'bust' :
+    maxActualPoints >= config.targetPoints ? 'target_reached' :
+      requireTargetPoints ? 'not_ended' : 'final_round_complete';
+
+  // Ledger conservation applies even while the match continues; the pool stays outside seat points.
+  const totalPoints = seatEntries.reduce((acc, s) => acc + s.points, unclaimedRiichiPoints);
+  const expectedTotalPoints = playerCount * config.startingPoints;
+  if (totalPoints !== expectedTotalPoints) {
+    throw new Error(
+      `Total points conservation violated: sum(points + pool)=${totalPoints}, expected ${expectedTotalPoints} (${playerCount} * ${config.startingPoints}).`,
+    );
+  }
+  if (gameEndReason === 'not_ended') {
+    return {
+      isGameEnd: false,
+      gameEndReason,
+      unclaimedRiichiPoints,
+      poolRecipientSeatNo: null,
+      perSeat: seatEntries.map((s) => ({ seatNo: s.seatNo, rawPoints: s.points, finalPoints: s.points })),
+      standings: [],
+      tenths: [],
+    };
   }
 
   // Step 2 (§4.5): Rank by actual points (before pool transfer), breaking ties by earliest seat from starting dealer.
@@ -1245,14 +1279,7 @@ export function calculateTerminalSettlement(
     finalPoints: s.points + (s.seatNo === poolRecipientSeatNo ? unclaimedRiichiPoints : 0),
   }));
 
-  // Validate total points conservation: sum(rawPoints) + unclaimedRiichiPoints === playerCount * startingPoints
-  const totalPoints = adjustedEntries.reduce((acc, s) => acc + s.finalPoints, 0);
-  const expectedTotalPoints = playerCount * config.startingPoints;
-  if (totalPoints !== expectedTotalPoints) {
-    throw new Error(
-      `Total points conservation violated: sum(finalPoints)=${totalPoints}, expected ${expectedTotalPoints} (${playerCount} * ${config.startingPoints}).`,
-    );
-  }
+  // The pool is transferred only after game end was determined from raw seat points.
 
   // Step 3 (§4.5): Final ranking after pool transfer, breaking ties by fixed seat order from starting dealer
   const finalSorted = [...adjustedEntries].sort((a, b) => {
@@ -1299,7 +1326,7 @@ export function calculateTerminalSettlement(
 
   const perSeat = seatEntries.map((s) => resultBySeat.get(s.seatNo)!);
   return {
-    isGameEnd,
+    isGameEnd: true,
     gameEndReason,
     unclaimedRiichiPoints,
     poolRecipientSeatNo,
