@@ -31,6 +31,17 @@ export async function buildApp() {
     credentials: true,
   });
 
+  // CORS only controls whether a browser can read a response; simple cross-origin
+  // POSTs can still carry session cookies and mutate state. Reject their Origin
+  // before reaching auth or application write handlers.
+  app.addHook('onRequest', async (req, reply) => {
+    const origin = req.headers.origin;
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS'
+      && typeof origin === 'string' && ALLOWED_CORS_ORIGINS[origin] !== true) {
+      return reply.code(403).send({ error: 'invalid_origin', message: 'Untrusted origin' });
+    }
+  });
+
   await app.register(websocket);
 
   // Tolerate empty JSON bodies (e.g. POST {} or POST with empty payload and Content-Type: application/json)

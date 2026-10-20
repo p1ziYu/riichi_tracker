@@ -3,6 +3,8 @@ import type { FastifyInstance } from 'fastify';
 import { resolvePrincipal } from '../auth.js';
 import { pool } from '../db.js';
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function prepareEngineRulesConfig(rawConfig: Record<string, unknown>): Record<string, unknown> {
   const multipleRon = rawConfig.multipleRon;
   let derivedMultiRon = rawConfig.multiRon;
@@ -108,6 +110,9 @@ export function registerRulesetsRoutes(app: FastifyInstance): void {
 
   app.get<{ Params: { versionId: string } }>('/api/rulesets/versions/:versionId', async (req, reply) => {
     const { versionId } = req.params;
+    if (!UUID_REGEX.test(versionId)) {
+      return reply.code(400).send({ error: 'invalid_ruleset_version_id', message: 'versionId must be a UUID.' });
+    }
     const res = await pool.query<{
       id: string;
       player_count: number;

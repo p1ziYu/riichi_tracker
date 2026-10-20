@@ -277,6 +277,20 @@ export const RULESET_TEMPLATES: Readonly<Record<string, Readonly<EngineRulesConf
 
 export const ENGINE_VERSION = '0.1.0';
 
+// Point balances and score tenths are stored as PostgreSQL integer (int4).
+const MAX_STORED_INTEGER = 2_147_483_647;
+
+function validStoredInteger(value: number, min = 0): boolean {
+  return Number.isSafeInteger(value) && value >= min && value <= MAX_STORED_INTEGER;
+}
+
+function safePoints(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || Math.abs(value) > MAX_STORED_INTEGER) {
+    throw new Error(`Invalid ${label}: point arithmetic exceeds the stored integer range.`);
+  }
+  return value;
+}
+
 function roundUp100(points: number): number {
   return Math.ceil(points / 100) * 100;
 }
@@ -349,20 +363,24 @@ function calculateBasicPoints(
 
 function pickNumber(obj: Record<string, unknown>, keys: string[]): number | undefined {
   for (const k of keys) {
+    if (!Object.hasOwn(obj, k)) continue;
     const v = obj[k];
-    if (typeof v === 'number' && Number.isFinite(v)) {
-      return v;
+    if (typeof v !== 'number' || !Number.isFinite(v)) {
+      throw new Error(`Invalid ${k}: expected a finite number.`);
     }
+    return v;
   }
   return undefined;
 }
 
 function pickBoolean(obj: Record<string, unknown>, keys: string[]): boolean | undefined {
   for (const k of keys) {
+    if (!Object.hasOwn(obj, k)) continue;
     const v = obj[k];
-    if (typeof v === 'boolean') {
-      return v;
+    if (typeof v !== 'boolean') {
+      throw new Error(`Invalid ${k}: expected a boolean.`);
     }
+    return v;
   }
   return undefined;
 }
@@ -376,7 +394,8 @@ export function normalizeRulesConfig(
   }
 
   const templateKey = typeof rawConfig.templateKey === 'string' ? rawConfig.templateKey : undefined;
-  const templateBase = templateKey && RULESET_TEMPLATES[templateKey] ? RULESET_TEMPLATES[templateKey] : undefined;
+  const templateBase = templateKey && Object.hasOwn(RULESET_TEMPLATES, templateKey)
+    ? RULESET_TEMPLATES[templateKey] : undefined;
 
   const explicitPlayerCount = pickNumber(rawConfig, ['playerCount', 'players', 'numPlayers']);
   if (explicitPlayerCount !== undefined && explicitPlayerCount !== 3 && explicitPlayerCount !== 4) {
@@ -409,14 +428,14 @@ export function normalizeRulesConfig(
     pickNumber(rawConfig, ['returnPoints', 'okaBasePoints', 'baseReturnPoints']) ?? base.returnPoints;
   const targetPoints = pickNumber(rawConfig, ['targetPoints', 'goalPoints']) ?? returnPoints;
 
-  if (!Number.isInteger(startingPoints) || startingPoints <= 0 || startingPoints % 100 !== 0) {
-    throw new Error(`Invalid startingPoints: ${startingPoints}. Must be a positive integer multiple of 100.`);
+  if (!validStoredInteger(startingPoints, 1) || startingPoints % 100 !== 0) {
+    throw new Error(`Invalid startingPoints: ${startingPoints}. Must be a positive stored integer multiple of 100.`);
   }
-  if (!Number.isInteger(returnPoints) || returnPoints <= 0 || returnPoints % 100 !== 0) {
-    throw new Error(`Invalid returnPoints: ${returnPoints}. Must be a positive integer multiple of 100.`);
+  if (!validStoredInteger(returnPoints, 1) || returnPoints % 100 !== 0) {
+    throw new Error(`Invalid returnPoints: ${returnPoints}. Must be a positive stored integer multiple of 100.`);
   }
-  if (!Number.isInteger(targetPoints) || targetPoints <= 0 || targetPoints % 100 !== 0) {
-    throw new Error(`Invalid targetPoints: ${targetPoints}. Must be a positive integer multiple of 100.`);
+  if (!validStoredInteger(targetPoints, 1) || targetPoints % 100 !== 0) {
+    throw new Error(`Invalid targetPoints: ${targetPoints}. Must be a positive stored integer multiple of 100.`);
   }
 
   let uma: number[] = [...base.uma];
@@ -434,9 +453,9 @@ export function normalizeRulesConfig(
     }
     uma = (rawConfig.umaTenths as number[]).map((t) => t / 10);
   }
-  if (uma.some((v) => !Number.isInteger(v * 10)) ||
+  if (uma.some((v) => !Number.isSafeInteger(v * 10) || Math.abs(v * 10) > MAX_STORED_INTEGER) ||
     uma.reduce((acc, v) => acc + Math.round(v * 10), 0) !== 0) {
-    throw new Error('Invalid uma: values must be in tenths and sum to 0.');
+    throw new Error('Invalid uma: values must be stored integer tenths and sum to 0.');
   }
 
   const computedOka = ((returnPoints - startingPoints) * playerCount) / 1000;
@@ -487,8 +506,11 @@ export function normalizeRulesConfig(
 
   const honbaPerPayer = explicitHonbaPerPayer ?? base.honbaPerPayer;
   const honbaRon = explicitHonbaRon ?? base.honbaRon;
-  if (!Number.isInteger(honbaPerPayer) || honbaPerPayer < 0 || honbaPerPayer % 100 !== 0) {
-    throw new Error(`Invalid honbaPerPayer: ${honbaPerPayer}. Must be a non-negative multiple of 100.`);
+  if (!validStoredInteger(honbaPerPayer) || honbaPerPayer % 100 !== 0) {
+    throw new Error(`Invalid honbaPerPayer: ${honbaPerPayer}. Must be a non-negative stored integer multiple of 100.`);
+  }
+  if (!validStoredInteger(honbaRon) || honbaRon % 100 !== 0) {
+    throw new Error(`Invalid honbaRon: ${honbaRon}. Must be a non-negative stored integer multiple of 100.`);
   }
 
   // Ryuukyoku noten penalty total (4p default: 3000, may be 2000; 3p default: 3000 in house_3p_v1, 2000 in common_3p_ref_v1)
@@ -502,8 +524,8 @@ export function normalizeRulesConfig(
       'ryuukyokuTotal',
       'tenpaiTotal',
     ]) ?? base.notenPenaltyTotal;
-  if (!Number.isInteger(notenPenaltyTotal) || notenPenaltyTotal < 0 || notenPenaltyTotal % 100 !== 0) {
-    throw new Error(`Invalid notenPenaltyTotal: ${notenPenaltyTotal}. Must be a non-negative multiple of 100.`);
+  if (!validStoredInteger(notenPenaltyTotal) || notenPenaltyTotal % 100 !== 0) {
+    throw new Error(`Invalid notenPenaltyTotal: ${notenPenaltyTotal}. Must be a non-negative stored integer multiple of 100.`);
   }
   // Every possible tenpai/noten split must conserve the configured total in 100-point units.
   const unit = playerCount === 3 ? 200 : 600; // 4p needs both 1/3 and 2/2 splits.
@@ -512,7 +534,9 @@ export function normalizeRulesConfig(
   }
 
   const kiriageMangan = pickBoolean(rawConfig, ['kiriageMangan', 'kiriage']) ?? base.kiriageMangan;
-  const kazoeYakuman = pickBoolean(rawConfig, ['kazoeYakuman']) ?? base.kazoeYakuman;
+  // The immutable house seeds use this legacy spelling for the enabled policy.
+  const kazoeYakuman = rawConfig.kazoeYakuman === 'single_yakuman_at_13_han'
+    ? true : (pickBoolean(rawConfig, ['kazoeYakuman']) ?? base.kazoeYakuman);
   const compositeYakuman = pickBoolean(rawConfig, ['compositeYakuman']) ?? base.compositeYakuman;
   const doubleYakuman = pickBoolean(rawConfig, ['doubleYakuman']) ?? base.doubleYakuman;
   const nagashiManganEnabled = pickBoolean(rawConfig, ['nagashiManganEnabled']) ?? base.nagashiManganEnabled;
@@ -745,7 +769,7 @@ export function calculateSettlement(
     if (seatMap.has(s.seatNo)) {
       throw new Error(`Duplicate seatNo: ${s.seatNo}.`);
     }
-    if (!Number.isFinite(s.points) || !Number.isInteger(s.points)) {
+    if (!Number.isSafeInteger(s.points) || Math.abs(s.points) > MAX_STORED_INTEGER) {
       throw new Error(`Invalid points for seat ${s.seatNo}: ${s.points}.`);
     }
     seatMap.set(s.seatNo, s);
@@ -755,10 +779,10 @@ export function calculateSettlement(
   if (!seatMap.has(handState.dealerSeatNo)) {
     throw new Error(`dealerSeatNo ${handState.dealerSeatNo} is not in handState.seats.`);
   }
-  if (!Number.isInteger(handState.honba) || handState.honba < 0) {
+  if (!validStoredInteger(handState.honba) || handState.honba === MAX_STORED_INTEGER) {
     throw new Error(`Invalid honba: ${handState.honba}.`);
   }
-  if (!Number.isInteger(handState.riichiPool) || handState.riichiPool < 0 || handState.riichiPool % 1000 !== 0) {
+  if (!validStoredInteger(handState.riichiPool) || handState.riichiPool % 1000 !== 0) {
     throw new Error(`Invalid riichiPool: ${handState.riichiPool}. Must be a non-negative multiple of 1000.`);
   }
   if (!WIND_ORDER.includes(handState.roundWind)) {
@@ -777,7 +801,7 @@ export function calculateSettlement(
   }
   const addEntry = (seatNo: number, reason: string, amount: number): void => {
     breakdowns.get(seatNo)!.push({ reason, amount });
-    netMap.set(seatNo, netMap.get(seatNo)! + amount);
+    netMap.set(seatNo, safePoints(netMap.get(seatNo)! + safePoints(amount, reason), `seat ${seatNo} netPoints`));
   };
 
   const kind = resultInput.kind;
@@ -874,7 +898,7 @@ export function calculateSettlement(
       newRiichiSticksPoints += 1000;
     }
   }
-  const totalPoolAvailable = handState.riichiPool + newRiichiSticksPoints;
+  const totalPoolAvailable = safePoints(handState.riichiPool + newRiichiSticksPoints, 'riichiPool');
 
   if (kind === 'ron') {
     if (!Array.isArray(resultInput.winners) || resultInput.winners.length < 1) {
@@ -951,7 +975,7 @@ export function calculateSettlement(
         handState.honba > 0 &&
         (config.doubleRonHonbaPolicy === 'each_winner' || w.seatNo === nearestWinnerSeatNo);
       if (getsHonba) {
-        const honbaBonus = handState.honba * config.honbaRon;
+        const honbaBonus = safePoints(handState.honba * config.honbaRon, 'honba bonus');
         addEntry(dealInSeatNo!, 'honba_payment', -honbaBonus);
         addEntry(w.seatNo, 'honba_win', honbaBonus);
       }
@@ -996,14 +1020,14 @@ export function calculateSettlement(
 
     let totalWinPoints = 0;
     let totalHonbaPoints = 0;
-    const perPayerHonba = handState.honba * config.honbaPerPayer;
+    const perPayerHonba = safePoints(handState.honba * config.honbaPerPayer, 'honba payment');
 
     for (const [payerSeatNo, baseAmount] of basePayments.entries()) {
       addEntry(payerSeatNo, 'tsumo_payment', -baseAmount);
       totalWinPoints += baseAmount;
       if (perPayerHonba > 0) {
         addEntry(payerSeatNo, 'honba_payment', -perPayerHonba);
-        totalHonbaPoints += perPayerHonba;
+        totalHonbaPoints = safePoints(totalHonbaPoints + perPayerHonba, 'honba total');
       }
     }
 
@@ -1348,8 +1372,8 @@ export function calculateTerminalSettlement(
     if (seenSeats.has(s.seatNo)) {
       throw new Error(`Duplicate seatNo: ${s.seatNo}.`);
     }
-    if (!Number.isFinite(s.points) || !Number.isInteger(s.points) || s.points % 100 !== 0) {
-      throw new Error(`Invalid points for seat ${s.seatNo}: ${s.points}. Must be an integer multiple of 100.`);
+    if (!Number.isSafeInteger(s.points) || Math.abs(s.points) > MAX_STORED_INTEGER || s.points % 100 !== 0) {
+      throw new Error(`Invalid points for seat ${s.seatNo}: ${s.points}. Must be a stored integer multiple of 100.`);
     }
     seenSeats.add(s.seatNo);
   }
@@ -1359,7 +1383,7 @@ export function calculateTerminalSettlement(
     inlinePool ??
     pickNumber(rawConfig, ['riichiPool', 'unclaimedRiichiPoints']) ??
     0;
-  if (!Number.isInteger(unclaimedRiichiPoints) || unclaimedRiichiPoints < 0 || unclaimedRiichiPoints % 1000 !== 0) {
+  if (!validStoredInteger(unclaimedRiichiPoints) || unclaimedRiichiPoints % 1000 !== 0) {
     throw new Error(`Invalid unclaimedRiichiPoints: ${unclaimedRiichiPoints}. Must be a non-negative multiple of 1000.`);
   }
 
@@ -1429,7 +1453,7 @@ export function calculateTerminalSettlement(
   const adjustedEntries = seatEntries.map((s) => ({
     seatNo: s.seatNo,
     rawPoints: s.points,
-    finalPoints: s.points + (s.seatNo === poolRecipientSeatNo ? unclaimedRiichiPoints : 0),
+    finalPoints: safePoints(s.points + (s.seatNo === poolRecipientSeatNo ? unclaimedRiichiPoints : 0), 'finalPoints'),
   }));
 
   // The pool is transferred only after game end is determined from raw seat points.
@@ -1475,7 +1499,7 @@ export function calculateTerminalSettlement(
     const umaTenths = umaByRank[i];
     const okaTenths = i === 0 ? okaTotalTenths : 0;
     const penaltyTenths = 0;
-    const totalTenths = baseTenths + umaTenths + okaTenths - penaltyTenths;
+    const totalTenths = safePoints(baseTenths + umaTenths + okaTenths - penaltyTenths, 'totalTenths');
     const seatResult: TerminalSeatResult = {
       seatNo: entry.seatNo,
       rawPoints: entry.rawPoints,

@@ -166,14 +166,6 @@ export async function ensurePrincipalForAuthUser(user: {
   return row;
 }
 
-const ALLOWED_AUTH_ORIGINS: Record<string, true> = {
-  'https://riichi.p1ziyu.com': true,
-  'http://127.0.0.1:5173': true,
-  'http://localhost:5173': true,
-  'capacitor://localhost': true,
-  'https://localhost': true,
-};
-
 export const auth = betterAuth({
   database: pool,
   secret: process.env.BETTER_AUTH_SECRET,
@@ -297,12 +289,6 @@ export async function requirePrincipal(
 
 export function registerAuthRoutes(app: FastifyInstance): void {
   const handleAuthRequest = async (req: FastifyRequest, reply: FastifyReply) => {
-    if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
-      const reqOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
-      if (reqOrigin && ALLOWED_AUTH_ORIGINS[reqOrigin] !== true) {
-        return reply.code(403).send({ error: 'invalid_origin', message: 'Untrusted origin' });
-      }
-    }
     const baseUrl = process.env.BETTER_AUTH_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3101}`;
     const url = new URL(req.raw.url || req.url, baseUrl);
     const headers = toWebHeaders(req);

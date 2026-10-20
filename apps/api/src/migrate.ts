@@ -14,7 +14,7 @@
  */
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
@@ -27,12 +27,18 @@ const MIGRATION_FILE = /^(\d{3})_([a-z0-9_]+)\.sql$/;
 // Arbitrary constant; serialises concurrent runners.
 const ADVISORY_LOCK_KEY = 0x72696963; // 'riic'
 
-interface Migration {
+export interface Migration {
   version: string;
   name: string;
   file: string;
   sql: string;
   checksum: string;
+}
+
+export interface MigrationClient {
+  connect(): Promise<unknown>;
+  query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+  end(): Promise<void>;
 }
 
 function parseEnvFile(path: string): Record<string, string> {
@@ -65,26 +71,24 @@ function resolveDatabaseUrl(): string {
   return `postgres://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(db)}`;
 }
 
-function loadMigrations(): Migration[] {
+export function loadMigrations(dir = migrationsDir): Migration[] {
   const migrations: Migration[] = [];
   const seen = new Set<string>();
-  for (const file of readdirSync(migrationsDir).sort()) {
+  for (const file of readdirSync(dir).sort()) {
     if (!file.endsWith('.sql')) continue;
     const match = MIGRATION_FILE.exec(file);
     if (!match) throw new Error(`invalid migration file name: ${file} (expected NNN_name.sql)`);
     const [, version, name] = match;
     if (seen.has(version)) throw new Error(`duplicate migration version ${version}`);
     seen.add(version);
-    const sql = readFileSync(join(migrationsDir, file), 'utf8');
+    const sql = readFileSync(join(dir, file), 'utf8');
     const checksum = createHash('sha256').update(sql).digest('hex');
     migrations.push({ version, name, file, sql, checksum });
   }
   return migrations;
 }
 
-async function migrate(): Promise<void> {
-  const migrations = loadMigrations();
-  const client = new pg.Client({ connectionString: resolveDatabaseUrl() });
+export async function applyMigrations(client: MigrationClient, migrations: readonly Migration[] = loadMigrations()): Promise<void> {
   await client.connect();
   try {
     await client.query('SELECT pg_advisory_lock($1)', [ADVISORY_LOCK_KEY]);
@@ -96,25 +100,34 @@ async function migrate(): Promise<void> {
         applied_at timestamptz NOT NULL DEFAULT now()
       )`);
 
-    const { rows } = await client.query<{ version: string; checksum: string }>(
-      'SELECT version, checksum FROM public.schema_migrations',
-    );
-    const applied = new Map(rows.map((r) => [r.version, r.checksum]));
+    const { rows } = await client.query('SELECT version, checksum FROM public.schema_migrations');
+    const applied = new Map(rows.map((r) => [r.version as string, r.checksum as string]));
     const known = new Set(migrations.map((m) => m.version));
     for (const version of applied.keys()) {
       if (!known.has(version)) throw new Error(`applied migration ${version} has no file in ${migrationsDir}`);
+    }
+    // A missing predecessor is not a fresh migration: running it after a later
+    // version could replay schema changes against the wrong starting state.
+    let missingPredecessor = false;
+    for (const migration of migrations) {
+      if (!applied.has(migration.version)) {
+        missingPredecessor = true;
+      } else if (missingPredecessor) {
+        throw new Error(`applied migration ${migration.version} follows a missing predecessor`);
+      }
     }
 
     let count = 0;
     for (const m of migrations) {
       const appliedChecksum = applied.get(m.version);
       if (appliedChecksum !== undefined) {
-        // 008's reference-only seed literals were corrected for fresh installs; 009
-        // upgrades databases that already applied the original 008. Accept only
-        // that exact historical checksum, not arbitrary edits to applied SQL.
+        // A historical 008 is allowed only with the known corrected on-disk seed.
+        // Do not let a modified current file inherit the historical exemption.
         const originalReferenceSeedChecksum = '4f1426907db9d02cef674c18ebdee1db1dd8aedfeed9905adae697fd24af25d0';
+        const correctedReferenceSeedChecksum = 'de141a7c2f409a3204078767c5ca69fc00d0c6cdf59bd8b30460be0ad3f08133';
         if (appliedChecksum !== m.checksum &&
-          !(m.version === '008' && appliedChecksum === originalReferenceSeedChecksum)) {
+          !(m.version === '008' && appliedChecksum === originalReferenceSeedChecksum &&
+            m.checksum === correctedReferenceSeedChecksum)) {
           throw new Error(`migration ${m.file} was modified after being applied (checksum mismatch)`);
         }
         continue;
@@ -140,7 +153,11 @@ async function migrate(): Promise<void> {
   }
 }
 
-migrate().catch((err: unknown) => {
-  console.error(err instanceof Error ? err.message : err);
-  process.exitCode = 1;
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  Promise.resolve().then(() =>
+    applyMigrations(new pg.Client({ connectionString: resolveDatabaseUrl() })),
+  ).catch((err: unknown) => {
+    console.error(err instanceof Error ? err.message : err);
+    process.exitCode = 1;
+  });
+}
