@@ -1,5 +1,5 @@
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(public status: number, message: string, public code?: string) {
     super(message);
   }
 }
@@ -27,9 +27,9 @@ export function clearNativeAuthToken(): void {
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const native = isNative();
   const headers = new Headers(options.headers);
+  const token = native ? localStorage.getItem(TOKEN_KEY) : null;
   if (native) {
     if (options.body) headers.set('Content-Type', headers.get('Content-Type') ?? 'application/json');
-    const token = localStorage.getItem(TOKEN_KEY);
     if (token) headers.set('Authorization', `Bearer ${token}`);
   }
   let response: Response;
@@ -43,13 +43,18 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     throw new Error(error instanceof Error ? error.message : '网络连接失败');
   }
   if (!response.ok) {
+    if (native && response.status === 401 && token && localStorage.getItem(TOKEN_KEY) === token) {
+      localStorage.removeItem(TOKEN_KEY);
+    }
     const body = await response.text();
     let message = body;
+    let code: string | undefined;
     try {
       const parsed = JSON.parse(body) as { message?: string; error?: string };
       message = parsed.message ?? parsed.error ?? body;
+      code = parsed.error;
     } catch { /* Non-JSON error response. */ }
-    throw new ApiError(response.status, message || `请求失败 (${response.status})`);
+    throw new ApiError(response.status, message || `请求失败 (${response.status})`, code);
   }
   if (response.status === 204) return undefined as T;
   const text = await response.text();

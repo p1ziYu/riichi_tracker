@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'com.p1ziyu.riichitracker',
-  appName: 'Riichi Tracker',
+  appName: '一姬',
   webDir: 'dist'
 };
 

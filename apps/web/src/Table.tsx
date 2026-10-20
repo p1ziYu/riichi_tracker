@@ -116,7 +116,8 @@ export default function Table() {
   const [connectionError, setConnectionError] = useState('');
   const [retryConnection, setRetryConnection] = useState(0);
   const [identity, setIdentity] = useState<{ id: string; principalId: string } | null>(null);
-  const [token, setToken] = useState<{ id: string; value: string; expiresAt?: string } | null>(null);
+  const [token, setToken] = useState<{ id: string; value: string; expiresAt?: string; checkedInAtIssue: number } | null>(null);
+  const [expiredToken, setExpiredToken] = useState<string | null>(null);
   const [qrCode, setQrCode] = useState<{ url: string; image: string } | null>(null);
   const [qrError, setQrError] = useState('');
   const [copyStatus, setCopyStatus] = useState('');
@@ -226,12 +227,20 @@ export default function Table() {
       }
     };
     const resume = () => {
-      if (stopped || socket || failures >= MAX_RECONNECT_FAILURES) return;
+      if (stopped) return;
       if (!available()) {
         window.clearTimeout(timer);
+        window.clearTimeout(stableTimer);
         timer = undefined;
+        stableTimer = undefined;
+        if (socket) {
+          const old = socket;
+          socket = undefined;
+          old.onclose = null;
+          old.close();
+        }
         setConnection('连接已断开');
-      } else if (!connecting) schedule();
+      } else if (!socket && !connecting && failures < MAX_RECONNECT_FAILURES) schedule();
     };
     window.addEventListener('online', resume);
     window.addEventListener('offline', resume);
@@ -252,8 +261,21 @@ export default function Table() {
     };
   }, [id, base, refresh, retryConnection]);
 
-  const checkInUrl = token && token.id === id
+  const state = loaded && loaded.id === id ? loaded.value : null;
+  const checkInUrl = token && token.id === id && expiredToken !== token.value &&
+    (typeof state?.checkedIn !== 'number' || state.checkedIn <= token.checkedInAtIssue) &&
+    (!token.expiresAt || Date.parse(token.expiresAt) > Date.now())
     ? new URL(`/checkin/${encodeURIComponent(id!)}?token=${encodeURIComponent(token.value)}`, 'https://riichi.p1ziyu.com').href : null;
+  useEffect(() => {
+    if (!token?.expiresAt || token.id !== id) return;
+    const remaining = Date.parse(token.expiresAt) - Date.now();
+    if (remaining <= 0) {
+      setExpiredToken(token.value);
+      return;
+    }
+    const timer = window.setTimeout(() => setExpiredToken(token.value), remaining);
+    return () => window.clearTimeout(timer);
+  }, [token, id]);
   useEffect(() => {
     if (!checkInUrl) return;
     let alive = true;
@@ -266,7 +288,6 @@ export default function Table() {
     return () => { alive = false; };
   }, [checkInUrl]);
 
-  const state = loaded && loaded.id === id ? loaded.value : null;
   const isOwner = !!state?.match.ownerPrincipalId && identity !== null && identity.id === id && identity.principalId === state.match.ownerPrincipalId;
   const hand = state?.currentHand ?? null;
   const seats = useMemo(() => [...(state?.seats ?? [])].sort((a, b) => a.seatNo - b.seatNo), [state?.seats]);
@@ -410,9 +431,12 @@ export default function Table() {
           setToken(null);
           const result = await post<TokenResponse>(`${base}/check-in-tokens`, {});
           if (!result?.token) throw new Error('服务端未返回签到令牌');
-          setToken({ id: id!, value: result.token, expiresAt: result.expiresAt });
+          setToken({ id: id!, value: result.token, expiresAt: result.expiresAt,
+            checkedInAtIssue: typeof state.checkedIn === 'number' ? state.checkedIn : 0 });
         })}>生成签到链接</button><button type="button" className="primary" disabled={busy} onClick={() => void action(async () => { await post(`${base}/seats/finalize`, {}); await refresh(); })}>确认座次</button></div>}
-        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && checkInUrl && <div className="table-invite"><div className="table-qr">{qrCode?.url === checkInUrl ? <img src={qrCode.image} width="256" height="256" alt="扫描二维码打开签到链接" /> : <span role="status">{qrError ? '二维码生成失败，请使用下方链接' : '正在生成签到二维码…'}</span>}</div><div className="table-invite-details"><p>桌主签到链接：</p><a href={checkInUrl}>{checkInUrl}</a>{token?.expiresAt && <small>截止 {token.expiresAt}</small>}<button type="button" onClick={() => void copyCheckIn()}>复制签到链接</button>{copyStatus && <small role="status">{copyStatus}</small>}</div></div>}
+        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && token?.id === id &&
+          !checkInUrl && <p className="notice" role="status">签到链接已使用或过期，请重新生成。</p>}
+        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && checkInUrl && <div className="table-invite"><div className="table-qr">{qrCode?.url === checkInUrl ? <img src={qrCode.image} width="256" height="256" alt="扫描二维码打开签到链接" /> : <span role="status">{qrError ? '二维码生成失败，请使用下方链接' : '正在生成签到二维码…'}</span>}</div><div className="table-invite-details"><p>桌主签到链接：</p><small>每个链接仅供一位已获座位的玩家使用，签到后请为下一位重新生成。</small><a href={checkInUrl}>{checkInUrl}</a>{token?.expiresAt && <small>截止 {token.expiresAt}</small>}<button type="button" onClick={() => void copyCheckIn()}>复制签到链接</button>{copyStatus && <small role="status">{copyStatus}</small>}</div></div>}
       </section>
       <div className="table-layout"><section className="felt" aria-label="牌桌座位"><div className="felt-lines" aria-hidden="true" /><div className="seat-grid">{seats.map((seat) => {
         const inHand = handSeats.find((entry) => entry.seatNo === seat.seatNo);

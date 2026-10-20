@@ -21,21 +21,38 @@ function TabIcon({ id }: { id: Tab }) {
 
 export default function BottomTabs({ signedIn }: { signedIn: boolean }) {
   const { pathname } = useLocation();
-  const active = pathname === '/login' ? 'account' : pathname === '/create' || pathname.startsWith('/checkin/') ? 'create' : pathname === '/history' || pathname.startsWith('/table/') ? 'history' : 'lobby';
-  const activeIndex = tabs.findIndex((tab) => tab.id === active);
+  const visibleTabs = tabs;
+  const routeTab = pathname === '/login' ? 'account' : pathname === '/create' || pathname.startsWith('/checkin/') ? 'create' : pathname === '/history' || pathname.startsWith('/table/') ? 'history' : 'lobby';
+  const active = routeTab;
+  const activeIndex = visibleTabs.findIndex((tab) => tab.id === active);
   const navRef = useRef<HTMLElement>(null);
   const linksRef = useRef<(HTMLAnchorElement | null)[]>([]);
-  const [pill, setPill] = useState<{ x: number; width: number } | null>(null);
+  const [pill, setPill] = useState<{ x: number; y: number; width: number; height: number; moving: boolean } | null>(null);
+  const measuredRef = useRef<{ index: number; desktop: boolean; count: number } | null>(null);
 
   useLayoutEffect(() => {
+    linksRef.current.length = visibleTabs.length;
     const nav = navRef.current;
     const link = linksRef.current[activeIndex];
     if (!nav || !link) return;
     const measure = () => {
       const navBounds = nav.getBoundingClientRect();
       const linkBounds = link.getBoundingClientRect();
-      const next = { x: linkBounds.left - navBounds.left - nav.clientLeft, width: linkBounds.width };
-      setPill((previous) => previous?.x === next.x && previous.width === next.width ? previous : next);
+      const desktop = window.matchMedia('(min-width: 1024px)').matches;
+      const next = {
+        x: linkBounds.left - navBounds.left - nav.clientLeft,
+        y: linkBounds.top - navBounds.top - nav.clientTop,
+        width: linkBounds.width,
+        height: linkBounds.height,
+      };
+      const last = measuredRef.current;
+      const routeChange = last !== null && last.desktop === desktop && last.count === visibleTabs.length && last.index !== activeIndex;
+      measuredRef.current = { index: activeIndex, desktop, count: visibleTabs.length };
+      setPill((previous) =>
+        previous?.x === next.x && previous.y === next.y && previous.width === next.width && previous.height === next.height
+          ? previous
+          : { ...next, moving: routeChange },
+      );
     };
     measure();
     const observer = new ResizeObserver(measure);
@@ -43,11 +60,12 @@ export default function BottomTabs({ signedIn }: { signedIn: boolean }) {
     linksRef.current.forEach((item) => { if (item) observer.observe(item); });
     window.addEventListener('resize', measure);
     return () => { observer.disconnect(); window.removeEventListener('resize', measure); };
-  }, [activeIndex]);
+  }, [activeIndex, signedIn]);
 
-  return <nav ref={navRef} className="bottom-tabs" aria-label="主导航">
-    <span className={`bottom-tabs-pill${pill ? ' ready' : ''}`} aria-hidden="true" style={pill ? { width: pill.width, transform: `translate3d(${pill.x}px, 0, 0)` } : undefined} />
-    {tabs.map((tab, index) => <Link key={tab.id} ref={(node) => { linksRef.current[index] = node; }} className={`bottom-tab${tab.id === active ? ' active' : ''}`} to={tab.to} aria-current={pathname === tab.to ? 'page' : undefined}>
+  return <nav ref={navRef} className={`bottom-tabs${signedIn ? '' : ' signed-out'}`} aria-label="主导航">
+    <Link to="/" className="sidebar-brand"><span className="brand-tile">東</span><span>一姬<span className="brand-sub"> / ICHIHIME</span></span></Link>
+    <span className={`bottom-tabs-pill${pill ? ' ready' : ''}${pill?.moving ? ' moving' : ''}`} aria-hidden="true" style={pill ? { width: pill.width, height: pill.height, transform: `translate3d(${pill.x}px, ${pill.y}px, 0)` } : undefined} />
+    {visibleTabs.map((tab, index) => <Link key={tab.id} ref={(node) => { linksRef.current[index] = node; }} className={`bottom-tab${tab.id === active ? ' active' : ''}`} to={tab.to} aria-current={tab.id === active ? 'page' : undefined}>
       <TabIcon id={tab.id} /><span>{tab.id === 'account' && signedIn ? '我的' : tab.label}</span>
     </Link>)}
   </nav>;
