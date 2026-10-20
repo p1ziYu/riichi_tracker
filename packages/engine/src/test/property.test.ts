@@ -116,8 +116,15 @@ function makeHandCase(config: Readonly<EngineRulesConfig>, random: () => number,
   const winners = shuffle(random, [...order]).slice(0, integer(random, 1, playerCount)).map(winner);
   return {
     hand,
-    result: { kind, winners, tenpai },
-    dealerRepeats: winners.some((w) => w.seatNo === dealerSeatNo) || tenpai[order.indexOf(dealerSeatNo)],
+    result: {
+      kind, winners, tenpai,
+      nagashiEligibility: winners.map((w) => ({
+        seatNo: w.seatNo, discards: [{ tile: '1m', called: false }, { tile: '7z', called: false }],
+      })),
+    },
+    dealerRepeats: config.nagashiDealerRepeatRequiresTenpai
+      ? tenpai[order.indexOf(dealerSeatNo)]
+      : winners.some((w) => w.seatNo === dealerSeatNo) || tenpai[order.indexOf(dealerSeatNo)],
   };
 }
 
@@ -243,24 +250,30 @@ describe('seeded terminal settlement properties', () => {
         try {
           const out = calculateTerminalSettlement(input.seats, { rulesHash: 'property', config: { ...config } }, {
             riichiPool: input.pool, startingDealerSeatNo: input.startingDealerSeatNo,
+            completedSouth4: config.fixedSouth4EndPolicy === 'completed_south_4',
           });
           if (!out.isGameEnd) throw new Error('Default terminal property input should finish the match.');
           const expected = [...input.seats].sort((a, b) => b.points - a.points ||
             (a.seatNo - input.startingDealerSeatNo + config.playerCount) % config.playerCount -
             (b.seatNo - input.startingDealerSeatNo + config.playerCount) % config.playerCount);
-          assert.equal(out.poolRecipientSeatNo, expected[0].seatNo);
+          assert.equal(out.poolRecipientSeatNo, config.terminalRiichiPoolPolicy === 'first' ? expected[0].seatNo : null);
           assert.equal(out.unclaimedRiichiPoints, input.pool);
-          assert.equal(out.tenths.reduce((sum, n) => sum + n, 0), 0);
+          assert.equal(out.tenths.reduce((sum, n) => sum + n, 0) +
+            (config.terminalRiichiPoolPolicy === 'unallocated' ? input.pool / 100 : 0), 0);
           assert.deepEqual(out.tenths, out.perSeat.map((s) => s.totalTenths));
           assert.deepEqual(out.perSeat.map((s) => s.seatNo), input.seats.map((s) => s.seatNo));
           for (const row of out.perSeat) {
             const raw = input.seats.find((s) => s.seatNo === row.seatNo)!.points;
             assert.equal(row.rawPoints, raw);
-            assert.equal(row.finalPoints, raw + (row.seatNo === expected[0].seatNo ? input.pool : 0));
+            assert.equal(row.finalPoints, raw +
+              (row.seatNo === out.poolRecipientSeatNo ? input.pool : 0));
           }
           assert.deepEqual(out.standings.map((s) => s.seatNo), expected.map((s) => s.seatNo));
           for (let rank = 0; rank < config.playerCount; rank++) {
-            assert.equal(out.standings[rank].rank, rank + 1);
+            assert.equal(out.standings[rank].rank,
+              config.tiedUmaPolicy === 'split'
+                ? out.standings.findIndex((s) => s.finalPoints === out.standings[rank].finalPoints) + 1
+                : rank + 1);
             if (rank > 0) {
               assert.ok(out.standings[rank - 1].finalPoints >= out.standings[rank].finalPoints);
               assert.ok(out.standings[rank - 1].totalTenths >= out.standings[rank].totalTenths);

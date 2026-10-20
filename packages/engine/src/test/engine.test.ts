@@ -617,7 +617,8 @@ describe('Nagashi Mangan and Chombo', () => {
     const out = calculateSettlement(
       rules4p,
       hand,
-      { kind: 'nagashi_mangan', winners: [{ seatNo: 1, han: 5, fu: 30 }] },
+      { kind: 'nagashi_mangan', winners: [{ seatNo: 1, han: 5, fu: 30 }],
+        nagashiEligibility: [{ seatNo: 1, discards: [{ tile: '1m', called: false }] }] },
       ENGINE_VERSION,
     );
     assert.equal(out.perSeat[0].netPoints, -5000); // -1000 riichi - 4000 nagashi
@@ -631,7 +632,8 @@ describe('Nagashi Mangan and Chombo', () => {
     const outCollect = calculateSettlement(
       makeRules({ ...HOUSE_4P_V1, nagashiManganEnabled: true, nagashiCollectsRiichiPool: true }),
       hand,
-      { kind: 'nagashi_mangan', winners: [{ seatNo: 1, han: 5, fu: 30 }] },
+      { kind: 'nagashi_mangan', winners: [{ seatNo: 1, han: 5, fu: 30 }],
+        nagashiEligibility: [{ seatNo: 1, discards: [{ tile: '1m', called: false }] }] },
       ENGINE_VERSION,
     );
     assert.equal(outCollect.perSeat[1].netPoints, 10000);

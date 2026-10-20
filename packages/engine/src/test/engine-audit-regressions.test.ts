@@ -4,7 +4,8 @@ import {
   calculateSettlement as settle,
   calculateTerminalSettlement as terminal,
   normalizeRulesConfig,
-  ENGINE_VERSION, HOUSE_4P_V1, HOUSE_3P_V1, COMMON_3P_REF_V1,
+  isAutomaticMatchEnd,
+  ENGINE_VERSION, HOUSE_4P_V1, HOUSE_3P_V1, WRC_4P_REF_V1, COMMON_3P_REF_V1,
   type HandState, type RulesSnapshot, type SettlementOutput, type WinnerInput,
 } from '../index.js';
 
@@ -147,9 +148,11 @@ describe('deep engine audit regressions', () => {
     const winners = [{ seatNo: 1, han: 5, fu: 30 }];
     assert.throws(() => settle(config, h, {
       kind: 'nagashi_mangan', winners, tenpai: [false, true, false],
+      nagashiEligibility: [{ seatNo: 1, discards: [{ tile: '9s', called: false }] }],
     }, ENGINE_VERSION), /Riichi seat 0 is noten: manual adjudication required/);
     const valid = settle(config, h, {
       kind: 'nagashi_mangan', winners, tenpai: [true, true, false],
+      nagashiEligibility: [{ seatNo: 1, discards: [{ tile: '9s', called: false }] }],
     }, ENGINE_VERSION);
     assert.deepEqual(net(valid), [-5000, 6000, -2000]);
     assert.equal(valid.nextHand.riichiPool, 1000);
@@ -179,10 +182,170 @@ describe('deep engine audit regressions', () => {
     h.riichiPool = 1000;
     h.seats[2].isRiichi = true;
     h.seats[2].isTenpai = true;
-    const result = { kind: 'nagashi_mangan' as const, winners: [{ seatNo: 1, han: 5, fu: 30 }] };
+    const result = { kind: 'nagashi_mangan' as const, winners: [{ seatNo: 1, han: 5, fu: 30 }],
+      nagashiEligibility: [{ seatNo: 1, discards: [{ tile: '1p', called: false }] }] };
     assert.throws(() => settle(rules({ ...HOUSE_4P_V1 }), h, result, ENGINE_VERSION),
       /Automatic nagashi mangan is disabled/);
     assert.deepEqual(net(settle(rules({ ...HOUSE_4P_V1, nagashiManganEnabled: true }), h, result,
       ENGINE_VERSION)), [-4000, 8000, -3000, -2000]);
+  });
+});
+
+describe('reference rules conformance', () => {
+  it('normalizes distinct house and reference policies with explicit overrides', () => {
+    const house = normalizeRulesConfig({});
+    assert.equal(house.fixedSouth4EndPolicy, 'target_or_bust');
+    assert.equal(house.terminalRiichiPoolPolicy, 'first');
+    assert.equal(house.tiedUmaPolicy, 'seat_order');
+    assert.equal(house.nagashiDealerRepeatRequiresTenpai, false);
+    const wrc = normalizeRulesConfig({ templateKey: 'wrc_4p_ref_v1' });
+    assert.equal(wrc.fixedSouth4EndPolicy, 'completed_south_4');
+    assert.equal(wrc.terminalRiichiPoolPolicy, 'unallocated');
+    assert.equal(wrc.tiedUmaPolicy, 'split');
+    assert.equal(wrc.kiriageMangan, true);
+    assert.equal(wrc.allowLowPointRiichi, true);
+    assert.equal(wrc.bustEndsGame, false);
+    const tenhou = normalizeRulesConfig({ templateKey: 'common_3p_ref_v1' });
+    assert.equal(tenhou.doubleRonHonbaPolicy, 'nearest_only');
+    assert.equal(tenhou.nagashiManganEnabled, true);
+    assert.equal(tenhou.nagashiDealerRepeatRequiresTenpai, true);
+    assert.equal(tenhou.tsumoLoss, true);
+    assert.equal(tenhou.kazoeYakuman, true);
+    assert.equal(normalizeRulesConfig({ templateKey: 'wrc_4p_ref_v1',
+      terminalRiichiPoolPolicy: 'first', tiedUmaPolicy: 'seat_order',
+      fixedSouth4EndPolicy: 'target_or_bust' }).terminalRiichiPoolPolicy, 'first');
+  });
+
+  it('WRC head-bumps both double and triple ron, never aborting the triple', () => {
+    const h = hand(4);
+    h.honba = 2;
+    h.riichiPool = 1000;
+    const config = rules({ templateKey: 'wrc_4p_ref_v1' });
+    const winners = [3, 2, 1].map((seatNo) => ({ seatNo, dealInSeatNo: 0, han: 1, fu: 30 }));
+    for (const claims of [winners.slice(0, 2), winners]) {
+      const out = settle(config, h, { kind: 'ron', winners: claims }, ENGINE_VERSION);
+      assert.equal(out.nextHand.riichiPool, 0);
+      assert.equal(out.nextHand.dealerSeatNo, 1);
+      assert.equal(out.nextHand.honba, 0);
+      assert.deepEqual(net(out), claims.length === 2
+        ? [-1600, 0, 2600, 0] : [-1600, 2600, 0, 0]);
+    }
+    assert.deepEqual(net(settle(rules({ ...HOUSE_4P_V1 }), h,
+      { kind: 'ron', winners }, ENGINE_VERSION)), [0, 0, 0, 0]);
+  });
+
+  it('WRC finishes only on confirmed South 4, retains pool, and splits tied uma by rank', () => {
+    const config = rules({ templateKey: 'wrc_4p_ref_v1' });
+    const points = [31000, 31000, 29000, 28000];
+    const pending = terminal(points, config, { riichiPool: 1000, requireTargetPoints: false });
+    assert.equal(pending.isGameEnd, false);
+    const finished = terminal(points, config, { riichiPool: 1000, completedSouth4: true });
+    assert.equal(finished.isGameEnd, true);
+    if (!finished.isGameEnd) throw new Error('South 4 must complete.');
+    assert.equal(finished.gameEndReason, 'final_round_complete');
+    assert.equal(finished.poolRecipientSeatNo, null);
+    assert.deepEqual(finished.standings.map((s) => s.rank), [1, 1, 3, 4]);
+    assert.deepEqual(finished.standings.map((s) => s.umaTenths), [100, 100, -50, -150]);
+    assert.deepEqual(finished.tenths, [110, 110, -60, -170]);
+    assert.equal(finished.tenths.reduce((sum, n) => sum + n, 0) + finished.unclaimedRiichiPoints / 100, 0);
+    const negative = terminal([-1000, 50000, 36000, 35000], config);
+    assert.equal(negative.isGameEnd, false);
+    const remainder = terminal([30000, 30000, 30000, 30000],
+      rules({ ...WRC_4P_REF_V1, uma: [15.1, 5, -5.1, -15] }), { completedSouth4: true });
+    assert.equal(remainder.isGameEnd, true);
+    if (!remainder.isGameEnd) throw new Error('South 4 must complete.');
+    assert.deepEqual(remainder.standings.map((s) => s.umaTenths), [0, 0, 0, 0]);
+    const partial = terminal([31000, 31000, 29000, 29000],
+      rules({ ...WRC_4P_REF_V1, uma: [15.1, 5, -5.1, -15] }), { completedSouth4: true });
+    assert.equal(partial.isGameEnd, true);
+    if (!partial.isGameEnd) throw new Error('South 4 must complete.');
+    assert.deepEqual(partial.standings.map((s) => s.umaTenths), [101, 100, -100, -101]);
+  });
+
+  it('WRC permits riichi below 1000 and kiriage on 4/30 and 3/60; house does neither', () => {
+    const h = hand(4);
+    h.seats[1].points = 500;
+    h.seats[1].isRiichi = true;
+    const wrc = rules({ templateKey: 'wrc_4p_ref_v1' });
+    const out = settle(wrc, h, { kind: 'ron', winners: [{ seatNo: 2, dealInSeatNo: 0, han: 4, fu: 30 }] },
+      ENGINE_VERSION);
+    assert.deepEqual(net(out), [-8000, -1000, 9000, 0]);
+    assert.equal(h.seats[1].points + out.perSeat[1].netPoints, -500);
+    assert.throws(() => settle(rules({ ...HOUSE_4P_V1 }), h,
+      { kind: 'ron', winners: [{ seatNo: 2, dealInSeatNo: 0, han: 4, fu: 30 }] }, ENGINE_VERSION),
+    /cannot confirm riichi/);
+    const h2 = hand(4);
+    assert.deepEqual(net(settle(wrc, h2,
+      { kind: 'ron', winners: [{ seatNo: 2, dealInSeatNo: 0, han: 3, fu: 60 }] },
+      ENGINE_VERSION)), [-8000, 0, 8000, 0]);
+  });
+
+  it('Tenhou allocates double-ron honba and pool only to nearest winner', () => {
+    const h = hand(3);
+    h.honba = 2;
+    h.riichiPool = 1000;
+    const out = settle(rules({ templateKey: 'common_3p_ref_v1' }), h,
+      { kind: 'ron', winners: [
+        { seatNo: 2, dealInSeatNo: 0, han: 1, fu: 30 },
+        { seatNo: 1, dealInSeatNo: 0, han: 1, fu: 30 },
+      ] }, ENGINE_VERSION);
+    assert.deepEqual(net(out), [-2400, 2400, 1000]);
+  });
+
+  it('Tenhou nagashi requires each winner’s uncalled terminal/honor river, replaces noten transfer', () => {
+    const h = hand(3);
+    const config = rules({ templateKey: 'common_3p_ref_v1' });
+    const winners = [{ seatNo: 0, han: 5, fu: 30 }, { seatNo: 1, han: 5, fu: 30 }];
+    const eligibility = [
+      { seatNo: 0, discards: [{ tile: '1m', called: false }, { tile: '7z', called: false }] },
+      { seatNo: 1, discards: [{ tile: '9p', called: false }] },
+    ];
+    const result = { kind: 'nagashi_mangan' as const, winners, tenpai: [false, true, false], nagashiEligibility: eligibility };
+    assert.throws(() => settle(config, h, { ...result, nagashiEligibility: undefined }, ENGINE_VERSION),
+      /complete discard history/);
+    assert.throws(() => settle(config, h, { ...result, nagashiEligibility: eligibility.slice(0, 1) },
+      ENGINE_VERSION), /complete discard history/);
+    for (const invalid of [{ tile: '2m', called: false }, { tile: '1m', called: true },
+      { tile: '8z', called: false }]) {
+      assert.throws(() => settle(config, h, { ...result, nagashiEligibility: [
+        eligibility[0], { seatNo: 1, discards: [invalid] },
+      ] }, ENGINE_VERSION), /called or non-terminal\/honor/);
+    }
+    const out = settle(config, h, result, ENGINE_VERSION);
+    assert.deepEqual(net(out), [4000, 2000, -6000]);
+    assert.equal(out.nextHand.dealerSeatNo, 1); // Dealer was noten despite winning nagashi.
+    const overridden = settle(rules({ templateKey: 'common_3p_ref_v1',
+      nagashiDealerRepeatRequiresTenpai: false }), h, result, ENGINE_VERSION);
+    assert.equal(overridden.nextHand.dealerSeatNo, 0);
+    const houseStrict = settle(rules({ ...HOUSE_3P_V1, nagashiManganEnabled: true,
+      nagashiDealerRepeatRequiresTenpai: true }), h, result, ENGINE_VERSION);
+    assert.equal(houseStrict.nextHand.dealerSeatNo, 1);
+    assert.equal(out.nextHand.honba, 1);
+    assert.equal(out.perSeat.some((s) => s.breakdown.some((entry) => entry.reason.includes('noten') ||
+      entry.reason.includes('tenpai'))), false);
+  });
+  it('Tenhou auto-stops only at dealer first-place stop, candidate threshold, bust or West-three cap', () => {
+    const h = hand(3);
+    h.roundWind = 'S';
+    h.roundNumber = 3;
+    h.dealerSeatNo = 2;
+    const tsumo = { kind: 'tsumo' as const, winners: [{ seatNo: 2, han: 1, fu: 30 }] };
+    const repeat = { roundWind: 'S' as const, roundNumber: 3, dealerSeatNo: 2, honba: 1, riichiPool: 0 };
+    const west = { ...repeat, roundWind: 'W' as const, roundNumber: 1, dealerSeatNo: 0 };
+    const end = (config: Record<string, unknown>, result: typeof tsumo | { kind: 'ryuukyoku'; winners: []; tenpai: boolean[] },
+      next: typeof repeat | typeof west, values: number[]) =>
+      isAutomaticMatchEnd(config, h, result, next, values.map((points, seatNo) => ({ seatNo, points })));
+    assert.equal(end({ ...HOUSE_3P_V1 }, tsumo, repeat, [30000, 34000, 41000]), false);
+    assert.equal(end({ ...COMMON_3P_REF_V1 }, tsumo, repeat, [30000, 34000, 41000]), true);
+    assert.equal(end({ ...COMMON_3P_REF_V1 }, tsumo, repeat, [35000, 36000, 34000]), false);
+    assert.equal(end({ ...COMMON_3P_REF_V1 }, { kind: 'ryuukyoku', winners: [], tenpai: [false, false, true] },
+      repeat, [32000, 35000, 38000]), true);
+    assert.equal(end({ ...COMMON_3P_REF_V1 }, { kind: 'ryuukyoku', winners: [], tenpai: [false, false, false] },
+      west, [33000, 35000, 37000]), false);
+    assert.equal(end({ ...COMMON_3P_REF_V1 }, { kind: 'ryuukyoku', winners: [], tenpai: [false, false, false] },
+      west, [30000, 35000, 40000]), true);
+    assert.equal(end({ ...COMMON_3P_REF_V1 }, tsumo, repeat, [-100, 30000, 75100]), true);
+    h.roundWind = 'W'; h.roundNumber = 3;
+    assert.equal(end({ ...COMMON_3P_REF_V1 }, tsumo, repeat, [34000, 35000, 36000]), true);
   });
 });

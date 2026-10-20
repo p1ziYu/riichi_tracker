@@ -53,10 +53,20 @@ export interface WinnerInput {
    */
   isRiichiDeclarationDealIn?: boolean;
 }
+/** Attested complete river for one nagashi winner. The settlement layer cannot verify
+ * completeness against a tile log; callers must attest every discard and called status.
+ * Own melds do not disqualify the winner. */
+export interface NagashiEligibilityInput {
+  seatNo: number;
+  discards: { tile: string; called: boolean }[];
+}
+
 
 export interface ResultInput {
   kind: HandKind;
   winners: WinnerInput[];
+  /** Required for nagashi_mangan: complete discards of every claimed winner, including called status. */
+  nagashiEligibility?: NagashiEligibilityInput[];
   /** per-seat tenpai for ryuukyoku; null when not applicable */
   tenpai?: boolean[] | null;
   chomboRole?: Record<number, 'offender' | 'victim'> | null;
@@ -112,8 +122,10 @@ export interface EngineRulesConfig {
   compositeYakuman: boolean;
   /** Count explicitly identified special doubles via WinnerInput.doubleYakumanCount. */
   doubleYakuman: boolean;
-  /** Enable automated nagashi mangan; P0 templates leave it disabled (§4.2). */
+  /** Enable nagashi mangan only for attested, uncalled terminal/honor discard histories. */
   nagashiManganEnabled: boolean;
+  /** Nagashi draw continuation follows dealer tenpai instead of the winning seat. */
+  nagashiDealerRepeatRequiresTenpai: boolean;
   /** 3p: true = tsumo loss; false = rounded full 4p total split between two payers (§4.2 / §4.3). */
   tsumoLoss: boolean;
   /** Multi-ron policy: 'double_ron' (default house rule: 2 winners allowed, 3 winners abortive draw in 4p) | 'head_bump' | 'allow_all' */
@@ -130,6 +142,14 @@ export interface EngineRulesConfig {
   bustEndsGame: boolean;
   /** Whether a seat with < 1,000 points may confirm riichi (default false per §4.4; WRC allows true) */
   allowLowPointRiichi: boolean;
+  /** End policy: fixed South 4 requires an explicit completion context, regardless of points. */
+  fixedSouth4EndPolicy: 'target_or_bust' | 'completed_south_4';
+  /** Allocation of riichi sticks left on table when the match ends. */
+  terminalRiichiPoolPolicy: 'first' | 'unallocated';
+  /** Split combined uma among seats with tied final points or break ties by starting seat order. */
+  tiedUmaPolicy: 'seat_order' | 'split';
+  /** Finish ranked sanma automatically after final dealer stop or round cap. */
+  automaticEndPolicy: 'manual' | 'ranked_sanma';
 }
 
 export const HOUSE_4P_V1: Readonly<EngineRulesConfig> = Object.freeze({
@@ -152,8 +172,13 @@ export const HOUSE_4P_V1: Readonly<EngineRulesConfig> = Object.freeze({
   doubleRonHonbaPolicy: 'each_winner',
   nagashiCollectsRiichiPool: false,
   nagashiManganEnabled: false,
+  nagashiDealerRepeatRequiresTenpai: false,
   bustEndsGame: true,
   allowLowPointRiichi: false,
+  fixedSouth4EndPolicy: 'target_or_bust',
+  terminalRiichiPoolPolicy: 'first',
+  tiedUmaPolicy: 'seat_order',
+  automaticEndPolicy: 'manual',
 });
 
 export const WRC_4P_REF_V1: Readonly<EngineRulesConfig> = Object.freeze({
@@ -167,7 +192,7 @@ export const WRC_4P_REF_V1: Readonly<EngineRulesConfig> = Object.freeze({
   honbaPerPayer: 100,
   honbaRon: 300,
   notenPenaltyTotal: 3000,
-  kiriageMangan: false,
+  kiriageMangan: true,
   kazoeYakuman: true,
   compositeYakuman: true,
   doubleYakuman: false,
@@ -176,8 +201,13 @@ export const WRC_4P_REF_V1: Readonly<EngineRulesConfig> = Object.freeze({
   doubleRonHonbaPolicy: 'nearest_only',
   nagashiCollectsRiichiPool: false,
   nagashiManganEnabled: false,
+  nagashiDealerRepeatRequiresTenpai: false,
   bustEndsGame: false,
   allowLowPointRiichi: true,
+  fixedSouth4EndPolicy: 'completed_south_4',
+  terminalRiichiPoolPolicy: 'unallocated',
+  tiedUmaPolicy: 'split',
+  automaticEndPolicy: 'manual',
 });
 
 export const HOUSE_3P_V1: Readonly<EngineRulesConfig> = Object.freeze({
@@ -200,8 +230,13 @@ export const HOUSE_3P_V1: Readonly<EngineRulesConfig> = Object.freeze({
   doubleRonHonbaPolicy: 'each_winner',
   nagashiCollectsRiichiPool: false,
   nagashiManganEnabled: false,
+  nagashiDealerRepeatRequiresTenpai: false,
   bustEndsGame: true,
   allowLowPointRiichi: false,
+  fixedSouth4EndPolicy: 'target_or_bust',
+  terminalRiichiPoolPolicy: 'first',
+  tiedUmaPolicy: 'seat_order',
+  automaticEndPolicy: 'manual',
 });
 
 export const COMMON_3P_REF_V1: Readonly<EngineRulesConfig> = Object.freeze({
@@ -221,11 +256,16 @@ export const COMMON_3P_REF_V1: Readonly<EngineRulesConfig> = Object.freeze({
   doubleYakuman: false,
   tsumoLoss: true,
   multiRon: 'double_ron',
-  doubleRonHonbaPolicy: 'each_winner',
+  doubleRonHonbaPolicy: 'nearest_only',
   nagashiCollectsRiichiPool: false,
-  nagashiManganEnabled: false,
+  nagashiManganEnabled: true,
+  nagashiDealerRepeatRequiresTenpai: true,
   bustEndsGame: true,
   allowLowPointRiichi: false,
+  fixedSouth4EndPolicy: 'target_or_bust',
+  terminalRiichiPoolPolicy: 'first',
+  tiedUmaPolicy: 'seat_order',
+  automaticEndPolicy: 'ranked_sanma',
 });
 
 export const RULESET_TEMPLATES: Readonly<Record<string, Readonly<EngineRulesConfig>>> = Object.freeze({
@@ -473,6 +513,8 @@ export function normalizeRulesConfig(
   const compositeYakuman = pickBoolean(rawConfig, ['compositeYakuman']) ?? base.compositeYakuman;
   const doubleYakuman = pickBoolean(rawConfig, ['doubleYakuman']) ?? base.doubleYakuman;
   const nagashiManganEnabled = pickBoolean(rawConfig, ['nagashiManganEnabled']) ?? base.nagashiManganEnabled;
+  const nagashiDealerRepeatRequiresTenpai =
+    pickBoolean(rawConfig, ['nagashiDealerRepeatRequiresTenpai']) ?? base.nagashiDealerRepeatRequiresTenpai;
 
   let tsumoLoss = pickBoolean(rawConfig, ['tsumoLoss']) ?? base.tsumoLoss;
   if (typeof rawConfig.tsumoPaymentMode === 'string') {
@@ -501,6 +543,18 @@ export function normalizeRulesConfig(
     pickBoolean(rawConfig, ['nagashiCollectsRiichiPool', 'nagashiTakesPool']) ?? base.nagashiCollectsRiichiPool;
   const bustEndsGame = pickBoolean(rawConfig, ['bustEndsGame', 'tobiEndsGame']) ?? base.bustEndsGame;
   const allowLowPointRiichi = pickBoolean(rawConfig, ['allowLowPointRiichi']) ?? base.allowLowPointRiichi;
+  const fixedSouth4EndPolicy =
+    rawConfig.fixedSouth4EndPolicy === 'completed_south_4' || rawConfig.fixedSouth4EndPolicy === 'target_or_bust'
+      ? rawConfig.fixedSouth4EndPolicy : base.fixedSouth4EndPolicy;
+  const terminalRiichiPoolPolicy =
+    rawConfig.terminalRiichiPoolPolicy === 'unallocated' || rawConfig.terminalRiichiPoolPolicy === 'first'
+      ? rawConfig.terminalRiichiPoolPolicy : base.terminalRiichiPoolPolicy;
+  const tiedUmaPolicy =
+    rawConfig.tiedUmaPolicy === 'split' || rawConfig.tiedUmaPolicy === 'seat_order'
+      ? rawConfig.tiedUmaPolicy : base.tiedUmaPolicy;
+  const automaticEndPolicy =
+    rawConfig.automaticEndPolicy === 'ranked_sanma' || rawConfig.automaticEndPolicy === 'manual'
+      ? rawConfig.automaticEndPolicy : base.automaticEndPolicy;
 
   return {
     templateKey: templateKey ?? base.templateKey,
@@ -518,13 +572,56 @@ export function normalizeRulesConfig(
     compositeYakuman,
     doubleYakuman,
     nagashiManganEnabled,
+    nagashiDealerRepeatRequiresTenpai,
     tsumoLoss,
     multiRon,
     doubleRonHonbaPolicy,
     nagashiCollectsRiichiPool,
     bustEndsGame,
     allowLowPointRiichi,
+    fixedSouth4EndPolicy,
+    terminalRiichiPoolPolicy,
+    tiedUmaPolicy,
+    automaticEndPolicy,
   };
+}
+
+/** End decision after an already-settled hand; manual/house rules never auto-finish. */
+export function isAutomaticMatchEnd(
+  rawConfig: Record<string, unknown>,
+  handState: HandState,
+  resultInput: ResultInput,
+  nextHand: NextHandState,
+  pointsAfter: readonly { seatNo: number; points: number }[],
+): boolean {
+  const config = normalizeRulesConfig(rawConfig, handState.seats.length);
+  if (config.automaticEndPolicy !== 'ranked_sanma') return false;
+  if (pointsAfter.length !== config.playerCount ||
+    pointsAfter.some((seat) => !handState.seats.some((s) => s.seatNo === seat.seatNo))) {
+    throw new Error('Automatic match end requires all settled seat balances.');
+  }
+  if (config.bustEndsGame && pointsAfter.some((seat) => seat.points < 0)) return true;
+  // The ranked-sanma cap is West 3, even when that dealer would repeat.
+  if (handState.roundWind === 'W' && handState.roundNumber === 3) return true;
+  if (handState.roundWind !== 'S' || handState.roundNumber !== 3) return false;
+
+  let leader = pointsAfter[0];
+  for (let i = 1; i < pointsAfter.length; i++) {
+    const seat = pointsAfter[i];
+    if (seat.points > leader.points || (seat.points === leader.points && seat.seatNo < leader.seatNo)) {
+      leader = seat;
+    }
+  }
+  const dealerWon = (resultInput.kind === 'ron' || resultInput.kind === 'tsumo') &&
+    resultInput.winners.some((winner) => winner.seatNo === handState.dealerSeatNo);
+  const dealerTenpai = (resultInput.kind === 'ryuukyoku' || resultInput.kind === 'nagashi_mangan') &&
+    resolveTenpaiMap(handState, resultInput, config.playerCount).get(handState.dealerSeatNo) === true;
+  if ((dealerWon || dealerTenpai) && leader.seatNo === handState.dealerSeatNo &&
+    leader.points >= config.startingPoints) return true;
+  // The ranked-sanma sudden-death threshold is not stated in the cited manual.
+  // targetPoints=40,000 is this product's candidate, not an asserted Tenhou value.
+  return nextHand.roundWind === 'W' && nextHand.roundNumber === 1 &&
+    leader.points >= config.targetPoints;
 }
 
 const WIND_ORDER: readonly ('E' | 'S' | 'W')[] = ['E', 'S', 'W'];
@@ -805,12 +902,12 @@ export function calculateSettlement(
       } else if (dealInSeatNo !== w.dealInSeatNo) {
         throw new Error(`All winners in a multi-ron must share the same dealInSeatNo.`);
       }
-      // Validate han/fu on all submitted winners even if triple-ron becomes abortive draw
+      // Validate all submitted winners, even when house triple ron becomes an abortive draw.
       calculateBasicPoints(w.han, w.fu, w.yakumanCount, w.doubleYakumanCount, config);
     }
 
     // 4p Triple Ron abortive draw per §4.2 ("三家荣和按途中流局") and §4.4 ("模板允许的途中流局: 连庄, +1, 保留")
-    if (playerCount === 4 && resultInput.winners.length === 3 && config.multiRon !== 'allow_all') {
+    if (playerCount === 4 && resultInput.winners.length === 3 && config.multiRon === 'double_ron') {
       const perSeat: SeatPayment[] = handState.seats.map((s) => ({
         seatNo: s.seatNo,
         netPoints: netMap.get(s.seatNo)!,
@@ -990,6 +1087,26 @@ export function calculateSettlement(
       }
       seenWinners.add(w.seatNo);
     }
+    if (!Array.isArray(resultInput.nagashiEligibility) ||
+      resultInput.nagashiEligibility.length !== seenWinners.size) {
+      throw new Error('Nagashi mangan requires a complete discard history for every claimed winner.');
+    }
+    const seenHistories = new Set<number>();
+    for (const history of resultInput.nagashiEligibility) {
+      if (!history || !seenWinners.has(history.seatNo) || seenHistories.has(history.seatNo) ||
+        !Array.isArray(history.discards) || history.discards.length === 0) {
+        throw new Error('Invalid nagashi mangan winner discard history.');
+      }
+      seenHistories.add(history.seatNo);
+      for (const discard of history.discards) {
+        if (!discard || typeof discard.tile !== 'string' ||
+          !/^(?:[1-9][mps]|[1-7]z)$/.test(discard.tile) ||
+          typeof discard.called !== 'boolean' ||
+          discard.called || !(/^[19][mps]$/.test(discard.tile) || /^[1-7]z$/.test(discard.tile))) {
+          throw new Error(`Nagashi mangan seat ${history.seatNo} has a called or non-terminal/honor discard.`);
+        }
+      }
+    }
     const tenpaiMap = resolveTenpaiMap(handState, resultInput, playerCount);
     for (const s of handState.seats) {
       if (s.isRiichi && !tenpaiMap.get(s.seatNo)) {
@@ -1025,7 +1142,7 @@ export function calculateSettlement(
 
     const dealerWonNagashi = seenWinners.has(handState.dealerSeatNo);
     const dealerTenpai = tenpaiMap.get(handState.dealerSeatNo) === true;
-    const dealerRepeats = dealerWonNagashi || dealerTenpai;
+    const dealerRepeats = config.nagashiDealerRepeatRequiresTenpai ? dealerTenpai : dealerWonNagashi || dealerTenpai;
     const nextHand = advanceDealerAndRound(
       handState,
       seatOrder,
@@ -1092,6 +1209,7 @@ export type TerminalPointsInput =
       unclaimedRiichiPoints?: number;
       startingDealerSeatNo?: number;
       requireTargetPoints?: boolean;
+      completedSouth4?: boolean;
     };
 
 export interface TerminalSettlementOptions {
@@ -1101,15 +1219,17 @@ export interface TerminalSettlementOptions {
   startingDealerSeatNo?: number;
   /** If true, game end requires max(rawPoints) >= targetPoints (excluding pool) unless someone busted */
   requireTargetPoints?: boolean;
+  /** Attested completed South 4 dealer rotation; required for fixed-South-4 end policy. */
+  completedSouth4?: boolean;
 }
 
 export interface TerminalSeatResult {
   seatNo: number;
   /** Seat points before unclaimed riichi pool transfer */
   rawPoints: number;
-  /** Seat points after transferring unclaimed riichi pool to provisional #1 */
+  /** Seat points after any terminal pool transfer (unchanged for an unallocated pool). */
   finalPoints: number;
-  /** Final 1-based rank (1..playerCount) */
+  /** Final 1-based rank; tied seats share rank when tiedUmaPolicy is split. */
   rank: number;
   /** (finalPoints - returnPoints) / 100 in integer tenths */
   baseTenths: number;
@@ -1139,9 +1259,9 @@ export type TerminalSettlementOutput =
   | {
       isGameEnd: true;
       gameEndReason: 'bust' | 'target_reached' | 'final_round_complete';
-      /** Pool transferred from the table to provisional first place. */
+      /** Outstanding sticks on table, even when no seat receives them. */
       unclaimedRiichiPoints: number;
-      poolRecipientSeatNo: number;
+      poolRecipientSeatNo: number | null;
       perSeat: TerminalSeatResult[];
       standings: TerminalSeatResult[];
       tenths: number[];
@@ -1169,6 +1289,7 @@ export function calculateTerminalSettlement(
   let inlinePool: number | undefined;
   let inlineStartDealer: number | undefined;
   let inlineRequireTarget: boolean | undefined;
+  let inlineCompletedSouth4: boolean | undefined;
 
   if (Array.isArray(finalPoints)) {
     seatEntries = finalPoints.map((item, idx) => {
@@ -1188,6 +1309,7 @@ export function calculateTerminalSettlement(
       unclaimedRiichiPoints?: number;
       startingDealerSeatNo?: number;
       requireTargetPoints?: boolean;
+      completedSouth4?: boolean;
     };
     const rawList = obj.seats ?? obj.points;
     if (!Array.isArray(rawList)) {
@@ -1205,6 +1327,7 @@ export function calculateTerminalSettlement(
     inlinePool = obj.riichiPool ?? obj.unclaimedRiichiPoints;
     inlineStartDealer = obj.startingDealerSeatNo;
     inlineRequireTarget = obj.requireTargetPoints;
+    inlineCompletedSouth4 = obj.completedSouth4;
   }
 
   if (seatEntries.length !== 3 && seatEntries.length !== 4) {
@@ -1258,9 +1381,15 @@ export function calculateTerminalSettlement(
     pickBoolean(rawConfig, ['requireTargetPoints']) ??
     false;
 
-  const gameEndReason = anyBust ? 'bust' :
-    maxActualPoints >= config.targetPoints ? 'target_reached' :
-      requireTargetPoints ? 'not_ended' : 'final_round_complete';
+  const completedSouth4 = options?.completedSouth4 ?? inlineCompletedSouth4;
+  if (completedSouth4 !== undefined && typeof completedSouth4 !== 'boolean') {
+    throw new Error('completedSouth4 must be a boolean.');
+  }
+  const gameEndReason = config.fixedSouth4EndPolicy === 'completed_south_4'
+    ? completedSouth4 === true ? 'final_round_complete' : 'not_ended'
+    : anyBust ? 'bust' :
+      maxActualPoints >= config.targetPoints ? 'target_reached' :
+        requireTargetPoints ? 'not_ended' : 'final_round_complete';
 
   // Ledger conservation applies even while the match continues; the pool stays outside seat points.
   const totalPoints = seatEntries.reduce((acc, s) => acc + s.points, unclaimedRiichiPoints);
@@ -1291,18 +1420,17 @@ export function calculateTerminalSettlement(
     const distB = (seatOrder.indexOf(b.seatNo) - startDealerIdx + playerCount) % playerCount;
     return distA - distB;
   });
-  const poolRecipientSeatNo = provisionalSorted[0].seatNo;
+  const poolRecipientSeatNo = config.terminalRiichiPoolPolicy === 'first' ? provisionalSorted[0].seatNo : null;
 
-  // Transfer remaining pool to provisional #1
+  // Transfer remaining pool only when terminal allocation policy awards it to first place.
   const adjustedEntries = seatEntries.map((s) => ({
     seatNo: s.seatNo,
     rawPoints: s.points,
     finalPoints: s.points + (s.seatNo === poolRecipientSeatNo ? unclaimedRiichiPoints : 0),
   }));
 
-  // The pool is transferred only after game end was determined from raw seat points.
-
-  // Step 3 (§4.5): Final ranking after pool transfer, breaking ties by fixed seat order from starting dealer
+  // The pool is transferred only after game end is determined from raw seat points.
+  // Final ranking uses pool-adjusted points only when the policy allocates the pool.
   const finalSorted = [...adjustedEntries].sort((a, b) => {
     if (b.finalPoints !== a.finalPoints) {
       return b.finalPoints - a.finalPoints;
@@ -1315,13 +1443,34 @@ export function calculateTerminalSettlement(
   const okaTotalTenths = Math.round(config.oka * 10);
   const resultBySeat = new Map<number, TerminalSeatResult>();
   const standings: TerminalSeatResult[] = [];
+  // Divide tied seats' combined uma in integer tenths. Indivisible tenths go to
+  // earlier seats in the stable starting-dealer order, retaining exact zero sum.
+  const umaByRank = config.uma.map((uma) => Math.round(uma * 10));
+  if (config.tiedUmaPolicy === 'split') {
+    for (let start = 0; start < playerCount;) {
+      let end = start + 1;
+      while (end < playerCount && finalSorted[end].finalPoints === finalSorted[start].finalPoints) end++;
+      if (end - start > 1) {
+        let total = 0;
+        for (let i = start; i < end; i++) total += umaByRank[i];
+        const share = Math.floor(total / (end - start));
+        const remainder = total - share * (end - start);
+        for (let i = start; i < end; i++) {
+          umaByRank[i] = share + (i - start < remainder ? 1 : 0);
+        }
+      }
+      start = end;
+    }
+  }
+  let sharedRank = 1;
 
   for (let i = 0; i < finalSorted.length; i++) {
     const entry = finalSorted[i];
-    const rank = i + 1;
+    if (i > 0 && entry.finalPoints !== finalSorted[i - 1].finalPoints) sharedRank = i + 1;
+    const rank = config.tiedUmaPolicy === 'split' ? sharedRank : i + 1;
     const baseTenths = Math.round((entry.finalPoints - config.returnPoints) / 100);
-    const umaTenths = Math.round(config.uma[i] * 10);
-    const okaTenths = rank === 1 ? okaTotalTenths : 0;
+    const umaTenths = umaByRank[i];
+    const okaTenths = i === 0 ? okaTotalTenths : 0;
     const penaltyTenths = 0;
     const totalTenths = baseTenths + umaTenths + okaTenths - penaltyTenths;
     const seatResult: TerminalSeatResult = {
@@ -1341,7 +1490,7 @@ export function calculateTerminalSettlement(
   }
 
   const sumTenths = standings.reduce((acc, s) => acc + s.totalTenths, 0);
-  if (sumTenths !== 0) {
+  if (sumTenths + (poolRecipientSeatNo === null ? unclaimedRiichiPoints / 100 : 0) !== 0) {
     throw new Error(`Terminal settlement zero-sum violated: sum(totalTenths)=${sumTenths}.`);
   }
 
