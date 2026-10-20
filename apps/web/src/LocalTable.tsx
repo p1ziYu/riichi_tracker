@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { ResultInput, SettlementOutput, TerminalSettlementOutput } from '@riichi/engine';
-import { confirmLocalTerminal, finishLocalMatch, getLocalMatch, LOCAL_MATCHES_STORAGE_KEY, markLocalRiichi, openLocalHand, previewLocalHand, previewLocalTerminal, settleLocalHand, updateLocalMatch } from './localMatches';
+import { confirmLocalTerminal, finishLocalMatch, getLocalMatch, LOCAL_MATCHES_STORAGE_KEY, LOCAL_SEEDS, markLocalRiichi, openLocalHand, previewLocalHand, previewLocalTerminal, seedRules, settleLocalHand, updateLocalMatch } from './localMatches';
 import type { LocalMatch } from './localMatches';
 import { errorText } from './api';
-import { pointText, winds } from './rules';
+import { pointText, ruleSummary, winds } from './rules';
 
 const windName: Record<string, string> = { E: '东', S: '南', W: '西' };
 function roundText(wind: string, round: number): string {
@@ -79,8 +79,10 @@ export default function LocalTable() {
   if (!match) return <main className="page table-page"><h1>本地牌局不可读取</h1>{error && <div className="notice invalid" role="alert">{error}</div>}<p>牌局可能已删除，或此浏览器没有该牌局数据。</p><Link className="button" to="/history">返回本地战绩</Link></main>;
   const status = match.status === 'active' ? '牌局进行中' : '牌局已结束';
   const shownTerminal = terminal ?? match.terminal;
+  const seed = LOCAL_SEEDS.find((item) => item.key === match.seedKey);
+  const ruleInfo = ruleSummary(match.templateName ?? seed?.name ?? match.name, seed ? seedRules(seed) : null, match.rules);
   return <main className="page table-page local-table">
-    <div className="table-heading"><div><p className="eyebrow">LOCAL TABLE / 本地牌桌</p><h1>{match.name}</h1><p className="muted">{status} · <span role="status">仅保存在此设备 · 离线可用</span></p></div><Link className="button" to="/history">对局记录 →</Link></div>
+    <div className="table-heading"><div><p className="eyebrow">LOCAL TABLE / 本地牌桌</p><h1>{match.name}</h1><p className="muted">{status} · <span role="status">仅保存在此设备 · 离线可用</span></p><p className="rule-detail">{ruleInfo.title}{ruleInfo.changes.length ? ` · ${ruleInfo.changes.join('、')}` : ''}</p></div><Link className="button" to="/history">对局记录 →</Link></div>
     {error && <div className="notice invalid" role="alert">{error}</div>}
     <section className="panel table-checkin table-checkin-owner"><div className="section-heading"><span>座次与玩家</span><small>在此设备输入姓名，无需签到或联网</small></div>
       <div className="member-list">{match.seats.map((seat) => <div key={seat.seatNo}><span className="wind-badge">{winds[seat.seatNo]}</span><label>座位 {seat.seatNo + 1}<input aria-label={`${winds[seat.seatNo]}家姓名`} value={seat.displayName} maxLength={40} onChange={(event) => { const displayName = event.target.value; mutate((current) => ({ ...current, seats: current.seats.map((value) => value.seatNo === seat.seatNo ? { ...value, displayName } : value) })); }} /></label><small>本地玩家</small></div>)}</div>

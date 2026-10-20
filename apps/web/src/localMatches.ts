@@ -1,13 +1,12 @@
 import { calculateSettlement, calculateTerminalSettlement, ENGINE_VERSION, isAutomaticMatchEnd } from '@riichi/engine';
 import type { HandState, ResultInput, RulesSnapshot, SettlementOutput, TerminalSettlementOutput } from '@riichi/engine';
 import type { TableRules } from './rules';
-import { rulesError, rulesSnapshot } from './rules';
+import { canonicalRules, ruleOverrides, rulesError } from './rules';
 
 export const LOCAL_MATCHES_STORAGE_KEY = 'ichihime.localMatches.v1';
 const STORAGE_VERSION = 1;
 
 // Reference configs match 008_seed_system_rulesets.sql; house configs remain as seeded.
-// TableRules is an editable projection, while reference-only policies stay in the snapshot.
 export const LOCAL_SEEDS = [
   { key: 'reference_4p_competition', name: '四麻国际竞技参考', reviewStatus: 'pending', config: {
     templateKey: 'wrc_4p_ref_v1', playerCount: 4, startingPoints: 30000, returnPoints: 30000, targetPoints: 30000,
@@ -50,22 +49,7 @@ export const LOCAL_SEEDS = [
 ] as const;
 
 export function seedRules(seed: (typeof LOCAL_SEEDS)[number]): TableRules {
-  const c = seed.config;
-  const aka = 'akaDora' in c ? c.akaDora : undefined;
-  return {
-    playerCount: c.playerCount as 3 | 4, startingPoints: c.startingPoints, returnPoints: c.returnPoints,
-    uma: 'uma' in c ? [...c.uma] : c.umaTenths.map((value) => value / 10),
-    ryuukyokuPoolTotal: 'notenPenaltyTotal' in c ? c.notenPenaltyTotal : c.ryuukyokuPenaltyTotal,
-    honbaPerPayer: 'honbaPerPayer' in c ? c.honbaPerPayer : c.honba.tsumoPerPayer,
-    roundLength: 'south', endTarget: c.returnPoints, maxRounds: 12,
-    dealerFinish: true, bustEndsMatch: 'bustEndsGame' in c ? c.bustEndsGame : c.bustEndsBelowZero,
-    openTanyao: 'kuitan' in c ? c.kuitan : true,
-    redFives: aka ? aka.man + aka.pin + aka.sou : c.playerCount === 3 ? 2 : 3,
-    kiriageMangan: c.kiriageMangan,
-    kazoeYakuman: typeof c.kazoeYakuman === 'boolean' ? c.kazoeYakuman : c.kazoeYakuman === 'single_yakuman_at_13_han',
-    sanmaTsumoLoss: 'tsumoLoss' in c ? c.tsumoLoss : c.tsumoPayment === 'tsumo_loss',
-    doubleRon: 'multiRon' in c ? c.multiRon !== 'head_bump' : true,
-  };
+  return canonicalRules(seed.config as unknown as Record<string, unknown>);
 }
 
 export type LocalHand = Omit<HandState, 'markRevision' | 'resultRevision'> & { markRevision: number; resultRevision: number };
@@ -78,6 +62,7 @@ export interface LocalMatch {
   status: 'active' | 'finished';
   seedKey: string | null;
   reviewStatus: string | null;
+  templateName?: string;
   rules: TableRules;
   rulesSnapshot: RulesSnapshot;
   engineVersion: string;
@@ -150,7 +135,26 @@ function store(): Store {
   if (!data.matches.every(validMatch)) {
     throw new Error('本地牌局记录不完整；请先备份浏览器数据。');
   }
-  return { version: STORAGE_VERSION, matches: data.matches as LocalMatch[] };
+  return { version: STORAGE_VERSION, matches: (data.matches as LocalMatch[]).map((match) => {
+    // Older v1 records held a lossy UI projection beside the settlement snapshot.
+    // Recover its edits while retaining policies that only the snapshot knew.
+    if ('ryuukyokuPoolTotal' in match.rules) {
+      const legacy = match.rules as unknown as Record<string, unknown>;
+      const count = match.rules.playerCount;
+      const config = canonicalRules({
+        ...match.rulesSnapshot.config, startingPoints: legacy.startingPoints, returnPoints: legacy.returnPoints,
+        targetPoints: legacy.endTarget, uma: legacy.uma, notenPenaltyTotal: legacy.ryuukyokuPoolTotal,
+        honbaPerPayer: legacy.honbaPerPayer, honbaRon: (legacy.honbaPerPayer as number) * (count - 1),
+        kiriageMangan: legacy.kiriageMangan, kazoeYakuman: legacy.kazoeYakuman,
+        tsumoLoss: legacy.sanmaTsumoLoss, bustEndsGame: legacy.bustEndsMatch,
+        multiRon: legacy.doubleRon ? 'double_ron' : 'head_bump',
+      });
+      return { ...match, rules: config, rulesSnapshot: { ...match.rulesSnapshot,
+        config: { ...config, uma: [...config.uma],
+          ...(match.rulesSnapshot.config.metadata ? { metadata: match.rulesSnapshot.config.metadata } : {}) } } };
+    }
+    return match;
+  }) };
 }
 function save(matches: LocalMatch[]): void {
   localStorage.setItem(LOCAL_MATCHES_STORAGE_KEY, JSON.stringify({ version: STORAGE_VERSION, matches }));
@@ -163,34 +167,21 @@ export function createLocalMatch(rules: TableRules, name: string, seedKey: strin
   const invalid = rulesError(rules);
   if (invalid) throw new Error(invalid);
   const seed = LOCAL_SEEDS.find((item) => item.key === seedKey);
+  const baseRules = seed ? seedRules(seed) : null;
+  const config = canonicalRules(rules);
   const createdAt = new Date().toISOString();
   const match: LocalMatch = {
     id: `local-${crypto.randomUUID()}`, name, createdAt, updatedAt: createdAt,
-    status: 'active', seedKey, reviewStatus: seed?.reviewStatus ?? null,
-    rules: { ...rules, uma: [...rules.uma] },
-    rulesSnapshot: {
-      rulesHash: 'local-only',
-      config: {
-        ...(seed && 'templateKey' in seed.config ? seed.config : {}),
-        ...rulesSnapshot(rules).config,
-        ...(seed ? { templateKey: 'templateKey' in seed.config ? seed.config.templateKey : seed.key } : {}),
-        startingPoints: rules.startingPoints,
-        returnPoints: rules.returnPoints,
-        uma: [...rules.uma],
-        oka: (rules.returnPoints - rules.startingPoints) * rules.playerCount / 1000,
-        notenPenaltyTotal: rules.ryuukyokuPoolTotal,
-        targetPoints: rules.endTarget,
-        tsumoLoss: rules.sanmaTsumoLoss,
-        bustEndsGame: rules.bustEndsMatch,
-        multiRon: rules.doubleRon ? 'double_ron' : 'head_bump',
-        honbaPerPayer: rules.honbaPerPayer,
-        honbaRon: rules.honbaPerPayer * (rules.playerCount - 1),
-        ...('compositeYakuman' in (seed?.config ?? {}) ? { compositeYakuman: true } : {}),
-        ...('doubleYakuman' in (seed?.config ?? {}) ? { doubleYakuman: false } : {}),
+    status: 'active', seedKey, reviewStatus: seed?.reviewStatus ?? null, templateName: seed?.name ?? name,
+    rules: { ...config, uma: [...config.uma] },
+    rulesSnapshot: { rulesHash: 'local-only',
+      config: { ...config, uma: [...config.uma],
+        ...(seed && baseRules ? { metadata: { baseTemplateName: seed.name, baseConfig: baseRules,
+          overrideKeys: Object.keys(ruleOverrides(baseRules, config)) } } : {}),
       },
     }, engineVersion: ENGINE_VERSION,
-    seats: Array.from({ length: rules.playerCount }, (_, seatNo) => ({ seatNo, displayName: `玩家 ${seatNo + 1}` })),
-    points: Array(rules.playerCount).fill(rules.startingPoints) as number[], currentHand: null,
+    seats: Array.from({ length: config.playerCount }, (_, seatNo) => ({ seatNo, displayName: `玩家 ${seatNo + 1}` })),
+    points: Array(config.playerCount).fill(config.startingPoints) as number[], currentHand: null,
     nextHand: { roundWind: 'E', roundNumber: 1, dealerSeatNo: 0, honba: 0, riichiPool: 0 },
     results: [], terminal: null, settlementConfirmed: false,
   };
@@ -258,13 +249,18 @@ export function finishLocalMatch(match: LocalMatch): LocalMatch {
       !match.results.some(({ hand }) => hand.roundWind === 'S' && hand.roundNumber === 4))) {
     throw new Error('固定南四局尚未结束，不能提前终局');
   }
+  if (match.rulesSnapshot.config.fixedSouth4EndPolicy !== 'completed_south_4' &&
+    Math.max(...match.points) < Number(match.rulesSnapshot.config.targetPoints) &&
+    !(match.rulesSnapshot.config.bustEndsGame === true && match.points.some((points) => points < 0))) {
+    throw new Error('尚未达到终局目标点，也没有启用飞人结束的负分座位');
+  }
   // Like the server finish endpoint, an open hand is voided, not settled.
   return { ...match, currentHand: null, status: 'finished' };
 }
 export function previewLocalTerminal(match: LocalMatch): TerminalSettlementOutput {
   if (match.status !== 'finished') throw new Error('请先终局');
   return calculateTerminalSettlement(match.points, match.rulesSnapshot, {
-    riichiPool: match.nextHand?.riichiPool ?? 0, startingDealerSeatNo: 0, requireTargetPoints: false,
+    riichiPool: match.nextHand?.riichiPool ?? 0, startingDealerSeatNo: 0, requireTargetPoints: true,
     completedSouth4: match.rulesSnapshot.config.fixedSouth4EndPolicy === 'completed_south_4' &&
       match.nextHand?.roundWind === 'W' && match.nextHand.roundNumber === 1 &&
       match.results.some(({ hand }) => hand.roundWind === 'S' && hand.roundNumber === 4),

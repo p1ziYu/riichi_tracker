@@ -14,6 +14,7 @@ const {
   finishLocalMatch, getLocalMatch, listLocalMatches, markLocalRiichi, openLocalHand,
   previewLocalHand, previewLocalTerminal, settleLocalHand, updateLocalMatch, confirmLocalTerminal,
 } = await import('../src/localMatches.ts');
+const { matchRulesPayload, ruleOverrides, ruleSummary, rulesError, snapshotRuleSummary } = await import('../src/rules.ts');
 
 const originalStorage = globalThis.localStorage;
 const originalWindow = globalThis.window;
@@ -83,10 +84,10 @@ test('riichi pool and honba carry across draw, hand open and next win; persisted
 test('finish voids open hand and uncharged marks; terminal awards unclaimed pool and finished match remains deletable', () => {
   environment();
   let match = create();
+  match = updateLocalMatch(match.id, (fresh) => ({ ...fresh, points: [31000, 24000, 24000, 21000] }));
   match = updateLocalMatch(match.id, (fresh) => markLocalRiichi(fresh, 0));
   match = updateLocalMatch(match.id, finishLocalMatch);
   assert.equal(match.currentHand, null);
-  assert.equal(match.points[0], match.rules.startingPoints);
   assert.equal(match.results.length, 0);
   assert.equal(previewLocalTerminal(match).unclaimedRiichiPoints, 0);
   match = updateLocalMatch(match.id, confirmLocalTerminal);
@@ -97,6 +98,7 @@ test('finish voids open hand and uncharged marks; terminal awards unclaimed pool
   assert.equal(listLocalMatches().length, 0);
 
   match = create();
+  match = updateLocalMatch(match.id, (fresh) => ({ ...fresh, points: [31000, 24000, 24000, 21000] }));
   match = updateLocalMatch(match.id, (fresh) => markLocalRiichi(fresh, 1));
   match = updateLocalMatch(match.id, (fresh) => settleLocalHand(fresh,
     { kind: 'ryuukyoku', winners: [], tenpai: [false, true, false, false] }));
@@ -112,8 +114,8 @@ test('reference local seeds retain their engine policies instead of projecting h
   environment();
   const wrc = createLocalMatch(seedRules(LOCAL_SEEDS[0]), 'WRC', LOCAL_SEEDS[0].key);
   assert.equal(wrc.rules.kiriageMangan, true);
-  assert.equal(wrc.rules.bustEndsMatch, false);
-  assert.equal(wrc.rules.doubleRon, false);
+  assert.equal(wrc.rules.bustEndsGame, false);
+  assert.equal(wrc.rules.multiRon, 'head_bump');
   assert.equal(wrc.rulesSnapshot.config.templateKey, 'wrc_4p_ref_v1');
   assert.equal(wrc.rulesSnapshot.config.multiRon, 'head_bump');
   assert.equal(wrc.rulesSnapshot.config.terminalRiichiPoolPolicy, 'unallocated');
@@ -235,4 +237,80 @@ test('ranked sanma locally auto-finishes on all-last dealer win; house stays man
     assert.equal(settled.currentHand, null);
     assert.ok(settled.points[2] > settled.points[0]);
   }
+});
+
+test('canonical defaults, diff, reset and template switches preserve per-match intent', () => {
+  const base = seedRules(LOCAL_SEEDS[0]);
+  const customized = { ...base, targetPoints: 35000, honbaRon: 600, honbaPerPayer: 200,
+    kiriageMangan: false, uma: [20, 10, -10, -20] };
+  assert.deepEqual(ruleOverrides(base, base), {});
+  assert.deepEqual(matchRulesPayload('version-1', base, base), { rulesetVersionId: 'version-1' });
+  assert.deepEqual(ruleOverrides(base, customized), {
+    targetPoints: 35000, uma: [20, 10, -10, -20], honbaRon: 600, honbaPerPayer: 200, kiriageMangan: false,
+  });
+  assert.equal(ruleSummary('四麻国际竞技参考', base, customized).changes.length, 5);
+  assert.equal(ruleSummary('四麻国际竞技参考', base, customized).title, '基于〈四麻国际竞技参考〉+ 自定义 5 项');
+  assert.deepEqual(matchRulesPayload('version-1', base, customized), {
+    rulesetVersionId: 'version-1', rulesOverride: ruleOverrides(base, customized),
+  });
+  assert.deepEqual(ruleOverrides(base, { ...base, uma: [...base.uma] }), {});
+  const nextTemplate = seedRules(LOCAL_SEEDS[2]);
+  assert.deepEqual(ruleOverrides(nextTemplate, { ...nextTemplate, uma: [...nextTemplate.uma] }), {});
+  assert.equal(nextTemplate.startingPoints, 25000);
+  assert.equal(rulesError({ ...base, notenPenaltyTotal: 1500 }), '流局罚符需能按听牌人数逐笔整百分摊。');
+});
+
+test('custom local snapshot stores full engine policies, never seed overrides; settlement uses edited math', () => {
+  environment();
+  const base = seedRules(LOCAL_SEEDS[0]);
+  const adjusted = { ...base, honbaRon: 600, honbaPerPayer: 200, notenPenaltyTotal: 6000,
+    multiRon: 'double_ron', targetPoints: 35000, fixedSouth4EndPolicy: 'target_or_bust',
+    terminalRiichiPoolPolicy: 'first', uma: [20, 10, -10, -20] };
+  let match = createLocalMatch(adjusted, LOCAL_SEEDS[0].name, LOCAL_SEEDS[0].key);
+  assert.equal(match.rulesSnapshot.config.honbaRon, 600);
+  assert.equal(match.rulesSnapshot.config.notenPenaltyTotal, 6000);
+  assert.equal(match.rulesSnapshot.config.fixedSouth4EndPolicy, 'target_or_bust');
+  assert.equal(match.rulesSnapshot.config.metadata.overrideKeys.length, 8);
+  const summary = snapshotRuleSummary(match.rulesSnapshot.config, 'fallback');
+  assert.equal(summary.changes.length, 8);
+  assert.match(summary.changes.join('、'), /荒牌流局罚符总额：6,000/);
+  const output = previewLocalHand(match, { kind: 'ryuukyoku', winners: [], tenpai: [true, false, false, false] });
+  assert.equal(output.perSeat[0].netPoints, 6000);
+  match = settleLocalHand(match, { kind: 'ryuukyoku', winners: [], tenpai: [true, false, false, false] });
+  assert.equal(match.points[0], 36000);
+  assert.equal(match.points[1], 28000);
+  match = finishLocalMatch(match);
+  const terminal = previewLocalTerminal(match);
+  assert.equal(terminal.isGameEnd, true);
+  assert.equal(terminal.perSeat[0].umaTenths, 200);
+});
+
+test('old local records remain readable with legacy rule projection and intact snapshot policies', () => {
+  const storage = environment();
+  const created = createLocalMatch(seedRules(LOCAL_SEEDS[0]), 'old', LOCAL_SEEDS[0].key);
+  const data = JSON.parse(storage.get(LOCAL_MATCHES_STORAGE_KEY));
+  data.matches[0].rules = { playerCount: 4, startingPoints: 30000, returnPoints: 30000,
+    endTarget: 40000, uma: [15, 5, -5, -15], ryuukyokuPoolTotal: 6000, honbaPerPayer: 200,
+    kiriageMangan: false, kazoeYakuman: true, sanmaTsumoLoss: false, bustEndsMatch: false, doubleRon: true };
+  data.matches[0].rulesSnapshot.config = { ...created.rulesSnapshot.config, targetPoints: 30000,
+    notenPenaltyTotal: 6000, honbaRon: 600, honbaPerPayer: 200, multiRon: 'double_ron',
+    oka: 0, fixedSouth4EndPolicy: 'completed_south_4' };
+  storage.set(LOCAL_MATCHES_STORAGE_KEY, JSON.stringify(data));
+  const migrated = getLocalMatch(created.id);
+  assert.equal(migrated.rules.targetPoints, 40000);
+  assert.equal(migrated.rulesSnapshot.config.targetPoints, 40000);
+  assert.equal(migrated.rulesSnapshot.config.fixedSouth4EndPolicy, 'completed_south_4');
+  assert.equal(migrated.rulesSnapshot.config.honbaRon, 600);
+});
+
+test('target-or-bust local finish requires configured end condition', () => {
+  environment();
+  const base = seedRules(LOCAL_SEEDS[2]);
+  const match = createLocalMatch(base, 'house', LOCAL_SEEDS[2].key);
+  assert.throws(() => finishLocalMatch(match), /目标点/);
+  assert.throws(() => finishLocalMatch({ ...match, points: [26000, 25000, 25000, 24000] }), /目标点/);
+  const reached = finishLocalMatch({ ...match, points: [30000, 24000, 24000, 22000] });
+  assert.equal(previewLocalTerminal(reached).isGameEnd, true);
+  const bust = finishLocalMatch({ ...match, points: [35000, 35000, 31000, -1000] });
+  assert.equal(previewLocalTerminal(bust).isGameEnd, true);
 });

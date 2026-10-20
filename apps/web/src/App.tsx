@@ -3,18 +3,19 @@ import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate,
 import { calculateSettlement, ENGINE_VERSION } from '@riichi/engine';
 import type { SettlementOutput } from '@riichi/engine';
 import { ApiError, api, clearNativeAuthToken, errorText, isNative, post } from './api';
-import { exampleResults, initialHand, oka, pointText, rulesError, rulesSnapshot, winds } from './rules';
-import type { RuleTemplate, TableRules } from './rules';
+import { canonicalRules, exampleResults, initialHand, matchRulesPayload, pointText, ruleSummary, rulesError, rulesSnapshot, snapshotRuleSummary, winds } from './rules';
+import type { TableRules } from './rules';
 import Table from './Table';
 import BottomTabs from './BottomTabs';
 import { createLocalMatch, deleteLocalMatch, isLocalId, listLocalMatches, LOCAL_MATCHES_STORAGE_KEY, LOCAL_SEEDS, seedRules } from './localMatches';
 import type { LocalMatch } from './localMatches';
 import LocalTable from './LocalTable';
 import WizardSteps from './WizardSteps';
+import RulesAdjustment from './RulesAdjustment';
 import './style.css';
 
 type Principal = { id: string; type: 'account' | 'guest'; displayName: string };
-type MatchSummary = { id: string; status: string; playerCount: number; createdAt: string };
+type MatchSummary = { id: string; status: string; playerCount: number; createdAt: string; name?: string; rulesSnapshot?: Record<string, unknown>; rulesetVersionId?: string };
 const kindLabels: Record<string, string> = { '4p': '四麻', '3p': '三麻' };
 type ServerTemplate = { templateId: string; templateKey: string; kind: string; scope: string; versionId: string; name: string; reviewStatus: string; config: TableRules };
 const reviewLabels: Record<string, string> = {
@@ -26,7 +27,7 @@ const matchLabels: Record<string, string> = {
 };
 const GUEST_MODE = 'ichihime.local-mode';
 const ACCOUNT_HINT = 'ichihime.account-session';
-let createDraft: { guest: boolean | null; chosen: { name: string; versionId?: string; seedKey?: string } | null; rules: TableRules | null } = { guest: null, chosen: null, rules: null };
+let createDraft: { guest: boolean | null; chosen: { name: string; versionId: string; seedKey?: string; base: TableRules } | null; rules: TableRules | null } = { guest: null, chosen: null, rules: null };
 
 function Shell({ children, principal }: { children: React.ReactNode; principal: Principal | null }) {
   const bridge = (window as Window & { Capacitor?: { getPlatform?: () => string; platform?: string; isNativePlatform?: () => boolean } }).Capacitor;
@@ -41,12 +42,19 @@ function Shell({ children, principal }: { children: React.ReactNode; principal: 
 function MatchList() {
   const [matches, setMatches] = useState<MatchSummary[] | null>(null);
   const [error, setError] = useState('');
+  const [templateNames, setTemplateNames] = useState<Record<string, string>>({});
   useEffect(() => {
     let alive = true;
     api<MatchSummary[]>('/api/matches?mine=1').then((data) => { if (alive) setMatches(data); }).catch((cause: unknown) => { if (alive) setError(errorText(cause)); });
+    api<ServerTemplate[]>('/api/rulesets/templates').then((data) => {
+      if (alive) setTemplateNames(Object.fromEntries(data.map((template) => [template.versionId, template.name])));
+    }).catch(() => {});
     return () => { alive = false; };
   }, []);
-  return <>{error && <div className="notice invalid" role="alert">读取战绩失败：{error}</div>}{!error && !matches && <p className="muted">正在读取战绩…</p>}{matches && (matches.length ? <div className="history-list">{matches.map((match) => <Link className="history-row" to={`/table/${match.id}`} key={match.id}><span className="tile-mini">中</span><div><strong>牌桌 {match.id}</strong><small>{match.playerCount} 麻 · {new Date(match.createdAt).toLocaleString('zh-CN')}</small></div><b>{matchLabels[match.status] ?? match.status}</b><em>查看牌桌 →</em></Link>)}</div> : <div className="empty">暂无对局记录。</div>)}</>;
+  return <>{error && <div className="notice invalid" role="alert">读取战绩失败：{error}</div>}{!error && !matches && <p className="muted">正在读取战绩…</p>}{matches && (matches.length ? <div className="history-list">{matches.map((match) => {
+    const summary = snapshotRuleSummary(match.rulesSnapshot, templateNames[match.rulesetVersionId ?? ''] ?? match.name ?? '规则模板');
+    return <Link className="history-row" to={`/table/${match.id}`} key={match.id}><span className="tile-mini">中</span><div><strong>牌桌 {match.id}</strong><small>{match.playerCount} 麻 · {new Date(match.createdAt).toLocaleString('zh-CN')}</small><small>{summary.title}{summary.changes.length ? ` · ${summary.changes.join('、')}` : ''}</small></div><b>{matchLabels[match.status] ?? match.status}</b><em>查看牌桌 →</em></Link>;
+  })}</div> : <div className="empty">暂无对局记录。</div>)}</>;
 }
 
 function LocalMatchList({ lobby = false }: { lobby?: boolean }) {
@@ -62,15 +70,18 @@ function LocalMatchList({ lobby = false }: { lobby?: boolean }) {
     window.addEventListener('storage', onStorage);
     return () => { window.removeEventListener('ichihime:local-matches', refresh); window.removeEventListener('storage', onStorage); };
   }, []);
-  return <>{error && <div className="notice invalid" role="alert">读取本地战绩失败：{error}</div>}{!error && (matches.length ? <div className="history-list">{matches.map((match) =>
-    <div className="history-row" key={match.id}><span className="tile-mini">中</span><div><strong>{match.name}</strong><small>{match.rules.playerCount} 麻 · {new Date(match.createdAt).toLocaleString('zh-CN')} · 仅此设备</small></div><span className="tag">本地</span><b>{matchLabels[match.status] ?? match.status}</b><Link to={`/table/${match.id}`}>{lobby && match.status === 'active' ? '继续对局 →' : '查看牌桌 →'}</Link><button type="button" className="text-button" onClick={() => {
+  return <>{error && <div className="notice invalid" role="alert">读取本地战绩失败：{error}</div>}{!error && (matches.length ? <div className="history-list">{matches.map((match) => {
+    const seed = LOCAL_SEEDS.find((item) => item.key === match.seedKey);
+    const summary = ruleSummary(match.templateName ?? seed?.name ?? match.name, seed ? seedRules(seed) : null, match.rules);
+    return <div className="history-row" key={match.id}><span className="tile-mini">中</span><div><strong>{match.name}</strong><small>{match.rules.playerCount} 麻 · {new Date(match.createdAt).toLocaleString('zh-CN')} · 仅此设备</small><small>{summary.title}{summary.changes.length ? ` · ${summary.changes.join('、')}` : ''}</small></div><span className="tag">本地</span><b>{matchLabels[match.status] ?? match.status}</b><Link to={`/table/${match.id}`}>{lobby && match.status === 'active' ? '继续对局 →' : '查看牌桌 →'}</Link><button type="button" className="text-button" onClick={() => {
       if (!window.confirm(`确定删除「${match.name}」？本地牌局及所有局次记录无法恢复。`)) return;
       try { deleteLocalMatch(match.id); } catch (cause) { setError(errorText(cause)); }
-    }}>删除</button></div>)}</div> : <div className="empty">暂无本地对局。<Link to="/create">开一桌 →</Link></div>)}</>;
+    }}>删除</button></div>;
+  })}</div> : <div className="empty">暂无本地对局。<Link to="/create">开一桌 →</Link></div>)}</>;
 }
 
-function Home({ templateCount, guest }: { templateCount: number; guest: boolean }) {
-  return <main className="page"><section className="hero"><div><p className="eyebrow">一姬 / ICHIHIME · 线下日麻记分</p><h1>落座，即开局。</h1><p>从规则到结算，给同桌每一分一个清楚的去处。</p><div className="hero-actions"><Link className="button primary" to="/create">开桌 <span>↗</span></Link></div></div><div className="hero-object" aria-hidden="true"><span>一</span><span>萬</span><small>東 一 局</small></div></section><div className="section-heading"><span>桌边入口</span><small>01 / 03</small></div><div className="entry-grid"><Link to="/create" className="entry"><b>01</b><h2>开桌</h2><p>选规则，调数值，预览支付。</p><span>建立牌局 →</span></Link><Link to="/create#templates" className="entry"><b>02</b><h2>我的模板</h2><p>{templateCount ? `${templateCount} 份本地模板` : '查看私人模板'}</p><span>查看模板 →</span></Link><Link to="/history" className="entry"><b>03</b><h2>战绩</h2><p>对局历史与成绩入口。</p><span>查看战绩 →</span></Link></div><div className="section-heading" id="战绩"><span>{guest ? '本地牌局' : '战绩'}</span><Link to="/history">查看全部 →</Link></div>{guest ? <LocalMatchList lobby /> : <MatchList />}</main>;
+function Home({ guest }: { guest: boolean }) {
+  return <main className="page"><section className="hero"><div><p className="eyebrow">一姬 / ICHIHIME · 线下日麻记分</p><h1>落座，即开局。</h1><p>从规则到结算，给同桌每一分一个清楚的去处。</p><div className="hero-actions"><Link className="button primary" to="/create">开桌 <span>↗</span></Link></div></div><div className="hero-object" aria-hidden="true"><span>一</span><span>萬</span><small>東 一 局</small></div></section><div className="section-heading"><span>桌边入口</span><small>01 / 02</small></div><div className="entry-grid"><Link to="/create" className="entry"><b>01</b><h2>开桌</h2><p>选规则，调数值，预览支付。</p><span>建立牌局 →</span></Link><Link to="/history" className="entry"><b>02</b><h2>战绩</h2><p>对局历史与成绩入口。</p><span>查看战绩 →</span></Link></div><div className="section-heading" id="战绩"><span>{guest ? '本地牌局' : '战绩'}</span><Link to="/history">查看全部 →</Link></div>{guest ? <LocalMatchList lobby /> : <MatchList />}</main>;
 }
 
 function checkInReturnTo(value: string | null): string {
@@ -110,21 +121,13 @@ function RulePreview({ rules, guest }: { rules: TableRules; guest: boolean }) {
   }), [rules]);
   return <section className="panel preview-panel"><div className="section-heading"><span>支付预览</span><small>规则示例 · {guest ? '本地结算由内置引擎计算' : '正式结算以服务端为准'}</small></div><p className="muted">东一局 · 0 本场 · 无供托 · 无立直。每次修改规则重新计算。</p><div className="sample-grid">{samples.map((sample) => <div className="sample" key={sample.title}><h3>{sample.title}</h3>{sample.output ? <Payments output={sample.output} /> : <p className="notice">示例暂不可计算</p>}</div>)}</div></section>;
 }
-function NumberField({ label, value, onChange, step = 100, hint }: { label: string; value: number; onChange: (value: number) => void; step?: number; hint?: string }) {
-  return <label>{label}<input type="number" inputMode="numeric" step={step} value={value} onChange={(event) => onChange(event.target.value === '' ? NaN : Number(event.target.value))} />{hint && <small>{hint}</small>}</label>;
-}
-function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
-  return <label className="toggle"><span>{label}</span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /></label>;
-}
 
-function Create({ localTemplates, addTemplate, guest }: { localTemplates: RuleTemplate[]; addTemplate: (template: RuleTemplate) => void; guest: boolean }) {
+function Create({ guest }: { guest: boolean }) {
   const [templates, setTemplates] = useState<ServerTemplate[] | null>(null);
-  const [chosen, setChosen] = useState<{ name: string; versionId?: string; seedKey?: string } | null>(() => createDraft.guest === guest ? createDraft.chosen : null);
+  const [chosen, setChosen] = useState<typeof createDraft.chosen>(() => createDraft.guest === guest ? createDraft.chosen : null);
   const [rules, setRules] = useState<TableRules | null>(() => createDraft.guest === guest ? createDraft.rules : null);
   const [step, setStep] = useState<1 | 2 | 3>(() => createDraft.guest === guest && createDraft.rules ? 2 : 1);
   const [created, setCreated] = useState<{ id: string; template: string } | null>(null);
-  const [templateName, setTemplateName] = useState('');
-  const [saved, setSaved] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -138,59 +141,62 @@ function Create({ localTemplates, addTemplate, guest }: { localTemplates: RuleTe
     let alive = true;
     api<ServerTemplate[]>('/api/rulesets/templates').then((data) => {
       if (alive) setTemplates(data.map((template) => ({
-        ...template,
+        ...template, config: canonicalRules(template.config),
         scope: ['system', 'global', 'public'].includes(template.scope) ? 'system' : 'mine',
       })));
     }).catch((cause: unknown) => { if (alive) setError(errorText(cause)); });
     return () => { alive = false; };
   }, [guest]);
   useEffect(() => { createDraft = { guest, chosen, rules }; }, [guest, chosen, rules]);
-  function discardCreated(): boolean {
-    if (created && guest) {
-      try { deleteLocalMatch(created.id); }
-      catch (cause) { setError(errorText(cause)); return false; }
-    }
+  function select(template: ServerTemplate) {
     setCreated(null);
-    return true;
+    const base = template.config;
+    setChosen({ name: template.name, versionId: template.versionId,
+      seedKey: guest ? template.versionId : undefined, base });
+    setRules({ ...base, uma: [...base.uma] });
+    setError(''); setStep(2);
   }
-  const change = (patch: Partial<TableRules>) => {
-    if (discardCreated()) setRules((current) => current ? { ...current, ...patch } : current);
-  };
-  function select(name: string, config: TableRules, versionId?: string) {
-    if (!discardCreated()) return;
-    setChosen({ name, versionId, seedKey: guest && LOCAL_SEEDS.some((seed) => seed.key === versionId) ? versionId : undefined });
-    setRules({ ...config, uma: [...config.uma] }); setTemplateName(''); setSaved(''); setError(''); setStep(2);
-  }
-  async function create(config?: TableRules, versionId?: string) {
-    const directTemplate = versionId ? templates?.find((template) => template.versionId === versionId) : undefined;
-    if (directTemplate && !discardCreated()) return;
+  async function create(template?: ServerTemplate) {
+    if (!template && (!chosen || !rules)) return;
+    if (template) setCreated(null);
+    const selected = template ? template.config : rules!;
+    const source = template ? { name: template.name, versionId: template.versionId, seedKey: guest ? template.versionId : undefined,
+      base: selected } : chosen!;
+    const validation = rulesError(selected);
+    if (validation) { setError(validation); return; }
     setBusy(true); setError('');
     try {
       if (guest) {
-        const seed = LOCAL_SEEDS.find((item) => item.key === versionId);
-        const selectedRules = config ?? (seed ? seedRules(seed) : null);
-        if (!selectedRules) throw new Error('请先选择规则模板');
-        const match = createLocalMatch(selectedRules, seed?.name ?? chosen?.name ?? '本地牌桌', seed?.key ?? chosen?.seedKey ?? null);
-        setCreated({ id: match.id, template: seed?.name ?? chosen?.name ?? '本地牌桌' });
-        setStep(3);
+        const match = createLocalMatch(selected, source.name, source.seedKey ?? null);
+        setCreated({ id: match.id, template: source.name });
       } else {
-        const { match } = await post<{ match: { id: string; inviteCode: string; status: string } }>('/api/matches', config ? { config } : { rulesetVersionId: versionId });
-        setCreated({ id: match.id, template: directTemplate?.name ?? chosen?.name ?? '牌桌' });
-        setStep(3);
+        const { match } = await post<{ match: { id: string } }>('/api/matches',
+          matchRulesPayload(source.versionId, source.base, selected));
+        setCreated({ id: match.id, template: source.name });
       }
-      if (directTemplate) {
-        setChosen({ name: directTemplate.name, versionId: directTemplate.versionId, seedKey: guest ? directTemplate.versionId : undefined });
-        setRules({ ...directTemplate.config, uma: [...directTemplate.config.uma] });
-        setTemplateName(''); setSaved('');
-      }
+      if (template) { setChosen(source); setRules({ ...selected, uma: [...selected.uma] }); }
+      setStep(3);
     } catch (cause) { setError(errorText(cause)); }
     finally { setBusy(false); }
   }
   const validation = rules ? rulesError(rules) : null;
   return <main className="page"><p className="eyebrow">NEW TABLE / 开桌</p><h1>开一桌好牌</h1>
     <WizardSteps step={step} unlocked={created ? 3 : rules ? 2 : 1} onStep={setStep} guest={guest} />
-    {step === 1 && <><div className="section-heading"><span>预置模板</span><small>{guest ? '内置模板 · 离线可用' : '服务端模板 · 只读起点'}</small></div>{!templates && !error && <p className="muted">正在加载模板…</p>}<div className="template-grid">{templates?.filter((template) => template.scope !== 'mine').map((template) => <article className="template" key={template.versionId}><div className="template-top"><span className="tag">{template.config.playerCount} 麻</span><span className="tag muted-tag">{reviewLabels[template.reviewStatus] ?? template.reviewStatus}</span></div><h2>{template.name}</h2><p>{kindLabels[template.kind] ?? template.kind} · {template.templateKey}</p><button type="button" onClick={() => select(template.name, template.config, template.versionId)}>以此为起点调整 →</button><button type="button" className="quiet" disabled={busy} onClick={() => void create(undefined, template.versionId)}>{guest ? '直接创建本地对局' : '直接应用'}</button></article>)}</div><div className="section-heading" id="templates"><span>我的模板</span><small>{guest ? '当前会话模板' : '服务端与本地会话'}</small></div><div className="template-grid">{templates?.filter((template) => template.scope === 'mine').map((template) => <article className="template" key={template.versionId}><span className="tag">{reviewLabels[template.reviewStatus] ?? template.reviewStatus}</span><h2>{template.name}</h2><button type="button" onClick={() => select(template.name, template.config, template.versionId)}>以此为起点调整 →</button><button type="button" className="quiet" disabled={busy} onClick={() => void create(undefined, template.versionId)}>{guest ? '直接创建本地对局' : '直接应用'}</button></article>)}{localTemplates.map((template) => <article className="template" key={template.id}><span className="tag">本地 · 当前会话</span><h2>{template.name}</h2><p>{template.difference}</p><button type="button" onClick={() => select(template.name, template.rules)}>以此为起点调整 →</button></article>)}</div>{templates && !templates.some((template) => template.scope === 'mine') && !localTemplates.length && <div className="empty">尚无我的模板。调整模板后可在当前会话中另存。</div>}</>}
-    {step === 2 && rules && <><div className="section-heading"><span>{chosen?.name} · 调整副本</span><button type="button" className="text-button" onClick={() => { setStep(1); setError(''); }}>重新选模板</button></div><p className="muted">模板只读；当前修改仅用于本桌。人数固定，切换人数请另选模板。立直棒固定 1,000 点。</p><div className="rule-layout"><div className="panel rules-form"><h2>比赛与局次</h2><div className="field-grid"><NumberField label="起始点" value={rules.startingPoints} onChange={(startingPoints) => change({ startingPoints })} /><NumberField label="返还点" value={rules.returnPoints} onChange={(returnPoints) => change({ returnPoints })} /><NumberField label="终局目标点" value={rules.endTarget} onChange={(endTarget) => change({ endTarget })} /><label>场次<select value={rules.roundLength} onChange={(event) => change({ roundLength: event.target.value as TableRules['roundLength'], maxRounds: Math.max(rules.maxRounds, event.target.value === 'east' ? 4 : 8) })}><option value="east">东风</option><option value="south">半庄</option></select></label><NumberField label="延长上限（局）" value={rules.maxRounds} step={1} onChange={(maxRounds) => change({ maxRounds })} /></div><div className="field-grid uma-grid">{rules.uma.map((value, i) => <NumberField key={i} label={`${i + 1} 位马点`} value={value} step={1} onChange={(next) => change({ uma: rules.uma.map((v, n) => n === i ? next : v) })} />)}</div><p className="rule-detail">头名赏：{oka(rules)} 竞技分（由起始点、返还点和马点自动得出；竞技分总和归零）</p><h2>局内支付</h2><div className="field-grid"><NumberField label="荒牌流局罚符总额" value={rules.ryuukyokuPoolTotal} onChange={(ryuukyokuPoolTotal) => change({ ryuukyokuPoolTotal })} /><NumberField label="本场 · 每位付款额" value={rules.honbaPerPayer} onChange={(honbaPerPayer) => change({ honbaPerPayer })} hint={`荣和总额 ${pointText(rules.honbaPerPayer * (rules.playerCount - 1))} / 本；自摸每位付款同额`} /></div><h2>支持的开关</h2><div className="switch-grid"><Toggle label="飞人结束（负分）" checked={rules.bustEndsMatch} onChange={(bustEndsMatch) => change({ bustEndsMatch })} /><Toggle label="末局庄家满足目标点且独占第一可结束" checked={rules.dealerFinish} onChange={(dealerFinish) => change({ dealerFinish })} /><Toggle label="食断" checked={rules.openTanyao} onChange={(openTanyao) => change({ openTanyao })} /><Toggle label="切上满贯" checked={rules.kiriageMangan} onChange={(kiriageMangan) => change({ kiriageMangan })} /><Toggle label="累计役满（13 番起）" checked={rules.kazoeYakuman} onChange={(kazoeYakuman) => change({ kazoeYakuman })} /><Toggle label="双响成立" checked={rules.doubleRon} onChange={(doubleRon) => change({ doubleRon })} />{rules.playerCount === 3 && <Toggle label="三麻自摸损" checked={rules.sanmaTsumoLoss} onChange={(sanmaTsumoLoss) => change({ sanmaTsumoLoss })} />}</div><div className="field-grid"><NumberField label="赤宝牌枚数" value={rules.redFives} step={1} onChange={(redFives) => change({ redFives })} /></div><p className="note">包牌、流局满贯及自动诈和罚符未开放。参考模板不可视为来源方的兼容规则。</p></div><aside className="rule-side"><div className="panel"><h3>本桌规则摘要</h3><p>{rules.playerCount} 麻 · {rules.roundLength === 'east' ? '东风' : '半庄'} · {pointText(rules.startingPoints)} 起 / {pointText(rules.returnPoints)} 返</p><p>流局 {pointText(rules.ryuukyokuPoolTotal)} · 本场每付款者 {pointText(rules.honbaPerPayer)}</p></div></aside></div>{validation && <div className="notice invalid" role="alert">{validation}</div>}{!validation && <RulePreview rules={rules} guest={guest} />}<div className="sticky-actions"><div><p>{guest ? '另存的模板仅在本次浏览器会话有效；本地牌局会持续保存在此设备。' : '另存仅在本次浏览器会话有效；登录后同步尚未开放。'}</p><input aria-label="新模板名称" placeholder="新模板名称（另存时填写）" value={templateName} maxLength={40} onChange={(event) => setTemplateName(event.target.value)} />{saved && <small role="status">{saved}</small>}</div><button type="button" disabled={!!validation || busy} onClick={() => void create(rules)}>{guest ? '创建本地对局 →' : '仅用于本桌 →'}</button><button type="button" className="primary" disabled={!!validation || !templateName.trim()} onClick={() => { const name = templateName.trim(); addTemplate({ id: crypto.randomUUID(), name, source: '我的模板 · 本地会话', difference: `${rules.playerCount} 麻 · ${pointText(rules.startingPoints)} 起 / ${pointText(rules.returnPoints)} 返`, rules: { ...rules, uma: [...rules.uma] } }); setSaved(`「${name}」已保存在当前会话；登录后同步尚未开放。`); setTemplateName(''); }}>另存为我的模板</button></div></>}
+    {step === 1 && <><div className="section-heading"><span>预置模板</span><small>{guest ? '内置模板 · 离线可用' : '服务端模板 · 只读起点'}</small></div>
+      {!templates && !error && <p className="muted">正在加载模板…</p>}
+      <div className="template-grid">{templates?.filter((template) => template.scope !== 'mine').map((template) =>
+        <article className="template" key={template.versionId}><div className="template-top"><span className="tag">{template.config.playerCount} 麻</span><span className="tag muted-tag">{reviewLabels[template.reviewStatus] ?? template.reviewStatus}</span></div>
+          <h2>{template.name}</h2><p>{kindLabels[template.kind] ?? template.kind} · {template.templateKey}</p>
+          <button type="button" onClick={() => select(template)}>以此为起点调整 →</button>
+          <button type="button" className="quiet" disabled={busy} onClick={() => void create(template)}>{guest ? '直接创建本地对局' : '直接应用'}</button>
+        </article>)}</div>
+    </>}
+    {step === 2 && chosen && rules && <><div className="section-heading"><span>{chosen.name} · 本桌规则</span><button type="button" className="text-button" onClick={() => { setStep(1); setError(''); }}>重新选模板</button></div>
+      <RulesAdjustment key={chosen.versionId} base={chosen.base} rules={rules} onChange={(adjusted) => { setCreated(null); setRules(adjusted); }} />
+      {validation && <div className="notice invalid" role="alert">{validation}</div>}
+      {!validation && <RulePreview rules={rules} guest={guest} />}
+      <div className="sticky-actions"><p>模板只读；调整后的完整规则随本桌保存。</p><button type="button" className="primary" disabled={!!validation || busy} onClick={() => void create()}>{guest ? '创建本地对局 →' : '仅用于本桌 →'}</button></div>
+    </>}
     {step === 3 && created && <section className="panel">
       <p className="eyebrow">{guest ? 'LOCAL TABLE / 本地对局' : 'TABLE READY / 入桌签到'}</p>
       <h2>{created.template} · 已开桌</h2>
@@ -276,7 +282,6 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState('');
   const [logoutError, setLogoutError] = useState('');
-  const [localTemplates, setLocalTemplates] = useState<RuleTemplate[]>([]);
   const [guestMode, setGuestMode] = useState(() => localStorage.getItem(GUEST_MODE) === '1');
   useEffect(() => {
     // An older browser may have an HttpOnly account cookie without our local
@@ -324,9 +329,9 @@ export default function App() {
       <Route path="*" element={<GuestChoice onLocal={enterLocalMode} />} />
     </Routes> : <Routes>
       <Route path="/login" element={<LoginRoute principal={principal} onAuthenticated={(value) => { localStorage.setItem(ACCOUNT_HINT, '1'); localStorage.removeItem(GUEST_MODE); setGuestMode(false); setPrincipal(value); }} onLogout={() => void logout()} logoutError={logoutError} />} />
-      <Route path="/" element={<Home templateCount={localTemplates.length} guest={!principal} />} />
+      <Route path="/" element={<Home guest={!principal} />} />
       <Route path="/history" element={<main className="page"><p className="eyebrow">RECORD / 战绩</p><h1>对局记录</h1>{principal ? <MatchList /> : <LocalMatchList />}</main>} />
-      <Route path="/create" element={<Create guest={!principal} localTemplates={localTemplates} addTemplate={(template) => setLocalTemplates((current) => [...current, template])} />} />
+      <Route path="/create" element={<Create guest={!principal} />} />
       <Route path="/checkin/:matchId" element={<Protected principal={principal}><CheckIn /></Protected>} />
       <Route path="/table/:id" element={<TableRoute principal={principal} />} />
       <Route path="*" element={<Navigate to="/" replace />} />

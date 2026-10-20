@@ -3,7 +3,7 @@ import QRCode from 'qrcode';
 import { Link, useParams } from 'react-router-dom';
 import type { ResultInput } from '@riichi/engine';
 import { ApiError, api, errorText, post, webSocketUrl } from './api';
-import { pointText, winds } from './rules';
+import { pointText, snapshotRuleSummary, winds } from './rules';
 
 type Revision = number | string;
 type Seat = {
@@ -32,7 +32,7 @@ type CurrentHand = {
 type Score = { seatNo: number; points: number };
 type CheckIn = { seatNo?: number; memberId?: string; checkedIn?: boolean; isCheckedIn?: boolean; status?: string };
 type MatchState = {
-  match: { id: string; name?: string; ownerPrincipalId?: string; status: string; playerCount?: number; handsPlayed?: number; version?: Revision; settlementConfirmed?: boolean; rulesSnapshot?: Record<string, unknown> };
+  match: { id: string; name?: string; ownerPrincipalId?: string; status: string; playerCount?: number; handsPlayed?: number; version?: Revision; settlementConfirmed?: boolean; rulesSnapshot?: Record<string, unknown>; rulesetVersionId?: string };
   seats: Seat[];
   currentHand: CurrentHand | null;
   scoreboard: Score[] | Record<string, number>;
@@ -116,6 +116,14 @@ export default function Table() {
   const [connectionError, setConnectionError] = useState('');
   const [retryConnection, setRetryConnection] = useState(0);
   const [identity, setIdentity] = useState<{ id: string; principalId: string } | null>(null);
+  const [templateNames, setTemplateNames] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let alive = true;
+    api<{ versionId: string; name: string }[]>('/api/rulesets/templates').then((templates) => {
+      if (alive) setTemplateNames(Object.fromEntries(templates.map((template) => [template.versionId, template.name])));
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
   const [token, setToken] = useState<{ id: string; value: string; expiresAt?: string; checkedInAtIssue: number } | null>(null);
   const [expiredToken, setExpiredToken] = useState<string | null>(null);
   const [qrCode, setQrCode] = useState<{ url: string; image: string } | null>(null);
@@ -425,7 +433,10 @@ export default function Table() {
   const statusText = state ? (state.match.status ? matchStateLabels[state.match.status] ?? state.match.status : '牌桌状态未提供') : '读取牌桌状态中';
 
   return <main className="page table-page">
-    <div className="table-heading"><div><p className="eyebrow">LIVE TABLE / 实时牌桌</p><h1>{state?.match.name ?? '牌桌'}</h1><p className="muted">{statusText} · <span role="status">{connection}</span></p></div><button type="button" onClick={() => void refresh().catch(() => {})} disabled={busy}>刷新牌桌</button></div>
+    <div className="table-heading"><div><p className="eyebrow">LIVE TABLE / 实时牌桌</p><h1>{state?.match.name ?? '牌桌'}</h1><p className="muted">{statusText} · <span role="status">{connection}</span></p>
+      {state?.match.rulesSnapshot && (() => { const summary = snapshotRuleSummary(state.match.rulesSnapshot, templateNames[state.match.rulesetVersionId ?? ''] ?? state.match.name ?? '规则模板');
+        return <p className="rule-detail">{summary.title}{summary.changes.length ? ` · ${summary.changes.join('、')}` : ''}</p>; })()}
+    </div><button type="button" onClick={() => void refresh().catch(() => {})} disabled={busy}>刷新牌桌</button></div>
     {(connectionError || connection === '连接已断开') && <div className="notice invalid table-connection" role="status">
       实时连接：{connectionError || '当前离线或页面处于后台'}。{connection === '连接已断开' ? '实时同步已暂停，可手动刷新牌桌。' : '正在尝试重新连接。'}
       {connection === '连接已断开' && <button type="button" onClick={() => setRetryConnection((count) => count + 1)}>重连</button>}
