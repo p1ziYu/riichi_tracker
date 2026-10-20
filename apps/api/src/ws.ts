@@ -49,7 +49,7 @@ export function registerWsRoutes(app: FastifyInstance): void {
     await pool.query(
       `INSERT INTO app.ws_tickets (token_hash, principal_id, auth_session_ref, match_id, expires_at)
        VALUES ($1, $2, $3, $4, $5)`,
-      [tokenHash, principal.id, principal.sessionId || principal.id, matchId, expiresAt],
+      [tokenHash, principal.id, principal.sessionId, matchId, expiresAt],
     );
 
     return {
@@ -58,6 +58,11 @@ export function registerWsRoutes(app: FastifyInstance): void {
     };
   });
 
+  // Design tension: the ws-ticket travels in the URL query string because the browser
+  // WebSocket API cannot attach custom Authorization headers.
+  // Mitigation: single-use short-lived (30s) SHA-256 hashed ticket + re-validating that
+  // the issuing session is still live in Better Auth's session store (not revoked/expired)
+  // and that the principal remains active and still has match access at upgrade time.
   app.get<{ Params: { id: string }; Querystring: { ticket?: string } }>(
     '/ws/matches/:id',
     { websocket: true },
@@ -72,19 +77,48 @@ export function registerWsRoutes(app: FastifyInstance): void {
 
       const tokenHash = createHash('sha256').update(ticket).digest('hex');
       try {
-        const res = await pool.query<{ principal_id: string }>(
+        const res = await pool.query<{ principal_id: string; auth_session_ref: string }>(
           `UPDATE app.ws_tickets
            SET consumed_at = now()
            WHERE token_hash = $1
              AND match_id = $2
              AND consumed_at IS NULL
              AND expires_at > now()
-           RETURNING principal_id`,
+           RETURNING principal_id, auth_session_ref`,
           [tokenHash, matchId],
         );
 
         if (res.rowCount === 0) {
           socket.close(1008, 'Invalid or expired ticket');
+          return;
+        }
+
+        const { principal_id: principalId, auth_session_ref: authSessionRef } = res.rows[0];
+
+        // Verify stored session is still valid in Better Auth's session store (not revoked/expired)
+        // and belongs to this active principal.
+        const sessRes = await pool.query<{ id: string }>(
+          `SELECT s."id"
+           FROM public."session" s
+           JOIN public."user" u ON u."id" = s."userId"
+           LEFT JOIN public.auth_principal_map apm ON apm.auth_user_id = u."id"
+           JOIN app.principals p ON p.id = $2
+           WHERE (s."id" = $1 OR s."token" = $1)
+             AND s."expiresAt" > now()
+             AND p.status = 'active'
+             AND (p.auth_user_id = u."id" OR apm.principal_id = p.id)
+           LIMIT 1`,
+          [authSessionRef, principalId],
+        );
+        if ((sessRes.rowCount ?? 0) === 0) {
+          socket.close(1008, 'Session revoked or expired');
+          return;
+        }
+
+        // Verify principal still has access to the match
+        const access = await checkMatchAccess(matchId, principalId);
+        if (access !== 'allowed') {
+          socket.close(1008, 'Match access denied');
           return;
         }
       } catch {

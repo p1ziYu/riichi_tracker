@@ -1,9 +1,33 @@
 import { normalizeRulesConfig } from '@riichi/engine';
 import type { FastifyInstance } from 'fastify';
+import { resolvePrincipal } from '../auth.js';
 import { pool } from '../db.js';
 
+export function prepareEngineRulesConfig(rawConfig: Record<string, unknown>): Record<string, unknown> {
+  const multipleRon = rawConfig.multipleRon;
+  let derivedMultiRon = rawConfig.multiRon;
+  if (derivedMultiRon === undefined) {
+    if (
+      multipleRon === 'head_bump' ||
+      (typeof multipleRon === 'object' &&
+        multipleRon !== null &&
+        (multipleRon as Record<string, unknown>).double === 'head_bump')
+    ) {
+      derivedMultiRon = 'head_bump';
+    } else if (
+      multipleRon === 'allow_all' ||
+      (typeof multipleRon === 'object' &&
+        multipleRon !== null &&
+        (multipleRon as Record<string, unknown>).triple === 'allow')
+    ) {
+      derivedMultiRon = 'allow_all';
+    }
+  }
+  return derivedMultiRon !== undefined ? { ...rawConfig, multiRon: derivedMultiRon } : rawConfig;
+}
+
 export function enrichRulesetConfig(rawConfig: Record<string, unknown>, playerCount: number): Record<string, unknown> {
-  const norm = normalizeRulesConfig(rawConfig, playerCount);
+  const norm = normalizeRulesConfig(prepareEngineRulesConfig(rawConfig), playerCount);
   const akaObj =
     typeof rawConfig.akaDora === 'object' && rawConfig.akaDora !== null
       ? (rawConfig.akaDora as Record<string, number>)
@@ -41,7 +65,9 @@ export function enrichRulesetConfig(rawConfig: Record<string, unknown>, playerCo
 }
 
 export function registerRulesetsRoutes(app: FastifyInstance): void {
-  app.get('/api/rulesets/templates', async () => {
+  app.get('/api/rulesets/templates', async (req) => {
+    // D5: system templates for everyone; a signed-in caller also gets their own.
+    const principal = await resolvePrincipal(req);
     const res = await pool.query<{
       template_id: string;
       template_key: string | null;
@@ -63,8 +89,9 @@ export function registerRulesetsRoutes(app: FastifyInstance): void {
          v.config
        FROM app.ruleset_templates t
        JOIN app.ruleset_versions v ON v.template_id = t.id
-       WHERE t.scope = 'system'
+       WHERE t.scope = 'system' OR ($1::uuid IS NOT NULL AND t.owner_principal_id = $1)
        ORDER BY t.id, v.version DESC`,
+      [principal?.status === 'active' ? principal.id : null],
     );
 
     return res.rows.map((r) => ({
@@ -86,16 +113,29 @@ export function registerRulesetsRoutes(app: FastifyInstance): void {
       player_count: number;
       config: Record<string, unknown>;
       config_hash: string;
+      scope: string;
+      owner_principal_id: string | null;
     }>(
-      `SELECT id, player_count, config, config_hash
-       FROM app.ruleset_versions
-       WHERE id = $1`,
+      `SELECT v.id, v.player_count, v.config, v.config_hash, t.scope, t.owner_principal_id
+       FROM app.ruleset_versions v
+       JOIN app.ruleset_templates t ON t.id = v.template_id
+       WHERE v.id = $1`,
       [versionId],
     );
 
     const row = res.rows[0];
     if (!row) {
       return reply.code(404).send({ error: 'not_found', message: 'Ruleset version not found' });
+    }
+
+    if (row.scope !== 'system') {
+      const principal = await resolvePrincipal(req);
+      if (!principal || principal.status !== 'active' || principal.id !== row.owner_principal_id) {
+        return reply.code(403).send({
+          error: 'forbidden',
+          message: 'Private ruleset version is only visible to its owner',
+        });
+      }
     }
 
     return {

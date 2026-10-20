@@ -3,6 +3,7 @@ import {
   calculateSettlement,
   calculateTerminalSettlement,
   normalizeRulesConfig,
+  type EngineRulesConfig,
   type HandState,
   type ResultInput,
   type SettlementOutput,
@@ -12,59 +13,349 @@ import type { FastifyInstance } from 'fastify';
 import { requirePrincipal } from '../auth.js';
 import { pool } from '../db.js';
 import { broadcastMatchEvent } from '../ws.js';
-import { checkMatchAccess } from './matches.js';
+import { checkConfirmedParticipantWriteAccess, checkMatchAccess } from './matches.js';
+import { prepareEngineRulesConfig } from './rulesets.js';
 
-function normalizeIncomingResultInput(raw: Record<string, unknown>): ResultInput {
-  const kind = raw.kind as ResultInput['kind'];
-  const topDealIn =
-    typeof raw.dealInSeatNo === 'number' ? raw.dealInSeatNo : null;
+class ResultValidationError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+const VALID_RESULT_KINDS: Record<string, true> = {
+  ron: true,
+  tsumo: true,
+  ryuukyoku: true,
+  chombo: true,
+  nagashi_mangan: true,
+};
+
+const EFFECTIVE_WIN_REASONS: Record<string, true> = {
+  ron_win: true,
+  tsumo_win: true,
+  nagashi_mangan_win: true,
+};
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function resolveClientEventUuid(rawClientEventId: string): string {
+  const trimmed = rawClientEventId.trim();
+  if (UUID_REGEX.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  const h = createHash('sha256').update(`client_event_id:${trimmed}`).digest('hex');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+function validateAndNormalizeResultInput(
+  raw: unknown,
+  playerCount: number,
+  handState: HandState,
+  config: EngineRulesConfig,
+): ResultInput {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new ResultValidationError('invalid_result_input', 'resultInput must be an object');
+  }
+  const rawObj = raw as Record<string, unknown>;
+  if (typeof rawObj.kind !== 'string' || !VALID_RESULT_KINDS[rawObj.kind]) {
+    throw new ResultValidationError('invalid_result_kind', 'Invalid resultInput.kind');
+  }
+  const kind = rawObj.kind as ResultInput['kind'];
+
+  if (
+    rawObj.dealInSeatNo !== undefined &&
+    rawObj.dealInSeatNo !== null &&
+    (typeof rawObj.dealInSeatNo !== 'number' ||
+      !Number.isInteger(rawObj.dealInSeatNo) ||
+      rawObj.dealInSeatNo < 0 ||
+      rawObj.dealInSeatNo >= playerCount)
+  ) {
+    throw new ResultValidationError('invalid_deal_in_seat', 'Invalid dealInSeatNo');
+  }
+  const topDealIn = typeof rawObj.dealInSeatNo === 'number' ? rawObj.dealInSeatNo : null;
+
+  if (
+    rawObj.isRiichiDeclarationDealIn !== undefined &&
+    typeof rawObj.isRiichiDeclarationDealIn !== 'boolean'
+  ) {
+    throw new ResultValidationError(
+      'invalid_riichi_declaration_deal_in',
+      'isRiichiDeclarationDealIn must be a boolean',
+    );
+  }
   const topRiichiDealIn =
-    typeof raw.isRiichiDeclarationDealIn === 'boolean'
-      ? raw.isRiichiDeclarationDealIn
+    typeof rawObj.isRiichiDeclarationDealIn === 'boolean'
+      ? rawObj.isRiichiDeclarationDealIn
       : undefined;
 
-  let winners: WinnerInput[] = [];
-  if (Array.isArray(raw.winners)) {
-    winners = (raw.winners as Record<string, unknown>[]).map((w) => ({
-      seatNo: Number(w.seatNo),
-      han: Number(w.han ?? 0),
-      fu: Number(w.fu ?? 30),
-      ...(typeof w.yakumanCount === 'number' ? { yakumanCount: w.yakumanCount } : {}),
-      ...(w.dealInSeatNo !== undefined
-        ? { dealInSeatNo: w.dealInSeatNo as number | null }
-        : topDealIn !== null && kind === 'ron'
-          ? { dealInSeatNo: topDealIn }
-          : {}),
-      ...(typeof w.isRiichiDeclarationDealIn === 'boolean'
-        ? { isRiichiDeclarationDealIn: w.isRiichiDeclarationDealIn }
-        : topRiichiDealIn !== undefined
-          ? { isRiichiDeclarationDealIn: topRiichiDealIn }
-          : {}),
-    }));
-  } else if (typeof raw.winnerSeatNo === 'number' || typeof raw.seatNo === 'number') {
-    const wSeat = typeof raw.winnerSeatNo === 'number' ? raw.winnerSeatNo : (raw.seatNo as number);
-    winners = [
+  let rawWinners: unknown[] = [];
+  if (rawObj.winners !== undefined && rawObj.winners !== null) {
+    if (!Array.isArray(rawObj.winners)) {
+      throw new ResultValidationError('invalid_winners', 'winners must be an array');
+    }
+    rawWinners = rawObj.winners;
+  } else if (rawObj.winnerSeatNo !== undefined || rawObj.seatNo !== undefined) {
+    rawWinners = [
       {
-        seatNo: wSeat,
-        han: Number(raw.han ?? 0),
-        fu: Number(raw.fu ?? 30),
-        ...(typeof raw.yakumanCount === 'number' ? { yakumanCount: raw.yakumanCount } : {}),
-        ...(topDealIn !== null && kind === 'ron' ? { dealInSeatNo: topDealIn } : {}),
-        ...(topRiichiDealIn !== undefined ? { isRiichiDeclarationDealIn: topRiichiDealIn } : {}),
+        seatNo: rawObj.winnerSeatNo ?? rawObj.seatNo,
+        han: rawObj.han,
+        fu: rawObj.fu,
+        yakumanCount: rawObj.yakumanCount,
+        dealInSeatNo: topDealIn,
+        isRiichiDeclarationDealIn: topRiichiDealIn,
       },
     ];
+  }
+
+  if (kind === 'ron') {
+    if (rawWinners.length < 1 || rawWinners.length >= playerCount) {
+      throw new ResultValidationError(
+        'invalid_winners',
+        `ron requires between 1 and ${playerCount - 1} winners`,
+      );
+    }
+  } else if (kind === 'tsumo') {
+    if (rawWinners.length !== 1) {
+      throw new ResultValidationError('invalid_winners', 'tsumo requires exactly 1 winner');
+    }
+    if (topDealIn !== null) {
+      throw new ResultValidationError('invalid_deal_in_seat', 'tsumo must not specify dealInSeatNo');
+    }
+  } else if (kind === 'nagashi_mangan') {
+    if (rawWinners.length < 1 || rawWinners.length > playerCount) {
+      throw new ResultValidationError('invalid_winners', 'nagashi_mangan requires at least 1 winner');
+    }
+    if (topDealIn !== null) {
+      throw new ResultValidationError('invalid_deal_in_seat', 'nagashi_mangan must not specify dealInSeatNo');
+    }
+  } else {
+    if (rawWinners.length > 0) {
+      throw new ResultValidationError('invalid_winners', `${kind} must not have winners`);
+    }
+    if (topDealIn !== null) {
+      throw new ResultValidationError('invalid_deal_in_seat', `${kind} must not specify dealInSeatNo`);
+    }
+  }
+
+  const seenWinnerSeats: Record<number, true> = {};
+  let sharedDealInSeatNo: number | null = null;
+  const winners: WinnerInput[] = [];
+
+  for (const item of rawWinners) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new ResultValidationError('invalid_winner', 'Each winner entry must be an object');
+    }
+    const w = item as Record<string, unknown>;
+    if (
+      typeof w.seatNo !== 'number' ||
+      !Number.isInteger(w.seatNo) ||
+      w.seatNo < 0 ||
+      w.seatNo >= playerCount
+    ) {
+      throw new ResultValidationError('invalid_winner_seat', 'Winner seatNo is out of range');
+    }
+    if (seenWinnerSeats[w.seatNo]) {
+      throw new ResultValidationError('duplicate_winner_seat', 'Duplicate winner seatNo');
+    }
+    seenWinnerSeats[w.seatNo] = true;
+
+    let yakumanCount: number | undefined;
+    if (w.yakumanCount !== undefined && w.yakumanCount !== null) {
+      if (
+        typeof w.yakumanCount !== 'number' ||
+        !Number.isInteger(w.yakumanCount) ||
+        w.yakumanCount < 0 ||
+        w.yakumanCount > 10
+      ) {
+        throw new ResultValidationError('invalid_yakuman_count', 'Invalid yakumanCount');
+      }
+      yakumanCount = w.yakumanCount;
+    }
+
+    let han = 5;
+    let fu = 30;
+    if (kind === 'ron' || kind === 'tsumo') {
+      if (typeof w.han !== 'number' || !Number.isInteger(w.han) || w.han < 1 || w.han > 130) {
+        throw new ResultValidationError('invalid_han', 'Winner han must be an integer between 1 and 130');
+      }
+      han = w.han;
+
+      if ((w.fu === undefined || w.fu === null) && yakumanCount !== undefined && yakumanCount >= 1) {
+        fu = 30;
+      } else if (
+        typeof w.fu !== 'number' ||
+        !Number.isInteger(w.fu) ||
+        w.fu < 20 ||
+        w.fu > 140
+      ) {
+        throw new ResultValidationError('invalid_fu', 'Winner fu must be an integer between 20 and 140');
+      } else {
+        fu = w.fu;
+      }
+    } else if (kind === 'nagashi_mangan') {
+      if (w.han !== undefined && w.han !== null) {
+        if (typeof w.han !== 'number' || !Number.isInteger(w.han) || w.han < 0 || w.han > 130) {
+          throw new ResultValidationError('invalid_han', 'Invalid han');
+        }
+        han = w.han;
+      }
+      if (w.fu !== undefined && w.fu !== null) {
+        if (typeof w.fu !== 'number' || !Number.isInteger(w.fu) || w.fu < 20 || w.fu > 140) {
+          throw new ResultValidationError('invalid_fu', 'Invalid fu');
+        }
+        fu = w.fu;
+      }
+    }
+
+    let dealInSeatNo: number | null | undefined;
+    if (w.dealInSeatNo !== undefined && w.dealInSeatNo !== null) {
+      if (
+        typeof w.dealInSeatNo !== 'number' ||
+        !Number.isInteger(w.dealInSeatNo) ||
+        w.dealInSeatNo < 0 ||
+        w.dealInSeatNo >= playerCount
+      ) {
+        throw new ResultValidationError('invalid_deal_in_seat', 'Invalid dealInSeatNo');
+      }
+      dealInSeatNo = w.dealInSeatNo;
+    } else if (topDealIn !== null && kind === 'ron') {
+      dealInSeatNo = topDealIn;
+    }
+
+    if (kind === 'ron') {
+      if (dealInSeatNo === undefined || dealInSeatNo === null) {
+        throw new ResultValidationError('missing_deal_in_seat', 'Ron winner must specify dealInSeatNo');
+      }
+      if (dealInSeatNo === w.seatNo) {
+        throw new ResultValidationError('invalid_deal_in_seat', 'Winner cannot deal in to themselves');
+      }
+      if (sharedDealInSeatNo === null) {
+        sharedDealInSeatNo = dealInSeatNo;
+      } else if (sharedDealInSeatNo !== dealInSeatNo) {
+        throw new ResultValidationError('invalid_deal_in_seat', 'All winners in a multi-ron must share dealInSeatNo');
+      }
+    } else if (dealInSeatNo !== undefined && dealInSeatNo !== null) {
+      throw new ResultValidationError('invalid_deal_in_seat', 'dealInSeatNo is only allowed on ron');
+    }
+
+    if (w.isRiichiDeclarationDealIn !== undefined && typeof w.isRiichiDeclarationDealIn !== 'boolean') {
+      throw new ResultValidationError(
+        'invalid_riichi_declaration_deal_in',
+        'isRiichiDeclarationDealIn must be a boolean',
+      );
+    }
+    const isRiichiDeclarationDealIn =
+      typeof w.isRiichiDeclarationDealIn === 'boolean'
+        ? w.isRiichiDeclarationDealIn
+        : topRiichiDealIn;
+
+    winners.push({
+      seatNo: w.seatNo,
+      han,
+      fu,
+      ...(yakumanCount !== undefined ? { yakumanCount } : {}),
+      ...(dealInSeatNo !== undefined ? { dealInSeatNo } : {}),
+      ...(isRiichiDeclarationDealIn !== undefined ? { isRiichiDeclarationDealIn } : {}),
+    });
+  }
+
+  // F9(c): Validate riichiDeclarationDealInSeatNo & isRiichiDeclarationDealIn context
+  let riichiDeclarationDealInSeatNo: number | null = null;
+  if (rawObj.riichiDeclarationDealInSeatNo !== undefined && rawObj.riichiDeclarationDealInSeatNo !== null) {
+    if (
+      typeof rawObj.riichiDeclarationDealInSeatNo !== 'number' ||
+      !Number.isInteger(rawObj.riichiDeclarationDealInSeatNo) ||
+      rawObj.riichiDeclarationDealInSeatNo < 0 ||
+      rawObj.riichiDeclarationDealInSeatNo >= playerCount
+    ) {
+      throw new ResultValidationError(
+        'invalid_riichi_declaration_deal_in',
+        'riichiDeclarationDealInSeatNo must be a valid seat number',
+      );
+    }
+    riichiDeclarationDealInSeatNo = rawObj.riichiDeclarationDealInSeatNo;
+  }
+
+  const anyWinnerFlaggedRiichiDealIn = winners.some((w) => w.isRiichiDeclarationDealIn === true);
+  const hasRiichiDeclarationCancel =
+    riichiDeclarationDealInSeatNo !== null ||
+    topRiichiDealIn === true ||
+    anyWinnerFlaggedRiichiDealIn;
+
+  if (hasRiichiDeclarationCancel) {
+    if (kind !== 'ron' || sharedDealInSeatNo === null) {
+      throw new ResultValidationError(
+        'invalid_riichi_declaration_deal_in',
+        'riichiDeclarationDealInSeatNo requires a marked ron deal-in seat',
+      );
+    }
+    if (riichiDeclarationDealInSeatNo !== null && riichiDeclarationDealInSeatNo !== sharedDealInSeatNo) {
+      throw new ResultValidationError(
+        'invalid_riichi_declaration_deal_in',
+        'riichiDeclarationDealInSeatNo must match the ron dealInSeatNo',
+      );
+    }
+    const dealInSeatState = handState.seats.find((s) => s.seatNo === sharedDealInSeatNo);
+    if (!dealInSeatState?.isRiichi) {
+      throw new ResultValidationError(
+        'invalid_riichi_declaration_deal_in',
+        'Deal-in seat does not have an active riichi mark to cancel',
+      );
+    }
+  }
+
+  let tenpai: boolean[] | null = null;
+  if (rawObj.tenpai !== undefined && rawObj.tenpai !== null) {
+    if (
+      !Array.isArray(rawObj.tenpai) ||
+      rawObj.tenpai.length !== playerCount ||
+      !rawObj.tenpai.every((v) => typeof v === 'boolean')
+    ) {
+      throw new ResultValidationError('invalid_tenpai', `tenpai must be an array of ${playerCount} booleans`);
+    }
+    tenpai = rawObj.tenpai as boolean[];
+  }
+
+  let chomboRole: Record<number, 'offender' | 'victim'> | null = null;
+  if (rawObj.chomboRole !== undefined && rawObj.chomboRole !== null) {
+    if (typeof rawObj.chomboRole !== 'object' || Array.isArray(rawObj.chomboRole)) {
+      throw new ResultValidationError('invalid_chombo_role', 'chomboRole must be an object');
+    }
+    chomboRole = {};
+    for (const [k, v] of Object.entries(rawObj.chomboRole as Record<string, unknown>)) {
+      const seat = Number(k);
+      if (!Number.isInteger(seat) || seat < 0 || seat >= playerCount || (v !== 'offender' && v !== 'victim')) {
+        throw new ResultValidationError('invalid_chombo_role', 'Invalid chomboRole entry');
+      }
+      chomboRole[seat] = v;
+    }
+  }
+
+  let manualPayments: Record<number, number> | null = null;
+  if (rawObj.manualPayments !== undefined && rawObj.manualPayments !== null) {
+    if (typeof rawObj.manualPayments !== 'object' || Array.isArray(rawObj.manualPayments)) {
+      throw new ResultValidationError('invalid_manual_payments', 'manualPayments must be an object');
+    }
+    manualPayments = {};
+    for (const [k, v] of Object.entries(rawObj.manualPayments as Record<string, unknown>)) {
+      const seat = Number(k);
+      if (!Number.isInteger(seat) || seat < 0 || seat >= playerCount || typeof v !== 'number' || !Number.isInteger(v)) {
+        throw new ResultValidationError('invalid_manual_payments', 'Invalid manualPayments entry');
+      }
+      manualPayments[seat] = v;
+    }
   }
 
   return {
     kind,
     winners,
-    tenpai: Array.isArray(raw.tenpai) ? (raw.tenpai as boolean[]) : null,
-    chomboRole: (raw.chomboRole as Record<number, 'offender' | 'victim'> | null | undefined) ?? null,
-    riichiDeclarationDealInSeatNo:
-      typeof raw.riichiDeclarationDealInSeatNo === 'number'
-        ? raw.riichiDeclarationDealInSeatNo
-        : null,
-    manualPayments: (raw.manualPayments as Record<number, number> | null | undefined) ?? null,
+    tenpai,
+    chomboRole,
+    riichiDeclarationDealInSeatNo,
+    manualPayments,
   };
 }
 
@@ -75,17 +366,26 @@ export function registerHandsRoutes(app: FastifyInstance): void {
     if (!principal) return;
 
     const matchId = req.params.id;
-    const access = await checkMatchAccess(matchId, principal.id);
-    if (access === 'not_found') {
+    const writeAccess = await checkConfirmedParticipantWriteAccess(matchId, principal.id);
+    if (writeAccess === 'not_found') {
       return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
     }
-    if (access === 'forbidden') {
-      return reply.code(403).send({ error: 'forbidden', message: 'Not a confirmed device/member of this match' });
+    if (writeAccess === 'forbidden') {
+      return reply.code(403).send({ error: 'forbidden', message: 'Only checked-in participants can open hands' });
     }
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      const pRes = await client.query<{ status: string }>(
+        `SELECT status FROM app.principals WHERE id = $1 FOR SHARE`,
+        [principal.id],
+      );
+      if (pRes.rows[0]?.status !== 'active') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'principal_inactive', message: 'Principal is not active' });
+      }
 
       const mRes = await client.query<{
         id: string;
@@ -98,12 +398,17 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         await client.query('ROLLBACK');
         return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
       }
+
+      const txWriteAccess = await checkConfirmedParticipantWriteAccess(matchId, principal.id, client);
+      if (txWriteAccess !== 'allowed') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'forbidden', message: 'Only checked-in participants can open hands' });
+      }
+
       if (match.state !== 'active') {
         await client.query('ROLLBACK');
         return reply.code(409).send({ error: 'match_not_active', message: 'Match must be in progress to open a hand' });
       }
-
-      // Check if an open hand already exists
       const openHandRes = await client.query<{
         id: string;
         hand_no: number;
@@ -257,34 +562,55 @@ export function registerHandsRoutes(app: FastifyInstance): void {
     }
   });
 
-  // POST /api/matches/:id/hands/:handId/marks { seatNo, riichi } -> { markRevision }
+  // POST /api/matches/:id/hands/:handId/marks { seatNo, riichi, expectedMarkRevision? } -> { markRevision }
   app.post<{
     Params: { id: string; handId: string };
-    Body: { seatNo: number; riichi: boolean };
+    Body: { seatNo: number; riichi: boolean; expectedMarkRevision?: number | string };
   }>('/api/matches/:id/hands/:handId/marks', async (req, reply) => {
     const principal = await requirePrincipal(req, reply);
     if (!principal) return;
 
     const { id: matchId, handId } = req.params;
-    const { seatNo, riichi } = req.body ?? {};
+    const { seatNo, riichi, expectedMarkRevision } = req.body ?? {};
 
-    const access = await checkMatchAccess(matchId, principal.id);
-    if (access === 'not_found') {
+    const writeAccess = await checkConfirmedParticipantWriteAccess(matchId, principal.id);
+    if (writeAccess === 'not_found') {
       return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
     }
-    if (access === 'forbidden') {
-      return reply.code(403).send({ error: 'forbidden', message: 'Not a member of this match' });
+    if (writeAccess === 'forbidden') {
+      return reply.code(403).send({ error: 'forbidden', message: 'Only checked-in participants can modify marks' });
     }
 
     if (typeof seatNo !== 'number' || !Number.isInteger(seatNo) || typeof riichi !== 'boolean') {
       return reply.code(400).send({ error: 'invalid_input', message: 'seatNo (int) and riichi (boolean) are required' });
+    }
+    if (expectedMarkRevision !== undefined && expectedMarkRevision !== null) {
+      const parsedExp = Number(expectedMarkRevision);
+      if (
+        (typeof expectedMarkRevision !== 'number' && typeof expectedMarkRevision !== 'string') ||
+        String(expectedMarkRevision).trim() === '' ||
+        !Number.isInteger(parsedExp) ||
+        parsedExp < 0
+      ) {
+        return reply.code(400).send({
+          error: 'invalid_input',
+          message: 'expectedMarkRevision must be a non-negative integer',
+        });
+      }
     }
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
-      await client.query(`SELECT id FROM app.principals WHERE id = $1 FOR SHARE`, [principal.id]);
+      const pRes = await client.query<{ status: string }>(
+        `SELECT status FROM app.principals WHERE id = $1 FOR SHARE`,
+        [principal.id],
+      );
+      if (pRes.rows[0]?.status !== 'active') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'principal_inactive', message: 'Principal is not active' });
+      }
 
       const mRes = await client.query<{
         id: string;
@@ -298,6 +624,13 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         await client.query('ROLLBACK');
         return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
       }
+
+      const txWriteAccess = await checkConfirmedParticipantWriteAccess(matchId, principal.id, client);
+      if (txWriteAccess !== 'allowed') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'forbidden', message: 'Only checked-in participants can modify marks' });
+      }
+
       if (seatNo < 0 || seatNo >= match.player_count) {
         await client.query('ROLLBACK');
         return reply.code(400).send({ error: 'invalid_seat', message: `seatNo must be 0..${match.player_count - 1}` });
@@ -318,8 +651,20 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         return reply.code(409).send({ error: 'hand_not_open', message: 'Hand is already settled or voided' });
       }
 
+      // F6: Marks compare-and-swap on expectedMarkRevision when provided
+      if (expectedMarkRevision !== undefined && expectedMarkRevision !== null) {
+        if (Number(expectedMarkRevision) !== Number(hand.mark_revision)) {
+          await client.query('ROLLBACK');
+          return reply.code(409).send({
+            error: 'stale_mark_revision',
+            message: `expectedMarkRevision (${expectedMarkRevision}) does not match current markRevision (${hand.mark_revision})`,
+            currentMarkRevision: Number(hand.mark_revision),
+          });
+        }
+      }
+
       if (riichi) {
-        const norm = normalizeRulesConfig(match.rules_snapshot, match.player_count);
+        const norm = normalizeRulesConfig(prepareEngineRulesConfig(match.rules_snapshot), match.player_count);
         if (!norm.allowLowPointRiichi) {
           const balRes = await client.query<{ balance: number }>(
             `SELECT (a.opening_balance + COALESCE(SUM(e.amount), 0))::int AS balance
@@ -360,7 +705,6 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         await client.query('COMMIT');
         return { markRevision: Number(hand.mark_revision) };
       }
-
       const newSeq = Number(match.version) + 1;
       const newMarkRev = Number(hand.mark_revision) + 1;
       const reqHash = createHash('sha256')
@@ -482,7 +826,8 @@ export function registerHandsRoutes(app: FastifyInstance): void {
       return reply.code(404).send({ error: 'hand_not_found', message: 'Hand not found' });
     }
 
-    const norm = normalizeRulesConfig(match.rules_snapshot, match.player_count);
+    const effectiveRulesConfig = prepareEngineRulesConfig(match.rules_snapshot);
+    const norm = normalizeRulesConfig(effectiveRulesConfig, match.player_count);
     const balRes = await pool.query<{ seat_no: number; balance: number }>(
       `SELECT a.seat_no, (a.opening_balance + COALESCE(SUM(e.amount), 0))::int AS balance
        FROM app.score_accounts a
@@ -524,9 +869,9 @@ export function registerHandsRoutes(app: FastifyInstance): void {
     };
 
     try {
-      const normalizedInput = normalizeIncomingResultInput(rawInput);
+      const normalizedInput = validateAndNormalizeResultInput(rawInput, match.player_count, handState, norm);
       const output = calculateSettlement(
-        { rulesHash: match.rules_hash, config: match.rules_snapshot },
+        { rulesHash: match.rules_hash, config: effectiveRulesConfig },
         handState,
         normalizedInput,
         match.engine_version,
@@ -536,48 +881,88 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         nextHand: output.nextHand,
       };
     } catch (err) {
+      if (err instanceof ResultValidationError) {
+        return reply.code(400).send({
+          error: err.code,
+          message: err.message,
+        });
+      }
       return reply.code(400).send({
-        error: 'engine_calculation_error',
-        message: err instanceof Error ? err.message : 'Invalid resultInput',
+        error: 'invalid_result_input',
+        message: 'Invalid resultInput',
       });
     }
   });
 
-  // POST /api/matches/:id/hands/:handId/results { resultInput, confirmedMarkRevision } -> { perSeat, nextHand }
+  // POST /api/matches/:id/hands/:handId/results { resultInput, confirmedMarkRevision, clientEventId? } -> { perSeat, nextHand }
   app.post<{
     Params: { id: string; handId: string };
     Body: {
       resultInput?: Record<string, unknown>;
       confirmedMarkRevision?: number | string;
+      clientEventId?: string;
     };
   }>('/api/matches/:id/hands/:handId/results', async (req, reply) => {
     const principal = await requirePrincipal(req, reply);
     if (!principal) return;
 
     const { id: matchId, handId } = req.params;
-    const access = await checkMatchAccess(matchId, principal.id);
-    if (access === 'not_found') {
+    const writeAccess = await checkConfirmedParticipantWriteAccess(matchId, principal.id);
+    if (writeAccess === 'not_found') {
       return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
     }
-    if (access === 'forbidden') {
-      return reply.code(403).send({ error: 'forbidden', message: 'Not a member of this match' });
+    if (writeAccess === 'forbidden') {
+      return reply.code(403).send({ error: 'forbidden', message: 'Only checked-in participants can submit hand results' });
     }
 
     const rawInput = req.body?.resultInput;
     const confirmedMarkRevision = req.body?.confirmedMarkRevision;
-    if (!rawInput || typeof rawInput !== 'object') {
+    const rawClientEventId = req.body?.clientEventId;
+    if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) {
       return reply.code(400).send({ error: 'missing_result_input', message: 'resultInput is required' });
     }
     if (confirmedMarkRevision === undefined || confirmedMarkRevision === null) {
       return reply.code(400).send({ error: 'missing_mark_revision', message: 'confirmedMarkRevision is required' });
     }
+    if (
+      (typeof confirmedMarkRevision !== 'number' && typeof confirmedMarkRevision !== 'string') ||
+      String(confirmedMarkRevision).trim() === '' ||
+      !Number.isInteger(Number(confirmedMarkRevision)) ||
+      Number(confirmedMarkRevision) < 0
+    ) {
+      return reply.code(400).send({
+        error: 'invalid_mark_revision',
+        message: 'confirmedMarkRevision must be a non-negative integer',
+      });
+    }
+
+    let resolvedClientEventUuid: string | null = null;
+    if (rawClientEventId !== undefined && rawClientEventId !== null) {
+      if (typeof rawClientEventId !== 'string' || rawClientEventId.trim().length === 0) {
+        return reply.code(400).send({
+          error: 'invalid_client_event_id',
+          message: 'clientEventId must be a non-empty string',
+        });
+      }
+      resolvedClientEventUuid = resolveClientEventUuid(rawClientEventId);
+    }
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify({ matchId, handId, resultInput: rawInput, confirmedMarkRevision: Number(confirmedMarkRevision) }))
+      .digest('hex');
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
-      // 1. Lock principal FOR SHARE
-      await client.query(`SELECT id FROM app.principals WHERE id = $1 FOR SHARE`, [principal.id]);
+      // 1. Lock principal FOR SHARE and verify active status
+      const pRes = await client.query<{ status: string }>(
+        `SELECT status FROM app.principals WHERE id = $1 FOR SHARE`,
+        [principal.id],
+      );
+      if (pRes.rows[0]?.status !== 'active') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'principal_inactive', message: 'Principal is not active' });
+      }
 
       // 2. Lock match FOR UPDATE
       const mRes = await client.query<{
@@ -594,6 +979,13 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         await client.query('ROLLBACK');
         return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
       }
+
+      const txWriteAccess = await checkConfirmedParticipantWriteAccess(matchId, principal.id, client);
+      if (txWriteAccess !== 'allowed') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'forbidden', message: 'Only checked-in participants can submit hand results' });
+      }
+
       if (match.state !== 'active') {
         await client.query('ROLLBACK');
         return reply.code(409).send({ error: 'match_not_active', message: 'Match is not active' });
@@ -616,6 +1008,41 @@ export function registerHandsRoutes(app: FastifyInstance): void {
       if (!hand) {
         await client.query('ROLLBACK');
         return reply.code(404).send({ error: 'hand_not_found', message: 'Hand not found' });
+      }
+
+      // Retry identity is scoped to the original actor and request content.
+      if (resolvedClientEventUuid !== null) {
+        const existingEvRes = await client.query<{
+          hand_id: string | null;
+          type: string;
+          request_hash: string;
+          payload: { perSeat?: unknown; nextHand?: unknown };
+        }>(
+          `SELECT hand_id, type, request_hash, payload
+           FROM app.match_events
+           WHERE match_id = $1 AND actor_principal_id = $2 AND client_event_id = $3
+           LIMIT 1`,
+          [matchId, principal.id, resolvedClientEventUuid],
+        );
+        const existingEv = existingEvRes.rows[0];
+        if (existingEv) {
+          if (
+            existingEv.hand_id === handId &&
+            existingEv.type === 'hand_settled' &&
+            existingEv.request_hash === requestHash
+          ) {
+            await client.query('COMMIT');
+            return reply.code(200).send({
+              perSeat: existingEv.payload.perSeat,
+              nextHand: existingEv.payload.nextHand,
+            });
+          }
+          await client.query('ROLLBACK');
+          return reply.code(409).send({
+            error: 'client_event_id_conflict',
+            message: 'clientEventId has already been used for a different request',
+          });
+        }
       }
 
       // Guard re-settle (unique index uq_active_hand_result + state check)
@@ -692,7 +1119,8 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         if (r.marked) riichiBySeat[r.seat_no] = true;
       }
 
-      const norm = normalizeRulesConfig(match.rules_snapshot, match.player_count);
+      const effectiveRulesConfig = prepareEngineRulesConfig(match.rules_snapshot);
+      const norm = normalizeRulesConfig(effectiveRulesConfig, match.player_count);
       const handState: HandState = {
         handId: hand.id,
         roundWind: hand.round_wind,
@@ -713,25 +1141,49 @@ export function registerHandsRoutes(app: FastifyInstance): void {
       let normalizedInput: ResultInput;
       let output: SettlementOutput;
       try {
-        normalizedInput = normalizeIncomingResultInput(rawInput);
+        normalizedInput = validateAndNormalizeResultInput(rawInput, match.player_count, handState, norm);
         output = calculateSettlement(
-          { rulesHash: match.rules_hash, config: match.rules_snapshot },
+          { rulesHash: match.rules_hash, config: effectiveRulesConfig },
           handState,
           normalizedInput,
           match.engine_version,
         );
       } catch (err) {
         await client.query('ROLLBACK');
+        if (err instanceof ResultValidationError) {
+          return reply.code(400).send({
+            error: err.code,
+            message: err.message,
+          });
+        }
         return reply.code(400).send({
-          error: 'engine_calculation_error',
-          message: err instanceof Error ? err.message : 'Invalid resultInput',
+          error: 'invalid_result_input',
+          message: 'Invalid resultInput',
         });
       }
 
-      const newResultRevision = Number(hand.result_revision) + 1;
-      const inputMode = normalizedInput.manualPayments ? 'manual_adjustment' : 'han_fu';
+      // F8: Derive engine-effective winners and kind from output.perSeat
+      const effectiveWinnerSeatNos: Record<number, true> = {};
+      for (const sp of output.perSeat) {
+        if (sp.breakdown.some((b) => EFFECTIVE_WIN_REASONS[b.reason])) {
+          effectiveWinnerSeatNos[sp.seatNo] = true;
+        }
+      }
+      const effectiveWinners = normalizedInput.winners.filter((w) => effectiveWinnerSeatNos[w.seatNo]);
+      const effectiveKind: ResultInput['kind'] =
+        normalizedInput.kind === 'ron' && effectiveWinners.length === 0
+          ? 'ryuukyoku'
+          : normalizedInput.kind;
+      const effectiveInput: ResultInput = {
+        ...normalizedInput,
+        kind: effectiveKind,
+        winners: effectiveWinners,
+      };
 
-      // Insert hand_results
+      const newResultRevision = Number(hand.result_revision) + 1;
+      const inputMode = effectiveInput.manualPayments ? 'manual_adjustment' : 'han_fu';
+
+      // Insert hand_results with engine-effective kind and winners
       const hrRes = await client.query<{ id: string }>(
         `INSERT INTO app.hand_results (
            match_id,
@@ -751,10 +1203,10 @@ export function registerHandsRoutes(app: FastifyInstance): void {
           matchId,
           handId,
           newResultRevision,
-          normalizedInput.kind,
+          effectiveKind,
           Number(hand.mark_revision),
           inputMode,
-          JSON.stringify(normalizedInput),
+          JSON.stringify(effectiveInput),
           JSON.stringify(output),
           match.engine_version,
           principal.id,
@@ -767,13 +1219,13 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         const sp = output.perSeat[i];
         const stoodRiichi = sp.breakdown.some((b) => b.reason === 'riichi');
         const isTenpai =
-          normalizedInput.kind === 'ryuukyoku' && Array.isArray(normalizedInput.tenpai)
-            ? Boolean(normalizedInput.tenpai[i])
+          effectiveKind === 'ryuukyoku' && Array.isArray(effectiveInput.tenpai)
+            ? Boolean(effectiveInput.tenpai[i])
             : null;
         const isNagashi =
-          normalizedInput.kind === 'nagashi_mangan' &&
-          normalizedInput.winners.some((w) => w.seatNo === sp.seatNo);
-        const chomboRole = normalizedInput.chomboRole?.[sp.seatNo] ?? null;
+          effectiveKind === 'nagashi_mangan' &&
+          effectiveWinners.some((w) => w.seatNo === sp.seatNo);
+        const chomboRole = effectiveInput.chomboRole?.[sp.seatNo] ?? null;
 
         await client.query(
           `INSERT INTO app.hand_seat_outcomes (
@@ -802,18 +1254,18 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         );
       }
 
-      // Insert result_winners
+      // Insert result_winners using ONLY engine-effective winners
       if (
-        (normalizedInput.kind === 'ron' ||
-          normalizedInput.kind === 'tsumo' ||
-          normalizedInput.kind === 'nagashi_mangan') &&
-        Array.isArray(normalizedInput.winners)
+        (effectiveKind === 'ron' ||
+          effectiveKind === 'tsumo' ||
+          effectiveKind === 'nagashi_mangan') &&
+        effectiveWinners.length > 0
       ) {
-        for (const w of normalizedInput.winners) {
+        for (const w of effectiveWinners) {
           const fuVal =
             typeof w.fu === 'number' && w.fu >= 20 && w.fu <= 140 ? w.fu : null;
           const dealIn =
-            normalizedInput.kind === 'ron' && typeof w.dealInSeatNo === 'number'
+            effectiveKind === 'ron' && typeof w.dealInSeatNo === 'number'
               ? w.dealInSeatNo
               : null;
           await client.query(
@@ -826,11 +1278,10 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         }
       }
 
-      // Insert match_events
+      // Insert match_events with caller-supplied clientEventId (or fresh UUID)
       const newSeq = Number(match.version) + 1;
-      const reqHash = createHash('sha256')
-        .update(JSON.stringify({ matchId, handId, resultInput: normalizedInput, confirmedMarkRevision }))
-        .digest('hex');
+      const eventClientUuid = resolvedClientEventUuid ?? randomUUID();
+      const reqHash = requestHash;
 
       const evRes = await client.query<{ id: string }>(
         `INSERT INTO app.match_events (
@@ -843,7 +1294,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
           newSeq,
           handId,
           principal.id,
-          randomUUID(),
+          eventClientUuid,
           reqHash,
           JSON.stringify({
             handId,
@@ -1041,6 +1492,15 @@ export function registerHandsRoutes(app: FastifyInstance): void {
     try {
       await client.query('BEGIN');
 
+      const pRes = await client.query<{ status: string }>(
+        `SELECT status FROM app.principals WHERE id = $1 FOR SHARE`,
+        [principal.id],
+      );
+      if (pRes.rows[0]?.status !== 'active') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'principal_inactive', message: 'Principal is not active' });
+      }
+
       const mRes = await client.query<{
         id: string;
         owner_principal_id: string;
@@ -1059,11 +1519,18 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         await client.query('ROLLBACK');
         return reply.code(403).send({ error: 'forbidden', message: 'Only the match owner can finish the match' });
       }
+      const ownerMemRes = await client.query<{ status: string }>(
+        `SELECT status FROM app.match_members WHERE match_id = $1 AND principal_id = $2`,
+        [matchId, principal.id],
+      );
+      if (ownerMemRes.rows[0]?.status !== 'active') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'forbidden', message: 'Owner membership is not active' });
+      }
       if (match.state !== 'active') {
         await client.query('ROLLBACK');
         return reply.code(409).send({ error: 'match_not_active', message: 'Match is not active' });
       }
-
       // Void any unsettled open hand
       await client.query(
         `UPDATE app.hands SET state = 'voided' WHERE match_id = $1 AND state = 'open'`,
@@ -1270,7 +1737,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
     const terminal = calculateTerminalSettlement(
       seatEntries,
       { rulesHash: match.rules_hash, config: match.rules_snapshot },
-      { riichiPool: poolBalance },
+      { riichiPool: poolBalance, requireTargetPoints: false },
     );
 
     return {
@@ -1290,6 +1757,15 @@ export function registerHandsRoutes(app: FastifyInstance): void {
     try {
       await client.query('BEGIN');
 
+      const pRes = await client.query<{ status: string }>(
+        `SELECT status FROM app.principals WHERE id = $1 FOR SHARE`,
+        [principal.id],
+      );
+      if (pRes.rows[0]?.status !== 'active') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'principal_inactive', message: 'Principal is not active' });
+      }
+
       const mRes = await client.query<{
         id: string;
         owner_principal_id: string;
@@ -1308,11 +1784,18 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         await client.query('ROLLBACK');
         return reply.code(403).send({ error: 'forbidden', message: 'Only the match owner can confirm settlement' });
       }
+      const ownerMemChk = await client.query<{ status: string }>(
+        `SELECT status FROM app.match_members WHERE match_id = $1 AND principal_id = $2`,
+        [matchId, principal.id],
+      );
+      if (ownerMemChk.rows[0]?.status !== 'active') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'forbidden', message: 'Owner membership is not active' });
+      }
       if (match.state !== 'finished') {
         await client.query('ROLLBACK');
         return reply.code(409).send({ error: 'match_not_finished', message: 'Match must be finished before confirming settlement' });
       }
-
       const existingSettle = await client.query<{ id: string }>(
         `SELECT id FROM app.settlements WHERE match_id = $1 AND superseded_at IS NULL`,
         [matchId],
@@ -1384,8 +1867,14 @@ export function registerHandsRoutes(app: FastifyInstance): void {
       const terminal = calculateTerminalSettlement(
         seatEntries.map((s) => ({ seatNo: s.seatNo, points: s.points })),
         { rulesHash: match.rules_hash, config: match.rules_snapshot },
-        { riichiPool: poolBalance },
+        // The owner has already finished this match explicitly; settle even if
+        // its ruleset would otherwise require a target score to auto-finish.
+        { riichiPool: poolBalance, requireTargetPoints: false },
       );
+      if (!terminal.isGameEnd) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({ error: 'match_not_finished' });
+      }
 
       const newSeq = Number(match.version) + 1;
       const reqHash = createHash('sha256').update(`settlement_confirmed:${matchId}`).digest('hex');

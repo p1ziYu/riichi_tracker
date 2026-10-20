@@ -2,12 +2,12 @@ import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { ENGINE_VERSION, normalizeRulesConfig } from '@riichi/engine';
 import type { FastifyInstance } from 'fastify';
 import {
-  bindAllUnboundGuestsToMatch,
-  ensureGuestSessionForPrincipal,
+  bindGuestToMatch,
   requirePrincipal,
 } from '../auth.js';
 import { pool } from '../db.js';
 import { broadcastMatchEvent } from '../ws.js';
+import { prepareEngineRulesConfig } from './rulesets.js';
 
 export const MATCH_STATUS_BY_STATE: Record<string, string> = {
   preparing: 'preparing',
@@ -19,37 +19,117 @@ export const MATCH_STATUS_BY_STATE: Record<string, string> = {
 export async function checkMatchAccess(
   matchId: string,
   principalId: string,
+  db: { query: typeof pool.query } = pool,
 ): Promise<'allowed' | 'not_found' | 'forbidden'> {
-  const mRes = await pool.query<{ owner_principal_id: string }>(
-    `SELECT owner_principal_id FROM app.matches WHERE id = $1`,
+  const mRes = await db.query<{ id: string }>(
+    `SELECT id FROM app.matches WHERE id = $1`,
     [matchId],
   );
   if (mRes.rowCount === 0) {
     return 'not_found';
   }
-  if (mRes.rows[0].owner_principal_id === principalId) {
-    return 'allowed';
-  }
 
-  const accessRes = await pool.query(
+  const accessRes = await db.query(
     `SELECT 1
-     FROM app.match_members mm
-     WHERE mm.match_id = $1
-       AND mm.principal_id = $2
-       AND mm.status = 'active'
-     UNION ALL
-     SELECT 1
-     FROM app.member_access_grants mag
-     JOIN app.match_members mm ON mm.id = mag.member_id
-     WHERE mm.match_id = $1
-       AND mag.principal_id = $2
-       AND mag.revoked_at IS NULL`,
+     FROM app.principals p
+     WHERE p.id = $2
+       AND p.status = 'active'
+       AND (
+         p.kind <> 'guest'
+         OR EXISTS (
+           SELECT 1
+           FROM app.guest_sessions gs
+           WHERE gs.principal_id = p.id
+             AND gs.match_id = $1
+             AND gs.revoked_at IS NULL
+             AND gs.expires_at > now()
+         )
+       )
+       AND (
+         EXISTS (
+           SELECT 1
+           FROM app.match_members mm
+           WHERE mm.match_id = $1
+             AND mm.principal_id = p.id
+             AND mm.status = 'active'
+         )
+         OR EXISTS (
+           SELECT 1
+           FROM app.member_access_grants mag
+           JOIN app.match_members mm ON mm.id = mag.member_id
+           WHERE mm.match_id = $1
+             AND mag.principal_id = p.id
+             AND mag.revoked_at IS NULL
+             AND mm.status = 'active'
+         )
+       )`,
     [matchId, principalId],
   );
 
   return (accessRes.rowCount ?? 0) > 0 ? 'allowed' : 'forbidden';
 }
 
+export async function checkConfirmedParticipantWriteAccess(
+  matchId: string,
+  principalId: string,
+  db: { query: typeof pool.query } = pool,
+): Promise<'allowed' | 'not_found' | 'forbidden'> {
+  const mRes = await db.query<{ id: string; rules_hash: string }>(
+    `SELECT id, rules_hash FROM app.matches WHERE id = $1`,
+    [matchId],
+  );
+  const match = mRes.rows[0];
+  if (!match) {
+    return 'not_found';
+  }
+
+  const writeRes = await db.query(
+    `SELECT 1
+     FROM app.principals p
+     JOIN app.match_members mm
+       ON mm.match_id = $1
+      AND mm.status = 'active'
+      AND mm.role = 'participant'
+      AND (
+        mm.principal_id = p.id
+        OR EXISTS (
+          SELECT 1
+          FROM app.member_access_grants mag
+          WHERE mag.member_id = mm.id
+            AND mag.principal_id = p.id
+            AND mag.revoked_at IS NULL
+        )
+      )
+     JOIN app.seat_assignments sa
+       ON sa.match_id = mm.match_id
+      AND sa.member_id = mm.id
+      AND sa.end_hand_no IS NULL
+      AND sa.confirmed_by IS NOT NULL
+     JOIN app.check_ins ci
+       ON ci.match_id = sa.match_id
+      AND ci.member_id = mm.id
+      AND ci.seat_assignment_id = sa.id
+      AND ci.invalidated_at IS NULL
+      AND ci.rules_hash = $3
+     WHERE p.id = $2
+       AND p.status = 'active'
+       AND (
+         p.kind <> 'guest'
+         OR EXISTS (
+           SELECT 1
+           FROM app.guest_sessions gs
+           WHERE gs.principal_id = p.id
+             AND gs.match_id = $1
+             AND gs.revoked_at IS NULL
+             AND gs.expires_at > now()
+         )
+       )
+     LIMIT 1`,
+    [matchId, principalId, match.rules_hash],
+  );
+
+  return (writeRes.rowCount ?? 0) > 0 ? 'allowed' : 'forbidden';
+}
 function requireAuthSecret(): string {
   const s = process.env.BETTER_AUTH_SECRET;
   if (!s) throw new Error('BETTER_AUTH_SECRET is not set');
@@ -84,6 +164,23 @@ function verifyCheckInTokenSignature(token: string, expectedMatchId: string): bo
   }
 }
 
+const HONBA_PAYER_ALIASES = ['honbaPerPayer', 'honbaTsumoPerPayer', 'tsumoHonbaPerPayer', 'honbaTsumo'];
+const HONBA_RON_ALIASES = ['honbaRon', 'ronHonba', 'honbaTotal', 'honbaPointsRon', 'honbaPoints'];
+const HONBA_OBJECT_PAYER_ALIASES = ['perPayer', 'tsumo'];
+const HONBA_OBJECT_RON_ALIASES = ['ron', 'total'];
+const HONBA_OBJECT_ALIASES = [...HONBA_OBJECT_PAYER_ALIASES, ...HONBA_OBJECT_RON_ALIASES];
+const RYUUKYOKU_PENALTY_ALIASES = [
+  'notenPenaltyTotal', 'tenpaiPenaltyTotal', 'ryuukyokuPoolTotal',
+  'notenTotal', 'ryuukyokuTotal', 'tenpaiTotal',
+];
+
+function firstAlias(source: Record<string, unknown>, keys: readonly string[]): unknown {
+  for (const key of keys) {
+    if (source[key] !== undefined) return source[key];
+  }
+  return undefined;
+}
+
 export function registerMatchesRoutes(app: FastifyInstance): void {
   // POST /api/matches { rulesetVersionId?, config?, visibility? } -> { match: { id, inviteCode, status } }
   app.post<{
@@ -95,6 +192,10 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
   }>('/api/matches', async (req, reply) => {
     const principal = await requirePrincipal(req, reply);
     if (!principal) return;
+
+    if (principal.kind === 'guest') {
+      return reply.code(403).send({ error: 'forbidden', message: 'Guest principals cannot create matches' });
+    }
 
     const body = req.body ?? {};
     let rulesetVersionId: string | null = null;
@@ -108,15 +209,24 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         player_count: 3 | 4;
         config: Record<string, unknown>;
         config_hash: string;
+        scope: string;
+        owner_principal_id: string | null;
       }>(
-        `SELECT id, player_count, config, config_hash
-         FROM app.ruleset_versions
-         WHERE id = $1`,
+        `SELECT v.id, v.player_count, v.config, v.config_hash, t.scope, t.owner_principal_id
+         FROM app.ruleset_versions v
+         JOIN app.ruleset_templates t ON t.id = v.template_id
+         WHERE v.id = $1`,
         [body.rulesetVersionId],
       );
       const vRow = vRes.rows[0];
       if (!vRow) {
         return reply.code(404).send({ error: 'ruleset_version_not_found', message: 'Ruleset version not found' });
+      }
+      if (vRow.scope !== 'system' && vRow.owner_principal_id !== principal.id) {
+        return reply.code(403).send({
+          error: 'forbidden',
+          message: 'Private ruleset version can only be used by its owner',
+        });
       }
       rulesetVersionId = vRow.id;
       playerCount = vRow.player_count;
@@ -124,9 +234,58 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
       rulesHash = vRow.config_hash;
     } else if (body.config && typeof body.config === 'object') {
       try {
-        const norm = normalizeRulesConfig(body.config);
+        // D4: canonical config key is `startingPoints` (engine normalizeRulesConfig
+        // first preference; seeded ruleset_versions use it). Accept the legacy
+        // form-model alias `startPoints`; canonical wins when both are present;
+        // drop the alias from the stored snapshot so no stale dual keys persist.
+        const cfg: Record<string, unknown> = { ...(body.config as Record<string, unknown>) };
+        if (cfg.startPoints !== undefined) {
+          if (cfg.startingPoints === undefined) cfg.startingPoints = cfg.startPoints;
+          delete cfg.startPoints;
+        }
+        // M8: prefer the seed's honba object and ryuukyokuPenaltyTotal over
+        // stale form/engine aliases. Merge partial honba objects, then store
+        // only the canonical keys so subsequent engine normalization agrees.
+        const honbaPayerAlias = firstAlias(cfg, HONBA_PAYER_ALIASES);
+        const honbaRonAlias = firstAlias(cfg, HONBA_RON_ALIASES);
+        const honba = cfg.honba && typeof cfg.honba === 'object' && !Array.isArray(cfg.honba)
+          ? { ...(cfg.honba as Record<string, unknown>) }
+          : {};
+        const hadHonba = cfg.honba !== undefined || honbaPayerAlias !== undefined || honbaRonAlias !== undefined;
+        if (honba.tsumoPerPayer === undefined) {
+          honba.tsumoPerPayer = honbaPayerAlias === undefined
+            ? firstAlias(honba, HONBA_OBJECT_PAYER_ALIASES)
+            : honbaPayerAlias;
+        }
+        if (honba.ronTotal === undefined) {
+          const ronAlias = honbaRonAlias === undefined ? firstAlias(honba, HONBA_OBJECT_RON_ALIASES) : honbaRonAlias;
+          honba.ronTotal = ronAlias === undefined && typeof cfg.honba === 'number' ? cfg.honba : ronAlias;
+        }
+        for (const key of HONBA_PAYER_ALIASES) delete cfg[key];
+        for (const key of HONBA_RON_ALIASES) delete cfg[key];
+        for (const key of HONBA_OBJECT_ALIASES) delete honba[key];
+        if (hadHonba) cfg.honba = honba;
+        if (cfg.ryuukyokuPenaltyTotal === undefined) {
+          cfg.ryuukyokuPenaltyTotal = firstAlias(cfg, RYUUKYOKU_PENALTY_ALIASES);
+        }
+        for (const key of RYUUKYOKU_PENALTY_ALIASES) delete cfg[key];
+        if (cfg.ryuukyokuPenaltyTotal === undefined) delete cfg.ryuukyokuPenaltyTotal;
+        // oka/okaTenths are purely derived: (returnPoints - startingPoints) *
+        // playerCount / 1000. A client-side copy goes stale the moment starting
+        // points are edited, and normalizeRulesConfig rejects stale copies --
+        // drop them here and re-derive from the normalized config below.
+        delete cfg.oka;
+        delete cfg.okaTenths;
+        // The engine recognizes honba.tsumoPerPayer but not honba.ronTotal.
+        // Supply its ron alias for this normalization only; persist the paired
+        // canonical values afterward so future reads need no alias.
+        const engineCfg = hadHonba ? { ...cfg, honbaRon: honba.ronTotal } : cfg;
+        const norm = normalizeRulesConfig(prepareEngineRulesConfig(engineCfg));
         playerCount = norm.playerCount;
-        rulesSnapshot = body.config;
+        if (hadHonba) cfg.honba = { ronTotal: norm.honbaRon, tsumoPerPayer: norm.honbaPerPayer };
+        cfg.oka = norm.oka;
+        cfg.okaTenths = Math.round(norm.oka * 10);
+        rulesSnapshot = cfg;
         rulesHash = createHash('sha256').update(JSON.stringify(rulesSnapshot)).digest('hex');
       } catch (err) {
         return reply.code(400).send({
@@ -188,10 +347,19 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         );
       }
 
-      await client.query(
+      const ownerMemRes = await client.query<{ id: string }>(
         `INSERT INTO app.match_members (match_id, principal_id, role, status)
-         VALUES ($1, $2, 'participant', 'active')`,
+         VALUES ($1, $2, 'participant', 'active')
+         RETURNING id`,
         [match.id, principal.id],
+      );
+      const ownerMemberId = ownerMemRes.rows[0].id;
+
+      // Assign owner to seat 0 (East) as an approved seat assignment
+      await client.query(
+        `INSERT INTO app.seat_assignments (match_id, seat_no, member_id, start_hand_no, confirmed_by)
+         VALUES ($1, 0, $2, 0, $3)`,
+        [match.id, ownerMemberId, principal.id],
       );
 
       const inviteCode = match.id.replace(/-/g, '').slice(0, 8).toUpperCase();
@@ -202,9 +370,6 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
       );
 
       await client.query('COMMIT');
-
-      // Bind any anonymous guest sessions that were created prior to the first match
-      await bindAllUnboundGuestsToMatch(match.id);
 
       return {
         match: {
@@ -234,13 +399,22 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     }>(
       `SELECT DISTINCT m.id, m.state, m.player_count, m.created_at
        FROM app.matches m
-       LEFT JOIN app.match_members mm ON mm.match_id = m.id AND mm.status = 'active'
+       JOIN app.match_members mm ON mm.match_id = m.id AND mm.status = 'active'
        LEFT JOIN app.member_access_grants mag ON mag.member_id = mm.id AND mag.revoked_at IS NULL
-       WHERE m.owner_principal_id = $1
-          OR mm.principal_id = $1
-          OR mag.principal_id = $1
+       WHERE (mm.principal_id = $1 OR mag.principal_id = $1)
+         AND (
+           $2::text <> 'guest'
+           OR EXISTS (
+             SELECT 1
+             FROM app.guest_sessions gs
+             WHERE gs.principal_id = $1
+               AND gs.match_id = m.id
+               AND gs.revoked_at IS NULL
+               AND gs.expires_at > now()
+           )
+         )
        ORDER BY m.created_at DESC`,
-      [principal.id],
+      [principal.id, principal.kind],
     );
 
     return res.rows.map((row) => ({
@@ -423,13 +597,40 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
       if (!principal) return;
 
       const matchId = req.params.id;
-      if (principal.type === 'guest') {
-        await ensureGuestSessionForPrincipal(principal.id, principal.authUserId, matchId);
-      }
 
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
+
+        const pRes = await client.query<{ id: string; kind: string; status: string }>(
+          `SELECT id, kind, status FROM app.principals WHERE id = $1 FOR SHARE`,
+          [principal.id],
+        );
+        if (!pRes.rows[0] || pRes.rows[0].status !== 'active') {
+          await client.query('ROLLBACK');
+          return reply.code(403).send({ error: 'principal_inactive', message: 'Principal is not active' });
+        }
+
+        // F3: A guest already bound to another match cannot join a different match
+        if (pRes.rows[0].kind === 'guest') {
+          const boundOtherRes = await client.query<{ match_id: string }>(
+            `SELECT match_id
+             FROM app.guest_sessions
+             WHERE principal_id = $1
+               AND match_id <> $2
+               AND revoked_at IS NULL
+               AND expires_at > now()
+             LIMIT 1`,
+            [principal.id, matchId],
+          );
+          if ((boundOtherRes.rowCount ?? 0) > 0) {
+            await client.query('ROLLBACK');
+            return reply.code(403).send({
+              error: 'guest_already_bound',
+              message: 'Guest session is already bound to another match',
+            });
+          }
+        }
 
         const mRes = await client.query<{ id: string; owner_principal_id: string; player_count: number; state: string }>(
           `SELECT id, owner_principal_id, player_count, state FROM app.matches WHERE id = $1 FOR UPDATE`,
@@ -439,6 +640,10 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         if (!match) {
           await client.query('ROLLBACK');
           return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
+        }
+        if (match.state !== 'preparing') {
+          await client.query('ROLLBACK');
+          return reply.code(409).send({ error: 'match_already_started', message: 'Match is not in preparing state' });
         }
 
         const existingJr = await client.query<{ id: string; status: string }>(
@@ -454,17 +659,23 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
           };
         }
 
-        let invRes = await client.query<{ id: string }>(
-          `SELECT id FROM app.match_invitations WHERE match_id = $1 AND scope = 'join' ORDER BY created_at ASC LIMIT 1`,
+        const invRes = await client.query<{ id: string }>(
+          `SELECT id
+           FROM app.match_invitations
+           WHERE match_id = $1
+             AND scope = 'join'
+             AND revoked_at IS NULL
+             AND expires_at > now()
+           ORDER BY created_at ASC
+           LIMIT 1`,
           [matchId],
         );
         if (!invRes.rows[0]) {
-          invRes = await client.query<{ id: string }>(
-            `INSERT INTO app.match_invitations (match_id, scope, generation, hmac_key_id, created_by, expires_at)
-             VALUES ($1, 'join', 1, 'default', $2, now() + interval '24 hours')
-             RETURNING id`,
-            [matchId, match.owner_principal_id],
-          );
+          await client.query('ROLLBACK');
+          return reply.code(403).send({
+            error: 'no_active_invitation',
+            message: 'No active join invitation for this match',
+          });
         }
 
         const requestedSeatNo =
@@ -513,6 +724,15 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     try {
       await client.query('BEGIN');
 
+      const ownerPRes = await client.query<{ status: string }>(
+        `SELECT status FROM app.principals WHERE id = $1 FOR SHARE`,
+        [principal.id],
+      );
+      if (ownerPRes.rows[0]?.status !== 'active') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'principal_inactive', message: 'Principal is not active' });
+      }
+
       const mRes = await client.query<{
         id: string;
         owner_principal_id: string;
@@ -528,6 +748,16 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         await client.query('ROLLBACK');
         return reply.code(403).send({ error: 'forbidden', message: 'Only the match owner can approve join requests' });
       }
+
+      const ownerMemRes = await client.query<{ status: string }>(
+        `SELECT status FROM app.match_members WHERE match_id = $1 AND principal_id = $2`,
+        [matchId, principal.id],
+      );
+      if (ownerMemRes.rows[0]?.status !== 'active') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'forbidden', message: 'Owner membership is not active' });
+      }
+
       if (match.state !== 'preparing') {
         await client.query('ROLLBACK');
         return reply.code(409).send({ error: 'match_already_started', message: 'Match is not in preparing state' });
@@ -559,15 +789,26 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         return reply.code(409).send({ error: 'join_request_already_decided', message: 'Join request already decided' });
       }
 
-      // Check if seat is already taken in seat_assignments
-      const takenRes = await client.query<{ id: string }>(
-        `SELECT id FROM app.seat_assignments
-         WHERE match_id = $1 AND seat_no = $2 AND end_hand_no IS NULL`,
-        [matchId, seatNo],
+      const reqPRes = await client.query<{ id: string; kind: string; status: string }>(
+        `SELECT id, kind, status FROM app.principals WHERE id = $1 FOR SHARE`,
+        [jr.principal_id],
       );
-      if ((takenRes.rowCount ?? 0) > 0) {
+      const reqPrincipal = reqPRes.rows[0];
+      if (!reqPrincipal || reqPrincipal.status !== 'active') {
         await client.query('ROLLBACK');
-        return reply.code(409).send({ error: 'seat_taken', message: `Seat ${seatNo} is already taken` });
+        return reply.code(403).send({ error: 'principal_inactive', message: 'Applicant principal is not active' });
+      }
+
+      // F3: Bind guest principal to this match ONLY upon join-request approval
+      if (reqPrincipal.kind === 'guest') {
+        const bindStatus = await bindGuestToMatch(jr.principal_id, matchId, client);
+        if (bindStatus === 'already_bound_other_match') {
+          await client.query('ROLLBACK');
+          return reply.code(403).send({
+            error: 'guest_already_bound',
+            message: 'Guest principal is already bound to another match',
+          });
+        }
       }
 
       // Ensure member row exists for requester
@@ -575,11 +816,22 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         `INSERT INTO app.match_members (match_id, principal_id, role, status)
          VALUES ($1, $2, 'participant', 'active')
          ON CONFLICT (match_id, principal_id)
-         DO UPDATE SET status = 'active', removed_at = NULL
+         DO UPDATE SET role = 'participant', status = 'active', removed_at = NULL
          RETURNING id`,
         [matchId, jr.principal_id],
       );
       const memberId = memRes.rows[0].id;
+
+      // Check if seat is already taken in seat_assignments by another member
+      const takenRes = await client.query<{ id: string; member_id: string }>(
+        `SELECT id, member_id FROM app.seat_assignments
+         WHERE match_id = $1 AND seat_no = $2 AND end_hand_no IS NULL`,
+        [matchId, seatNo],
+      );
+      if (takenRes.rows[0] && takenRes.rows[0].member_id !== memberId) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({ error: 'seat_taken', message: `Seat ${seatNo} is already taken` });
+      }
 
       // Ensure requester doesn't already occupy another seat
       const existingMemberSeat = await client.query<{ id: string; seat_no: number }>(
@@ -651,7 +903,8 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     if (!match) {
       return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
     }
-    if (match.owner_principal_id !== principal.id) {
+    const access = await checkMatchAccess(matchId, principal.id);
+    if (access !== 'allowed' || match.owner_principal_id !== principal.id) {
       return reply.code(403).send({ error: 'forbidden', message: 'Only the match owner can issue check-in tokens' });
     }
     if (match.state !== 'preparing') {
@@ -694,15 +947,21 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
       return reply.code(400).send({ error: 'invalid_token', message: 'Invalid or expired check-in token' });
     }
 
-    if (principal.type === 'guest') {
-      await ensureGuestSessionForPrincipal(principal.id, principal.authUserId, matchId);
-    }
-
     const tokenHash = createHash('sha256').update(token).digest('hex');
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      const pRes = await client.query<{ id: string; kind: string; status: string }>(
+        `SELECT id, kind, status FROM app.principals WHERE id = $1 FOR SHARE`,
+        [principal.id],
+      );
+      const pRow = pRes.rows[0];
+      if (!pRow || pRow.status !== 'active') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'principal_inactive', message: 'Principal is not active' });
+      }
 
       const mRes = await client.query<{
         id: string;
@@ -727,6 +986,39 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         return reply.code(409).send({ error: 'match_already_started', message: 'Match is not in preparing state' });
       }
 
+      // F1: Caller must already have an approved seat_assignment for this match
+      // (created by join-request approve or owner assignment). Token alone is never sufficient.
+      const approvedSaRes = await client.query<{
+        seat_assignment_id: string;
+        seat_no: number;
+        member_id: string;
+      }>(
+        `SELECT
+           sa.id AS seat_assignment_id,
+           sa.seat_no,
+           mm.id AS member_id
+         FROM app.seat_assignments sa
+         JOIN app.match_members mm
+           ON mm.id = sa.member_id
+          AND mm.match_id = sa.match_id
+         WHERE sa.match_id = $1
+           AND mm.principal_id = $2
+           AND mm.status = 'active'
+           AND mm.role = 'participant'
+           AND sa.end_hand_no IS NULL
+           AND sa.confirmed_by IS NOT NULL
+         FOR UPDATE OF sa`,
+        [matchId, principal.id],
+      );
+      const approvedSa = approvedSaRes.rows[0];
+      if (!approvedSa) {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({
+          error: 'check_in_not_approved',
+          message: 'Caller does not have an approved seat assignment for this match',
+        });
+      }
+
       // Atomically consume the hashed single-use check-in token
       const consumeRes = await client.query<{ id: string }>(
         `UPDATE app.match_invitations
@@ -743,6 +1035,18 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         return reply.code(400).send({ error: 'token_consumed_or_expired', message: 'Check-in token already used or expired' });
       }
 
+      // F3: Bind guest session only after approved seat assignment + valid check-in token
+      if (pRow.kind === 'guest') {
+        const bindStatus = await bindGuestToMatch(principal.id, matchId, client);
+        if (bindStatus === 'already_bound_other_match') {
+          await client.query('ROLLBACK');
+          return reply.code(403).send({
+            error: 'guest_already_bound',
+            message: 'Guest session is already bound to another match',
+          });
+        }
+      }
+
       if (typeof alias === 'string' && alias.trim().length > 0) {
         await client.query(
           `UPDATE app.principals SET display_name = $1 WHERE id = $2`,
@@ -750,64 +1054,10 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         );
       }
 
-      // Ensure match_members row
-      const memRes = await client.query<{ id: string }>(
-        `INSERT INTO app.match_members (match_id, principal_id, role, status)
-         VALUES ($1, $2, 'participant', 'active')
-         ON CONFLICT (match_id, principal_id)
-         DO UPDATE SET status = 'active', removed_at = NULL
-         RETURNING id`,
-        [matchId, principal.id],
-      );
-      const memberId = memRes.rows[0].id;
-
-      // Find or create seat_assignments row for this member
-      const existingSa = await client.query<{ id: string; seat_no: number }>(
-        `SELECT id, seat_no
-         FROM app.seat_assignments
-         WHERE match_id = $1 AND member_id = $2 AND end_hand_no IS NULL`,
-        [matchId, memberId],
-      );
-
-      let seatAssignmentId: string;
-      let seatNo: number;
-
-      if (existingSa.rows[0]) {
-        seatAssignmentId = existingSa.rows[0].id;
-        seatNo = existingSa.rows[0].seat_no;
-      } else {
-        const occupiedRes = await client.query<{ seat_no: number }>(
-          `SELECT seat_no
-           FROM app.seat_assignments
-           WHERE match_id = $1 AND end_hand_no IS NULL`,
-          [matchId],
-        );
-        const occupied: Record<number, true> = {};
-        for (const r of occupiedRes.rows) {
-          occupied[r.seat_no] = true;
-        }
-        let chosenSeat: number | null = null;
-        for (let s = 0; s < match.player_count; s++) {
-          if (!occupied[s]) {
-            chosenSeat = s;
-            break;
-          }
-        }
-        if (chosenSeat === null) {
-          await client.query('ROLLBACK');
-          return reply.code(409).send({ error: 'table_full', message: 'All seats are already occupied' });
-        }
-        seatNo = chosenSeat;
-        const saInsert = await client.query<{ id: string }>(
-          `INSERT INTO app.seat_assignments (match_id, seat_no, member_id, start_hand_no, confirmed_by)
-           VALUES ($1, $2, $3, 0, $4)
-           RETURNING id`,
-          [matchId, seatNo, memberId, match.owner_principal_id],
-        );
-        seatAssignmentId = saInsert.rows[0].id;
-      }
+      const { seat_assignment_id: seatAssignmentId, seat_no: seatNo, member_id: memberId } = approvedSa;
 
       // Invalidate any prior active check-in on this seat assignment, then insert new check_ins row
+      // F1: Never write host_confirmed_* on behalf of the owner.
       await client.query(
         `UPDATE app.check_ins
          SET invalidated_at = now()
@@ -821,12 +1071,10 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
            seat_assignment_id,
            rules_hash,
            method,
-           confirmed_at,
-           host_confirmed_at,
-           host_confirmed_by
+           confirmed_at
          )
-         VALUES ($1, $2, $3, $4, 'qr_scan', now(), now(), $5)`,
-        [matchId, memberId, seatAssignmentId, match.rules_hash, match.owner_principal_id],
+         VALUES ($1, $2, $3, $4, 'qr_scan', now())`,
+        [matchId, memberId, seatAssignmentId, match.rules_hash],
       );
 
       // Ensure member_access_grants row
@@ -879,6 +1127,15 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     try {
       await client.query('BEGIN');
 
+      const pRes = await client.query<{ status: string }>(
+        `SELECT status FROM app.principals WHERE id = $1 FOR SHARE`,
+        [principal.id],
+      );
+      if (pRes.rows[0]?.status !== 'active') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'principal_inactive', message: 'Principal is not active' });
+      }
+
       const mRes = await client.query<{
         id: string;
         owner_principal_id: string;
@@ -897,6 +1154,16 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         await client.query('ROLLBACK');
         return reply.code(403).send({ error: 'forbidden', message: 'Only the match owner can finalize seats' });
       }
+
+      const ownerMemRes = await client.query<{ status: string }>(
+        `SELECT status FROM app.match_members WHERE match_id = $1 AND principal_id = $2`,
+        [matchId, principal.id],
+      );
+      if (ownerMemRes.rows[0]?.status !== 'active') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'forbidden', message: 'Owner membership is not active' });
+      }
+
       if (match.state !== 'preparing') {
         await client.query('ROLLBACK');
         return reply.code(409).send({ error: 'match_already_started', message: 'Seats are already finalized' });
@@ -919,11 +1186,11 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
            ci.id AS check_in_id
          FROM app.match_seats ms
          LEFT JOIN app.seat_assignments sa
-           ON sa.match_id = ms.match_id AND sa.seat_no = ms.seat_no AND sa.end_hand_no IS NULL
+           ON sa.match_id = ms.match_id AND sa.seat_no = ms.seat_no AND sa.end_hand_no IS NULL AND sa.confirmed_by IS NOT NULL
          LEFT JOIN app.match_members mm
-           ON mm.match_id = sa.match_id AND mm.id = sa.member_id AND mm.status = 'active'
+           ON mm.match_id = sa.match_id AND mm.id = sa.member_id AND mm.status = 'active' AND mm.role = 'participant'
          LEFT JOIN app.principals p
-           ON p.id = mm.principal_id
+           ON p.id = mm.principal_id AND p.status = 'active'
          LEFT JOIN app.check_ins ci
            ON ci.seat_assignment_id = sa.id AND ci.invalidated_at IS NULL AND ci.rules_hash = $2
          WHERE ms.match_id = $1
@@ -933,7 +1200,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
 
       if (
         seatsRes.rows.length !== match.player_count ||
-        seatsRes.rows.some((r) => !r.seat_assignment_id || !r.check_in_id)
+        seatsRes.rows.some((r) => !r.seat_assignment_id || !r.principal_id || !r.check_in_id)
       ) {
         await client.query('ROLLBACK');
         return reply.code(400).send({
@@ -942,7 +1209,15 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         });
       }
 
-      const norm = normalizeRulesConfig(match.rules_snapshot, match.player_count);
+      // Revoke outstanding join invitations on match start
+      await client.query(
+        `UPDATE app.match_invitations
+         SET revoked_at = now()
+         WHERE match_id = $1 AND scope = 'join' AND revoked_at IS NULL`,
+        [matchId],
+      );
+
+      const norm = normalizeRulesConfig(prepareEngineRulesConfig(match.rules_snapshot), match.player_count);
       const startingPoints = norm.startingPoints;
 
       // Create score_accounts for each seat and the riichi_pool account

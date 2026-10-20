@@ -7,7 +7,8 @@ import { pool } from './db.js';
 export interface ResolvedPrincipal {
   id: string;
   type: 'account' | 'guest';
-  kind: 'user' | 'guest';
+  kind: 'user' | 'guest' | 'erased';
+  status: 'active' | 'suspended' | 'erased';
   displayName: string;
   createdAt: string;
   authUserId: string;
@@ -15,46 +16,52 @@ export interface ResolvedPrincipal {
   sessionToken: string;
 }
 
-export async function ensureGuestSessionForPrincipal(
+export async function bindGuestToMatch(
   principalId: string,
-  authUserId: string,
-  matchId?: string,
-): Promise<void> {
-  let targetMatchId = matchId;
-  if (!targetMatchId) {
-    const mRes = await pool.query<{ id: string }>(
-      `SELECT id FROM app.matches ORDER BY created_at DESC LIMIT 1`,
-    );
-    targetMatchId = mRes.rows[0]?.id;
-  }
-  if (!targetMatchId) {
-    return;
+  matchId: string,
+  db: { query: typeof pool.query },
+): Promise<'bound' | 'already_bound_other_match'> {
+  // Serialize approvals/check-ins for this guest across different matches.
+  // The caller owns a transaction; a principal row SHARE lock cannot serialize
+  // two approvals, and a unique verifier only deduplicates the same match.
+  await db.query('SELECT pg_advisory_xact_lock(91718, hashtext($1::text))', [principalId]);
+  const otherRes = await db.query<{ match_id: string }>(
+    `SELECT match_id
+     FROM app.guest_sessions
+     WHERE principal_id = $1
+       AND match_id <> $2
+       AND revoked_at IS NULL
+       AND expires_at > now()
+     LIMIT 1`,
+    [principalId, matchId],
+  );
+  if ((otherRes.rowCount ?? 0) > 0) {
+    return 'already_bound_other_match';
   }
 
-  const verifier = createHash('sha256').update(`guest_device:${authUserId}:${targetMatchId}`).digest('hex');
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-  await pool.query(
+  const sessRes = await db.query<{ token: string; expires_at: Date }>(
+    `SELECT s."token" AS token, s."expiresAt" AS expires_at
+     FROM public.auth_principal_map m
+     JOIN public."session" s ON s."userId" = m.auth_user_id
+     WHERE m.principal_id = $1
+       AND s."expiresAt" > now()
+     ORDER BY s."createdAt" DESC
+     LIMIT 1`,
+    [principalId],
+  );
+  const sessionSeed = sessRes.rows[0]?.token ?? `${principalId}:${matchId}`;
+  const expiresAt = sessRes.rows[0]?.expires_at ?? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  const verifier = createHash('sha256')
+    .update(`guest_session:${sessionSeed}:${matchId}`)
+    .digest('hex');
+
+  await db.query(
     `INSERT INTO app.guest_sessions (principal_id, match_id, token_verifier, expires_at)
      VALUES ($1, $2, $3, $4)
      ON CONFLICT (token_verifier) DO NOTHING`,
-    [principalId, targetMatchId, verifier, expiresAt],
+    [principalId, matchId, verifier, expiresAt],
   );
-}
-
-export async function bindAllUnboundGuestsToMatch(matchId: string): Promise<void> {
-  const res = await pool.query<{ auth_user_id: string; principal_id: string }>(
-    `SELECT m.auth_user_id, m.principal_id
-     FROM public.auth_principal_map m
-     JOIN app.principals p ON p.id = m.principal_id
-     WHERE p.kind = 'guest'
-       AND NOT EXISTS (
-         SELECT 1 FROM app.guest_sessions gs
-         WHERE gs.principal_id = m.principal_id AND gs.revoked_at IS NULL
-       )`,
-  );
-  for (const row of res.rows) {
-    await ensureGuestSessionForPrincipal(row.principal_id, row.auth_user_id, matchId);
-  }
+  return 'bound';
 }
 
 export async function ensurePrincipalForAuthUser(user: {
@@ -64,7 +71,8 @@ export async function ensurePrincipalForAuthUser(user: {
   isAnonymous?: boolean | null;
 }): Promise<{
   id: string;
-  kind: 'user' | 'guest';
+  kind: 'user' | 'guest' | 'erased';
+  status: 'active' | 'suspended' | 'erased';
   display_name: string;
   created_at: Date;
 }> {
@@ -74,11 +82,12 @@ export async function ensurePrincipalForAuthUser(user: {
   if (!isAnon) {
     const existing = await pool.query<{
       id: string;
-      kind: 'user' | 'guest';
+      kind: 'user' | 'guest' | 'erased';
+      status: 'active' | 'suspended' | 'erased';
       display_name: string;
       created_at: Date;
     }>(
-      `SELECT id, kind, display_name, created_at
+      `SELECT id, kind, status, display_name, created_at
        FROM app.principals
        WHERE auth_user_id = $1`,
       [user.id],
@@ -95,14 +104,15 @@ export async function ensurePrincipalForAuthUser(user: {
 
     const inserted = await pool.query<{
       id: string;
-      kind: 'user' | 'guest';
+      kind: 'user' | 'guest' | 'erased';
+      status: 'active' | 'suspended' | 'erased';
       display_name: string;
       created_at: Date;
     }>(
       `INSERT INTO app.principals (kind, auth_user_id, display_name, status)
        VALUES ('user', $1, $2, 'active')
        ON CONFLICT (auth_user_id) DO UPDATE SET display_name = app.principals.display_name
-       RETURNING id, kind, display_name, created_at`,
+       RETURNING id, kind, status, display_name, created_at`,
       [user.id, displayName],
     );
     const row = inserted.rows[0];
@@ -116,32 +126,34 @@ export async function ensurePrincipalForAuthUser(user: {
   }
 
   // Anonymous guest principal: app.principals.ck_principals_auth_user requires auth_user_id IS NULL for kind='guest'.
+  // Guest principals are NOT auto-bound to any match here; binding happens only via approved join-request or F1 check-in.
   const mapped = await pool.query<{
     id: string;
-    kind: 'user' | 'guest';
+    kind: 'user' | 'guest' | 'erased';
+    status: 'active' | 'suspended' | 'erased';
     display_name: string;
     created_at: Date;
   }>(
-    `SELECT p.id, p.kind, p.display_name, p.created_at
+    `SELECT p.id, p.kind, p.status, p.display_name, p.created_at
      FROM public.auth_principal_map m
      JOIN app.principals p ON p.id = m.principal_id
      WHERE m.auth_user_id = $1`,
     [user.id],
   );
   if (mapped.rows[0]) {
-    await ensureGuestSessionForPrincipal(mapped.rows[0].id, user.id);
     return mapped.rows[0];
   }
 
   const inserted = await pool.query<{
     id: string;
-    kind: 'user' | 'guest';
+    kind: 'user' | 'guest' | 'erased';
+    status: 'active' | 'suspended' | 'erased';
     display_name: string;
     created_at: Date;
   }>(
     `INSERT INTO app.principals (kind, auth_user_id, display_name, status)
      VALUES ('guest', NULL, $1, 'active')
-     RETURNING id, kind, display_name, created_at`,
+     RETURNING id, kind, status, display_name, created_at`,
     [displayName],
   );
   const row = inserted.rows[0];
@@ -151,18 +163,28 @@ export async function ensurePrincipalForAuthUser(user: {
      ON CONFLICT (auth_user_id) DO NOTHING`,
     [user.id, row.id],
   );
-  await ensureGuestSessionForPrincipal(row.id, user.id);
   return row;
 }
+
+const ALLOWED_AUTH_ORIGINS: Record<string, true> = {
+  'https://riichi.p1ziyu.com': true,
+  'http://127.0.0.1:5173': true,
+  'http://localhost:5173': true,
+  'capacitor://localhost': true,
+  'https://localhost': true,
+};
 
 export const auth = betterAuth({
   database: pool,
   secret: process.env.BETTER_AUTH_SECRET,
   baseURL: process.env.BETTER_AUTH_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3101}`,
-  trustedOrigins: ['http://127.0.0.1:*', 'http://localhost:*'],
-  advanced: {
-    disableCSRFCheck: true,
-  },
+  trustedOrigins: [
+    'https://riichi.p1ziyu.com',
+    'http://127.0.0.1:5173',
+    'http://localhost:5173',
+    'capacitor://localhost',
+    'https://localhost',
+  ],
   emailAndPassword: {
     enabled: true,
   },
@@ -242,6 +264,7 @@ export async function resolvePrincipal(req: FastifyRequest): Promise<ResolvedPri
     id: pRow.id,
     type: pRow.kind === 'user' ? 'account' : 'guest',
     kind: pRow.kind,
+    status: pRow.status,
     displayName: pRow.display_name,
     createdAt: pRow.created_at instanceof Date ? pRow.created_at.toISOString() : String(pRow.created_at),
     authUserId: session.user.id,
@@ -259,15 +282,24 @@ export async function requirePrincipal(
     await reply.code(401).send({ error: 'unauthorized', message: 'Authentication required' });
     return null;
   }
+  if (principal.status !== 'active') {
+    await reply.code(403).send({ error: 'principal_inactive', message: 'Principal is not active' });
+    return null;
+  }
   return principal;
 }
 
 export function registerAuthRoutes(app: FastifyInstance): void {
   const handleAuthRequest = async (req: FastifyRequest, reply: FastifyReply) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
+      const reqOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+      if (reqOrigin && !ALLOWED_AUTH_ORIGINS[reqOrigin]) {
+        return reply.code(403).send({ error: 'invalid_origin', message: 'Untrusted origin' });
+      }
+    }
     const baseUrl = process.env.BETTER_AUTH_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3101}`;
     const url = new URL(req.raw.url || req.url, baseUrl);
     const headers = toWebHeaders(req);
-
     let body: string | undefined;
     if (req.method !== 'GET' && req.method !== 'HEAD' && req.body !== undefined && req.body !== null) {
       body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
@@ -319,6 +351,9 @@ export function registerAuthRoutes(app: FastifyInstance): void {
     const principal = await resolvePrincipal(req);
     if (!principal) {
       return reply.code(401).send({ error: 'unauthorized', message: 'No active session' });
+    }
+    if (principal.status !== 'active') {
+      return reply.code(403).send({ error: 'principal_inactive', message: 'Principal is not active' });
     }
     return {
       principal: {

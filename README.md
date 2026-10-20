@@ -6,7 +6,8 @@
 - [视觉参考与设计方向](docs/视觉参考与设计方向.md)：雀魂官方截图与具体借鉴方式。
 - [已确认需求](PRODUCT.md)：便于后续开发保持需求一致。
 
-最终确认的产品流程：开桌 → 全员扫码签到 → 同桌所有成员可录入 → 三端实时同步 → 结算与战绩。
+当前流程：开桌时桌主占东家座位 → 其他参与者提交入桌申请并由桌主批准座位 → 各人用一次性令牌签到 → 全员签到后确认座次 → 同桌已签到参与者录入局结果 → 终局确认成绩。观战者和未签到的成员只读。
 
-当前仓库包含 Web 本地演示界面、共享计分包接口与服务端工程骨架；尚未接通账户、签到、同步、真实战绩或正式服务端牌局。Web 可运行 `pnpm --filter @riichi/web dev`，并以 `pnpm --filter @riichi/web build` 构建。
-Web 演示入口：`/` 大厅、`/create` 模板与规则预览、`/table/local` 本地牌桌（需先开桌）、`/history` 示例战绩、`/login` 未接入的登录表单。模板与牌桌仅保留在当前页面会话，刷新即丢失；规则引擎不可用时支付预览显示接入中，禁止提交结算。
+`apps/api` 提供 Better Auth 登录、规则模板、牌桌、签到、记分和 WebSocket 同步。私有规则版本只对其所有者开放；系统模板公开。创建牌桌的规则配置以 `startingPoints` 为起始点字段，API 兼容旧的 `startPoints` 输入，两个字段同时提供时以 `startingPoints` 为准；本场数使用 `honba.ronTotal`、`honba.tsumoPerPayer`，流局罚点总额使用 `ryuukyokuPenaltyTotal`。临时规则配置中的旧本场数和流局罚点字段仅在创建时合并，规范字段优先，保存的快照不保留别名。
+
+`apps/web` 展示真实服务端牌桌；服务端进行中的状态为 `in_progress`，`GET /api/matches/:id` 的 `checkedIn` 是签到人数，每座的签到状态位于 `seats[].status`。牌局标记提交可带 `expectedMarkRevision`；结果提交可带 `clientEventId`，原请求重试返回相同结算，不同请求复用该 ID 返回冲突。通过 `pnpm --filter @riichi/api build`、`pnpm --filter @riichi/api test` 和 `pnpm --filter @riichi/web build` 校验。

@@ -38,9 +38,12 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
         body?: unknown;
         cookie?: string;
         token?: string;
+        origin?: string;
       } = {},
     ): Promise<{ status: number; data: T; setCookies: string[] }> => {
-      const headers: Record<string, string> = {};
+      const headers: Record<string, string> = {
+        origin: opts.origin ?? 'http://127.0.0.1:5173',
+      };
       if (opts.body !== undefined) {
         headers['content-type'] = 'application/json';
       }
@@ -60,6 +63,16 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       const data = (text ? JSON.parse(text) : undefined) as T;
       return { status: res.status, data, setCookies };
     };
+
+    for (const origin of ['capacitor://localhost', 'https://localhost']) {
+      const preflight = await fetch(`${baseUrl}/api/me`, {
+        method: 'OPTIONS',
+        headers: { origin, 'access-control-request-method': 'GET', 'access-control-request-headers': 'authorization' },
+      });
+      checkEq(preflight.status, 204, `Native preflight accepted for ${origin}`);
+      checkEq(preflight.headers.get('access-control-allow-origin'), origin, `Native CORS origin echoed for ${origin}`);
+      check(preflight.headers.get('access-control-allow-headers')?.toLowerCase().includes('authorization'), `Native bearer preflight accepted for ${origin}`);
+    }
 
     // 0. Unauthenticated /api/me must return 401
     const unauthMe = await requestJson('/api/me');
@@ -93,12 +106,13 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       };
     };
 
-    const signInAnonymousGuest = async (label: string): Promise<ClientSession> => {
+    const signInAnonymousGuest = async (label: string, origin?: string): Promise<ClientSession> => {
       const anon = await requestJson<{ token: string; user: { id: string; isAnonymous: boolean } }>(
         '/api/auth/sign-in/anonymous',
         {
           method: 'POST',
           body: {},
+          origin,
         },
       );
       checkEq(anon.status, 200, `Anonymous sign-in for ${label} returns 200`);
@@ -123,8 +137,8 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
 
     const acct1 = await registerEmailAccount(`host_${runId}@example.com`, '东家房主');
     const acct2 = await registerEmailAccount(`player2_${runId}@example.com`, '南家会员');
-    const guest1 = await signInAnonymousGuest('guest1');
-    const guest2 = await signInAnonymousGuest('guest2');
+    const guest1 = await signInAnonymousGuest('guest1', 'capacitor://localhost');
+    const guest2 = await signInAnonymousGuest('guest2', 'https://localhost');
 
     // 2. Fetch ruleset templates & version
     const tplRes = await requestJson<
@@ -167,6 +181,63 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     check(Boolean(matchId), 'Match ID returned');
     checkEq(createRes.data.match.status, 'preparing', 'Initial match status is preparing');
 
+    // M8: ad-hoc configs retain only canonical honba/ryuukyoku fields;
+    // stale aliases from the enriched template must not override edits.
+    const canonicalCreate = await requestJson<{ match: { id: string } }>('/api/matches', {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: {
+        config: {
+          ...house4p!.config,
+          honba: { ronTotal: 600, tsumoPerPayer: 200, ron: 300, perPayer: 100 },
+          honbaPerPayer: 100,
+          honbaRon: 300,
+          ryuukyokuPenaltyTotal: 2400,
+          ryuukyokuPoolTotal: 3000,
+          notenPenaltyTotal: 3000,
+        },
+      },
+    });
+    checkEq(canonicalCreate.status, 200, 'Ad-hoc match with canonical and stale aliases creates successfully');
+    const canonicalStored = await pool.query<{ rules_snapshot: Record<string, unknown> }>(
+      'SELECT rules_snapshot FROM app.matches WHERE id = $1',
+      [canonicalCreate.data.match.id],
+    );
+    const canonicalSnapshot = canonicalStored.rows[0].rules_snapshot;
+    checkEq(canonicalSnapshot.honba, { ronTotal: 600, tsumoPerPayer: 200 }, 'Canonical honba wins and is stored alone');
+    checkEq(canonicalSnapshot.ryuukyokuPenaltyTotal, 2400, 'Canonical ryuukyoku penalty wins');
+    for (const alias of ['honbaPerPayer', 'honbaRon', 'ryuukyokuPoolTotal', 'notenPenaltyTotal']) {
+      check(!(alias in canonicalSnapshot), `Stored ad-hoc config omits ${alias}`);
+    }
+    const canonicalView = await requestJson(`/api/matches/${canonicalCreate.data.match.id}`, { cookie: acct1.cookie });
+    checkEq(canonicalView.status, 200, 'Canonicalized match remains readable by the engine');
+
+    const aliasCreate = await requestJson<{ match: { id: string } }>('/api/matches', {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: {
+        config: {
+          playerCount: 4,
+          startingPoints: 25000,
+          returnPoints: 30000,
+          honba: { ronTotal: 600 },
+          honbaPerPayer: 200,
+          ryuukyokuPoolTotal: 2400,
+        },
+      },
+    });
+    checkEq(aliasCreate.status, 200, 'Partial honba object merges legacy payer and penalty aliases');
+    const aliasStored = await pool.query<{ rules_snapshot: Record<string, unknown> }>(
+      'SELECT rules_snapshot FROM app.matches WHERE id = $1',
+      [aliasCreate.data.match.id],
+    );
+    checkEq(aliasStored.rows[0].rules_snapshot.honba, { ronTotal: 600, tsumoPerPayer: 200 },
+      'Missing canonical honba component is filled from legacy payer');
+    checkEq(aliasStored.rows[0].rules_snapshot.ryuukyokuPenaltyTotal, 2400,
+      'Legacy ryuukyoku total is stored under its canonical key');
+    check(!('honbaPerPayer' in aliasStored.rows[0].rules_snapshot), 'Merged honba alias is not stored');
+    check(!('ryuukyokuPoolTotal' in aliasStored.rows[0].rules_snapshot), 'Merged ryuukyoku alias is not stored');
+
     // Verify GET /api/matches?mine=1
     const mineRes = await requestJson<{ id: string; status: string; playerCount: number; createdAt: string }[]>(
       '/api/matches?mine=1',
@@ -205,13 +276,29 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     });
     await wsOpen.promise;
 
+    // 3b. F1 check: unapproved check-in with a valid token must be rejected with 403 {error:'check_in_not_approved'}
+    const unapprovedTokRes = await requestJson<{ token: string; expiresAt: string }>(
+      `/api/matches/${matchId}/check-in-tokens`,
+      { method: 'POST', cookie: acct1.cookie, body: {} },
+    );
+    checkEq(unapprovedTokRes.status, 200, 'POST check-in-tokens for unapproved probe returns 200');
+    const unapprovedCiRes = await requestJson<{ error: string }>(
+      `/api/matches/${matchId}/check-ins`,
+      {
+        method: 'POST',
+        cookie: acct2.cookie,
+        body: { token: unapprovedTokRes.data.token },
+      },
+    );
+    checkEq(unapprovedCiRes.status, 403, 'Unapproved check-in returns 403');
+    checkEq(unapprovedCiRes.data.error, 'check_in_not_approved', 'Unapproved check-in error code is check_in_not_approved');
+
     // 4. Join-requests and owner approvals for seats 1, 2, 3
     const joinRequesters: { session: ClientSession; seatNo: number }[] = [
       { session: acct2, seatNo: 1 },
       { session: guest1, seatNo: 2 },
       { session: guest2, seatNo: 3 },
     ];
-
     for (const { session, seatNo } of joinRequesters) {
       const jr = await requestJson<{ joinRequestId: string; status: string }>(
         `/api/matches/${matchId}/join-requests`,
@@ -317,6 +404,22 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     checkEq(h1Start.data.hand.honba, 0, 'Hand 1 honba is 0');
     checkEq(h1Start.data.hand.riichiPool, 0, 'Hand 1 riichiPool is 0');
 
+    // Spectators can read the table but cannot change an open hand.
+    const spectator = await registerEmailAccount(`spectator_${runId}@example.com`, '观战者');
+    await pool.query(
+      `INSERT INTO app.match_members (match_id, principal_id, role, status)
+       VALUES ($1, $2, 'spectator', 'active')`,
+      [matchId, spectator.principalId],
+    );
+    const spectatorView = await requestJson(`/api/matches/${matchId}`, { cookie: spectator.cookie });
+    checkEq(spectatorView.status, 200, 'Spectator can read the match');
+    const spectatorMark = await requestJson(`/api/matches/${matchId}/hands/${hand1Id}/marks`, {
+      method: 'POST',
+      cookie: spectator.cookie,
+      body: { seatNo: 0, riichi: true },
+    });
+    checkEq(spectatorMark.status, 403, 'Spectator cannot write a mark');
+
     // Mark seat 0 riichi
     const h1Mark = await requestJson<{ markRevision: number }>(
       `/api/matches/${matchId}/hands/${hand1Id}/marks`,
@@ -340,6 +443,80 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     );
     checkEq(h1MarkRepeat.status, 200, 'Idempotent repeat of mark returns 200');
     checkEq(h1MarkRepeat.data.markRevision, 1, 'Idempotent repeat keeps markRevision at 1');
+
+    // F6 check: stale expectedMarkRevision on marks returns 409 {error:'stale_mark_revision'}
+    const h1StaleMark = await requestJson<{ error: string }>(
+      `/api/matches/${matchId}/hands/${hand1Id}/marks`,
+      {
+        method: 'POST',
+        cookie: acct2.cookie,
+        body: { seatNo: 1, riichi: true, expectedMarkRevision: 0 },
+      },
+    );
+    checkEq(h1StaleMark.status, 409, 'Stale expectedMarkRevision on marks returns 409');
+    checkEq(h1StaleMark.data.error, 'stale_mark_revision', 'Stale mark error is stale_mark_revision');
+
+    // F9b & F9c checks: invalid ResultInput shape and invalid riichiDeclarationDealInSeatNo context return clean 400
+    const badShapePreview = await requestJson<{ error: string; message: string }>(
+      `/api/matches/${matchId}/hands/${hand1Id}/preview`,
+      {
+        method: 'POST',
+        cookie: acct1.cookie,
+        body: { resultInput: { kind: 'ron', winners: [null] } },
+      },
+    );
+    checkEq(badShapePreview.status, 400, 'Invalid winner element in preview returns 400');
+    checkEq(badShapePreview.data.error, 'invalid_winner', 'Invalid winner returns clean error code');
+
+    const badRiichiCancelPreview = await requestJson<{ error: string }>(
+      `/api/matches/${matchId}/hands/${hand1Id}/preview`,
+      {
+        method: 'POST',
+        cookie: acct1.cookie,
+        body: {
+          resultInput: {
+            kind: 'tsumo',
+            winners: [{ seatNo: 0, han: 3, fu: 30 }],
+            riichiDeclarationDealInSeatNo: 0,
+          },
+        },
+      },
+    );
+    checkEq(badRiichiCancelPreview.status, 400, 'riichiDeclarationDealInSeatNo on tsumo returns 400');
+    checkEq(
+      badRiichiCancelPreview.data.error,
+      'invalid_riichi_declaration_deal_in',
+      'riichiDeclarationDealInSeatNo context validation error code matches',
+    );
+
+    const rawFuPreview = await requestJson<{ perSeat: { netPoints: number }[] }>(
+      `/api/matches/${matchId}/hands/${hand1Id}/preview`,
+      {
+        method: 'POST',
+        cookie: acct1.cookie,
+        body: { resultInput: { kind: 'tsumo', winners: [{ seatNo: 0, han: 3, fu: 22 }] } },
+      },
+    );
+    checkEq(rawFuPreview.status, 200, 'Raw 22 fu is accepted and rounded by the engine');
+
+    const tripleRonPreview = await requestJson<{
+      perSeat: { netPoints: number }[];
+      nextHand: { riichiPool: number };
+    }>(`/api/matches/${matchId}/hands/${hand1Id}/preview`, {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: {
+        resultInput: {
+          kind: 'ron',
+          winners: [1, 2, 3].map((seatNo) => ({ seatNo, han: 2, fu: 30, dealInSeatNo: 0 })),
+          riichiDeclarationDealInSeatNo: 0,
+        },
+      },
+    });
+    checkEq(tripleRonPreview.status, 200, 'Declaration-tile triple ron is accepted as an abortive draw');
+    checkEq(tripleRonPreview.data.perSeat.map((seat) => seat.netPoints), [0, 0, 0, 0],
+      'Cancelled declaration does not charge the discarder during abortive triple ron');
+    checkEq(tripleRonPreview.data.nextHand.riichiPool, 0, 'Cancelled declaration does not enter the carryover pool');
 
     // Preview Hand 1 (tsumo by seat 0, 3han 30fu: dealer 3han 30fu tsumo = 2000 all = +6000; seat 0 riichi -1000 +1000 pool = net +6000)
     const h1Input = {
@@ -370,14 +547,15 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     });
     checkEq(h1Stale.status, 409, 'Mismatched confirmedMarkRevision returns 409');
 
-    // Settle Hand 1
+    // Settle Hand 1 with clientEventId
+    const h1ClientEventId = randomUUID();
     const h1Result = await requestJson<{
       perSeat: { seatNo: number; netPoints: number }[];
       nextHand: { dealerSeatNo: number; honba: number; riichiPool: number };
     }>(`/api/matches/${matchId}/hands/${hand1Id}/results`, {
       method: 'POST',
       cookie: acct1.cookie,
-      body: { resultInput: h1Input, confirmedMarkRevision: 1 },
+      body: { resultInput: h1Input, confirmedMarkRevision: 1, clientEventId: h1ClientEventId },
     });
     checkEq(h1Result.status, 200, 'POST Hand 1 results returns 200');
     checkEq(
@@ -386,14 +564,44 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       'Hand 1 settled netPoints match preview',
     );
 
-    // Re-settling Hand 1 must return 409
+    // F7 check: Retry with the SAME clientEventId returns 200 with the ORIGINAL settlement payload
+    const h1IdempotentRetry = await requestJson<{
+      perSeat: { seatNo: number; netPoints: number }[];
+      nextHand: { dealerSeatNo: number; honba: number; riichiPool: number };
+    }>(`/api/matches/${matchId}/hands/${hand1Id}/results`, {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: { resultInput: h1Input, confirmedMarkRevision: 1, clientEventId: h1ClientEventId },
+    });
+    checkEq(h1IdempotentRetry.status, 200, 'Retry with same clientEventId returns 200');
+    checkEq(
+      h1IdempotentRetry.data,
+      h1Result.data,
+      'Retry with same clientEventId returns identical original settlement payload',
+    );
+
+    const reusedIdWithChangedInput = await requestJson<{ error: string }>(
+      `/api/matches/${matchId}/hands/${hand1Id}/results`,
+      {
+        method: 'POST',
+        cookie: acct1.cookie,
+        body: {
+          resultInput: { kind: 'tsumo', winners: [{ seatNo: 1, han: 3, fu: 30 }] },
+          confirmedMarkRevision: 1,
+          clientEventId: h1ClientEventId,
+        },
+      },
+    );
+    checkEq(reusedIdWithChangedInput.status, 409, 'Reusing a result event ID with different input conflicts');
+    checkEq(reusedIdWithChangedInput.data.error, 'client_event_id_conflict', 'Changed retry reports event ID conflict');
+
+    // Re-settling Hand 1 with a different clientEventId must return 409
     const h1Duplicate = await requestJson(`/api/matches/${matchId}/hands/${hand1Id}/results`, {
       method: 'POST',
       cookie: acct1.cookie,
-      body: { resultInput: h1Input, confirmedMarkRevision: 1 },
+      body: { resultInput: h1Input, confirmedMarkRevision: 1, clientEventId: randomUUID() },
     });
-    checkEq(h1Duplicate.status, 409, 'Re-settling Hand 1 returns 409');
-
+    checkEq(h1Duplicate.status, 409, 'Re-settling Hand 1 with different clientEventId returns 409');
     // 8. Hand 2: ron with riichi pool (seat 1 marks riichi -> seat 2 rons seat 3, 3han 30fu)
     const h2Start = await requestJson<{
       hand: {
@@ -618,6 +826,22 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     }
 
     ws.close();
+    const revokedTicket = await requestJson<{ ticket: string }>(
+      `/api/matches/${matchId}/ws-tickets`,
+      { method: 'POST', cookie: acct2.cookie, body: {} },
+    );
+    checkEq(revokedTicket.status, 200, 'Participant can mint a WS ticket before sign-out');
+    const signOut = await requestJson('/api/auth/sign-out', {
+      method: 'POST', cookie: acct2.cookie, body: {},
+    });
+    checkEq(signOut.status, 200, 'Participant signs out before using the WS ticket');
+    const blockedWs = new WebSocket(`${wsBaseUrl}/ws/matches/${matchId}?ticket=${encodeURIComponent(revokedTicket.data.ticket)}`);
+    const closeCode = await new Promise<number>((resolve) => {
+      blockedWs.addEventListener('error', () => { /* A rejected upgrade may emit an error before close. */ });
+      blockedWs.addEventListener('close', (event) => resolve(event.code));
+    });
+    checkEq(closeCode, 1008, 'Signed-out WS ticket closes with policy violation 1008');
+
     return { assertionsPassed };
   } finally {
     await app.close();
