@@ -19,7 +19,7 @@ Web 牌桌在生成签到链接前单独显示房间码；生成后只在二维�
 { "matchId": "<match UUID>", "token": "<signed check-in token>", "expiresAt": "<ISO-8601 timestamp>" }
 ```
 
-令牌采用与 `POST /api/matches/:id/check-in-tokens` 相同的签名与数据库登记方式，有效期 10 分钟。Web 可打开 `/checkin/:matchId?token=<URL-encoded token>`；原生客户端将 `token` 提交给 `POST /api/matches/:id/check-ins`。令牌不代替座位批准：玩家仍须走现有入座申请、房主批准与签到流程。
+令牌采用与 `POST /api/matches/:id/check-in-tokens` 相同的签名与数据库登记方式，有效期 10 分钟。持有签到链接的已登录玩家也可直接使用其中的令牌；Web 打开 `/checkin/:matchId?token=<URL-encoded token>`，原生客户端通过 Universal Links / App Links 或扫码、粘贴链接进入同一流程。令牌属于入桌凭据，不要将房间码或链接当作公开的房间搜索标识。
 
 | 状态 | HTTP | `error` | 说明 |
 | --- | --- | --- | --- |
@@ -30,3 +30,14 @@ Web 牌桌在生成签到链接前单独显示房间码；生成后只在二维�
 | 触发限流 | 429 | `rate_limited` | 读取 `Retry-After` 响应头（秒）后再试 |
 
 错误响应遵循 `{ "error": "...", "message": "..." }` 格式。每个 IP（`req.ip`）每 10 分钟最多 10 次失败的 404 查询，超限后返回 429；另有每 IP 每分钟最多 60 次总查询的硬限制。成功查询不消耗失败额度，但消耗总查询额度。限流在单个 API 进程内维护，进程重启后计数清零。
+
+## 直接选座入桌
+
+访客先用 `GET /api/matches/:id/check-in-seats?token=<URL-encoded token>` 查看准备中牌桌的座位；须已有主体身份和有效令牌，无须先加入牌桌。响应为 `{ "match": { "id": "...", "playerCount": 4, "status": "preparing" }, "seats": [{ "seatNo": 0, "principalId": "...", "displayName": "...", "status": "checked_in" }] }`。API 座位编号从 0 开始，界面从 1 开始显示；已占用座位不可选，展示玩家昵称。
+
+`POST /api/matches/:id/check-ins` 接收 `{ "token": "...", "alias": "可选昵称", "seatNo": 1 }`，一次创建成员身份、占座并签到，返回 `{ "seat": { "seatNo": 1 }, "grantId": "..." }`；不传 `seatNo` 时自动选择编号最小的空座。已签到成员重复调用返回当前座位和授权，不消耗新令牌。并发占座冲突返回 409 `seat_taken`，客户端应刷新座位供访客重选；无空座返回 409 `match_full`，已开局返回 409 `match_already_started`；无效或过期令牌返回 400 `invalid_token` 或 `token_consumed_or_expired`。房间码可重新换取令牌，失效的签到链接须重新分享。
+
+桌主在准备阶段可调用 `POST /api/matches/:id/seats/reassign { "fromSeatNo": 1, "toSeatNo": 2 }`：目标空座时移动，目标已占用时交换，返回 `{ "fromSeatNo": 1, "toSeatNo": 2, "swapped": true }` 并广播牌桌事件。`POST /api/matches/:id/members/:principalId/remove {}` 移出非桌主成员并释放座位，返回 `{ "removed": true }`；桌主不可移出自己。访客的 `POST /api/matches/:id/leave` 保持不变。桌主选起家、确认座次与开局仍按既有流程。
+
+服务端仍保留旧的 `POST /join-requests` 与 `POST /join-requests/:jrId/approve` 命令，但客户端不使用，也不请求待批准列表。
+
