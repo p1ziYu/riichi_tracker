@@ -9,7 +9,21 @@ private final class StubProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         guard let handler = Self.handler else { XCTFail("Missing HTTP fixture"); return }
-        let (status, headers, body) = handler(request)
+        var effective = request
+        if effective.httpBody == nil, let stream = request.httpBodyStream {
+            // URLSession may deliver the POST body only as a stream to URLProtocol;
+            // materialize it so tests can inspect httpBody like a real request.
+            stream.open()
+            var data = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                if count > 0 { data.append(buffer, count: count) } else { break }
+            }
+            stream.close()
+            if !data.isEmpty { effective.httpBody = data }
+        }
+        let (status, headers, body) = handler(effective)
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)

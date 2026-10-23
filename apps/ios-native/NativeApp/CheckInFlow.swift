@@ -379,8 +379,8 @@ struct CheckInScreen: View {
     }
     private func checkIn() async {
         guard !busy, !loadingSeats, let destination, let key = destinationKey,
-              let preview, previewKey == key, preview.match.status == "preparing",
-              selectedSeat.map({ preview.seat(at: $0)?.principalId == nil }) ?? true else { return }
+              let current = preview, previewKey == key, current.match.status == "preparing",
+              selectedSeat.map({ current.seat(at: $0)?.principalId == nil }) ?? true else { return }
         busy = true; notice = nil
         defer { busy = false }
         do {
