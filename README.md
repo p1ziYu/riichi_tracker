@@ -11,7 +11,7 @@
 
 `apps/api` 提供 Better Auth 登录、只读规则模板、牌桌、签到、记分和 WebSocket 同步。创建牌桌时可在选定模板版本上提交 `rulesOverride`（仅本桌生效）；服务端验证规则、生成归属桌主的不可变临时规则版本并绑定快照与哈希，其他账户不能引用该版本。未调整时直接使用模板版本；原有 `config` 创建入口仍兼容旧的 `startPoints`、本场及流局罚点别名。
 
-`apps/web` 展示真实服务端牌桌；服务端进行中的状态为 `in_progress`，`GET /api/matches/:id` 的 `checkedIn` 是签到人数，每座的签到状态位于 `seats[].status`。牌局标记提交可带 `expectedMarkRevision`；结果提交可带 `clientEventId`，原请求重试返回相同结算，不同请求复用该 ID 返回冲突。通过 `pnpm --filter @riichi/api build`、`pnpm --filter @riichi/api test` 和 `pnpm --filter @riichi/web build` 校验。API E2E 使用独立的 PostgreSQL 测试库：先在该库执行 `pnpm --filter @riichi/api exec tsx src/migrate.ts`（用 `DATABASE_URL` 指向测试库），再用相同的 `DATABASE_URL` 执行测试；Better Auth 的表位于 `public`，业务表位于 `app`。
+`apps/api` 的 API 在启动时先创建 `public` 中的 Better Auth 表，再初始化 Better Auth 的 schema 检查；业务表在 `app`，数据库迁移 001–012 仍须手工执行。通过 `pnpm --filter @riichi/api build`、`pnpm --filter @riichi/api test` 和 `pnpm --filter @riichi/web build` 校验。API E2E 只允许显式设置 `DATABASE_URL` 为独立 PostgreSQL 测试库（库名含 `test`、`e2e`、`disp` 或 `tmp`，且不能是 `riichi` 或 `apps/api/.env` 配置的库）；未设置或指向其他库时测试入口在任何数据库连接前拒绝运行。先用该库的 `DATABASE_URL` 执行 `pnpm --filter @riichi/api exec tsx src/migrate.ts`，再用相同的 URL 执行 API 测试。
 每局每座立直标记最多宣言 2 次、取消 1 次（宣言→取消→再宣言后锁定）；只计未标记与已标记之间的转换，不计已标记时的类型修改。此限制固定，不随规则模板变化；需重新标记时由桌主作废并重开本局。`GET /api/matches/:id` 的 `currentHand.seats[].riichiChangeUsage` 提供已用 `{declares,cancels}`；超额更新返回 HTTP 409、`error: riichi_change_budget_exceeded`，标记及 `markRevision` 均不变。
 原生应用向服务端提交 Bearer 会话令牌，明确提供 Bearer 时不会回退到 Cookie 身份；401 会清理对应的本地令牌，退出登录即使网络失败也会清理本地令牌。离线退出无法立即撤销服务器端会话，重新联网前旧令牌仍可能有效。WebSocket 在发出每条事件前重新检查会话和桌内权限，空闲连接不会主动收到撤销通知。
 

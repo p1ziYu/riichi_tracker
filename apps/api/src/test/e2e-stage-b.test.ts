@@ -1,8 +1,10 @@
+// First import must preflight DATABASE_URL before env.js, db.js, or index.js evaluates.
+import { assertE2EDatabaseUrl } from './e2e-db-guard.js';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import '../env.js';
-import { ensureAuthSchema, pool } from '../db.js';
+import { pool } from '../db.js';
 import { buildApp } from '../index.js';
 
 interface ClientSession {
@@ -14,6 +16,7 @@ interface ClientSession {
 }
 
 export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
+  assertE2EDatabaseUrl();
   let assertionsPassed = 0;
   const check = (cond: unknown, message: string): void => {
     assert.ok(cond, message);
@@ -24,7 +27,6 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     assertionsPassed++;
   };
 
-  await ensureAuthSchema();
   const app = await buildApp();
   const address = await app.listen({ port: 0, host: '127.0.0.1' });
   const baseUrl = address.replace('[::1]', '127.0.0.1');
