@@ -82,7 +82,7 @@ final class JoinFlowTests: XCTestCase {
         let input: [String: JSONValue] = ["kind": .string("tsumo")]
         let first = ResultCommand(resultInput: input, confirmedMarkRevision: 8, clientEventId: UUID().uuidString)
         let original = try JSONEncoder().encode(first)
-        let envelope = PendingResultEnvelope(handID: "hand", body: original)
+        let envelope = try PendingResultEnvelope(handID: "hand", body: original, principal: "owner", match: match)
         let restored = try JSONDecoder().decode(PendingResultEnvelope.self, from: JSONEncoder().encode(envelope))
         XCTAssertEqual(restored.body, original)
         XCTAssertEqual(restored.handID, "hand")
@@ -311,5 +311,223 @@ final class JoinFlowTests: XCTestCase {
         XCTAssertEqual(requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer test-bearer")
     }
 
+    private func resultSnapshot(owner: String = "owner", status: String = "in_progress",
+                                marked: Bool = true, handState: String = "open",
+                                revision: Int = 9) throws -> TableSnapshot {
+        try JSONDecoder().decode(TableSnapshot.self, from: Data("""
+        {"match":{"id":"\(match)","status":"\(status)","ownerPrincipalId":"\(owner)",
+          "playerCount":4,"rulesSnapshot":{"doubleYakuman":true,"compositeYakuman":true,"nagashiManganEnabled":true}},
+         "seats":[
+           {"seatNo":0,"principalId":"owner","status":"checked_in"},
+           {"seatNo":1,"principalId":"participant","status":"checked_in"},
+           {"seatNo":2,"principalId":"spectator","status":"assigned"},
+           {"seatNo":3,"status":"empty"}],
+         "currentHand":{"id":"hand-1","state":"\(handState)","markRevision":\(revision),"seats":[
+           {"seatNo":0,"isRiichi":false,"riichiChangeUsage":{"declares":0,"cancels":0}},
+           {"seatNo":1,"isRiichi":\(marked),"riichiChangeUsage":{"declares":1,"cancels":0}},
+           {"seatNo":2,"isRiichi":false,"riichiChangeUsage":{"declares":0,"cancels":0}},
+           {"seatNo":3,"isRiichi":false,"riichiChangeUsage":{"declares":0,"cancels":0}}]}}
+        """.utf8))
+    }
 
+    func testMultiRonYakumanDeclarationInputMatchesAPINumericContract() throws {
+        let snapshot = try resultSnapshot()
+        let hand = try XCTUnwrap(snapshot.currentHand)
+        var draft = ResultDraft()
+        draft.winners = [2, 0]
+        draft.dealIn = 1
+        draft.declarationDealIn = true
+        draft.yakuman[0] = "2"
+        draft.doubleYakuman[2] = "1"
+        let input = try XCTUnwrap(ResultInputBuilder.build(
+            draft, hand: hand, seats: snapshot.seats, rules: snapshot.match.rulesSnapshot))
+        let winners = try XCTUnwrap(input["winners"]?.arrayValue)
+        XCTAssertEqual(winners.count, 2)
+        XCTAssertEqual(winners.map { $0.object?["dealInSeatNo"] }, [.number(1), .number(1)])
+        XCTAssertEqual(winners.map { $0.object?["han"] }, [.number(1), .number(1)])
+        XCTAssertEqual(winners.map { $0.object?["fu"] }, [.number(30), .number(30)])
+        XCTAssertEqual(winners[0].object?["yakumanCount"], .number(2))
+        XCTAssertEqual(winners[1].object?["doubleYakumanCount"], .number(1))
+        XCTAssertEqual(input["riichiDeclarationDealInSeatNo"], .number(1))
+        draft.declarationDealIn = false
+        XCTAssertNil(ResultInputBuilder.build(
+            draft, hand: hand, seats: snapshot.seats, rules: snapshot.match.rulesSnapshot)?["riichiDeclarationDealInSeatNo"])
+        draft.declarationDealIn = true
+        XCTAssertNotNil(OnlineCommandPolicy.previewBinding(handID: hand.id, revision: 9, input: input))
+        XCTAssertNotEqual(OnlineCommandPolicy.previewBinding(handID: hand.id, revision: 9, input: input),
+                          OnlineCommandPolicy.previewBinding(handID: hand.id, revision: 10, input: input))
+        let command = ResultCommand(resultInput: input, confirmedMarkRevision: hand.markRevision,
+                                    clientEventId: UUID().uuidString)
+        XCTAssertTrue(OnlineCommandPolicy.canResend(command, hand: hand, handID: hand.id))
+        XCTAssertFalse(OnlineCommandPolicy.canResend(command, hand: hand, handID: "other-hand"))
+        let old = ResultCommand(resultInput: input, confirmedMarkRevision: 8, clientEventId: command.clientEventId)
+        XCTAssertFalse(OnlineCommandPolicy.canResend(old, hand: hand, handID: hand.id))
+        XCTAssertEqual(OnlineCommandPolicy.pendingResolution(command, handID: hand.id, snapshot: snapshot),
+                       .sameRevision)
+        XCTAssertEqual(OnlineCommandPolicy.pendingResolution(command, handID: hand.id,
+                       snapshot: try resultSnapshot(handState: "settled")), .settled)
+        XCTAssertEqual(OnlineCommandPolicy.pendingResolution(command, handID: hand.id,
+                       snapshot: try resultSnapshot(revision: 10)), .changedRevision)
+        XCTAssertEqual(OnlineCommandPolicy.pendingResolution(command, handID: hand.id,
+                       snapshot: nil), .unverified)
+        draft.dealIn = 2
+        XCTAssertNil(ResultInputBuilder.build(draft, hand: hand, seats: snapshot.seats, rules: snapshot.match.rulesSnapshot))
+        draft.dealIn = 1
+        XCTAssertNil(ResultInputBuilder.build(draft, hand: try XCTUnwrap(resultSnapshot(marked: false).currentHand),
+                                               seats: snapshot.seats, rules: snapshot.match.rulesSnapshot))
+        draft.kind = "tsumo"
+        draft.winners = [0]
+        XCTAssertNil(ResultInputBuilder.build(draft, hand: hand, seats: snapshot.seats, rules: snapshot.match.rulesSnapshot))
+        draft.kind = "ryuukyoku"
+        XCTAssertNil(ResultInputBuilder.build(draft, hand: hand, seats: snapshot.seats, rules: snapshot.match.rulesSnapshot))
+    }
+    func testRonPolicyCapsAndYakumanFieldBounds() throws {
+        let snapshot = try resultSnapshot()
+        let hand = try XCTUnwrap(snapshot.currentHand)
+        var draft = ResultDraft()
+        draft.winners = [0, 2, 3]
+        draft.dealIn = 1
+        var rules = snapshot.match.rulesSnapshot ?? [:]
+        rules["multiRon"] = .string("head_bump")
+        XCTAssertEqual(ResultInputBuilder.ronCap(rules: rules, playerCount: 4), 1)
+        XCTAssertNil(ResultInputBuilder.build(draft, hand: hand, seats: snapshot.seats, rules: rules))
+        rules["multiRon"] = .string("double_ron")
+        XCTAssertEqual(ResultInputBuilder.ronCap(rules: rules, playerCount: 4), 2)
+        XCTAssertNil(ResultInputBuilder.build(draft, hand: hand, seats: snapshot.seats, rules: rules))
+        rules["multiRon"] = .string("allow_all")
+        XCTAssertEqual(ResultInputBuilder.ronCap(rules: rules, playerCount: 4), 3)
+        XCTAssertEqual(ResultInputBuilder.build(draft, hand: hand, seats: snapshot.seats, rules: rules)?["winners"]?.arrayValue?.count, 3)
+        draft.kind = "tsumo"
+        XCTAssertNil(ResultInputBuilder.build(draft, hand: hand, seats: snapshot.seats, rules: rules))
+        draft.kind = "ron"
+        draft.winners = [0]
+        draft.yakuman[0] = "2"
+        rules["compositeYakuman"] = .bool(false)
+        XCTAssertNil(ResultInputBuilder.build(draft, hand: hand, seats: snapshot.seats, rules: rules))
+        XCTAssertNotNil(ResultInputBuilder.fieldErrors(draft, rules: rules)["0.yakuman"])
+        draft.yakuman[0] = "1"
+        draft.doubleYakuman[0] = "11"
+        XCTAssertNotNil(ResultInputBuilder.fieldErrors(draft, rules: rules)["0.doubleYakuman"])
+        draft.doubleYakuman[0] = "0"
+        draft.yakuman[0] = "0"
+        draft.han[0] = "131"
+        draft.fu[0] = "19"
+        XCTAssertNotNil(ResultInputBuilder.fieldErrors(draft, rules: rules)["0.han"])
+        XCTAssertNotNil(ResultInputBuilder.fieldErrors(draft, rules: rules)["0.fu"])
+    }
+
+    func testOnlineInputRejectsDuplicateWinnersOutOfRangeAndDisabledDoubleYakuman() throws {
+        let snapshot = try resultSnapshot()
+        let hand = try XCTUnwrap(snapshot.currentHand)
+        var draft = ResultDraft()
+        draft.winners = [0, 0]
+        XCTAssertNil(ResultInputBuilder.build(draft, hand: hand, seats: snapshot.seats, rules: snapshot.match.rulesSnapshot))
+        draft.winners = [0, 4]
+        XCTAssertNil(ResultInputBuilder.build(draft, hand: hand, seats: snapshot.seats, rules: snapshot.match.rulesSnapshot))
+        draft.winners = [0]
+        draft.doubleYakuman[0] = "1"
+        XCTAssertNil(ResultInputBuilder.build(draft, hand: hand, seats: snapshot.seats, rules: [:]))
+        draft.doubleYakuman[0] = "0"
+        draft.han[0] = "131"
+        XCTAssertNil(ResultInputBuilder.build(draft, hand: hand, seats: snapshot.seats, rules: snapshot.match.rulesSnapshot))
+    }
+
+    func testPrincipalRoleAndRevocationPredicate() throws {
+        let snapshot = try resultSnapshot()
+        XCTAssertTrue(OnlineCommandPolicy.canWrite(snapshot, principal: "participant"))
+        XCTAssertTrue(OnlineCommandPolicy.canWrite(snapshot, principal: "owner"))
+        XCTAssertFalse(OnlineCommandPolicy.canWrite(snapshot, principal: "spectator"))
+        XCTAssertFalse(OnlineCommandPolicy.canWrite(snapshot, principal: "missing"))
+        XCTAssertFalse(OnlineCommandPolicy.canWrite(snapshot, principal: nil))
+        XCTAssertFalse(OnlineCommandPolicy.canConfirmSettlement(snapshot, principal: "owner"))
+        XCTAssertTrue(OnlineCommandPolicy.mustClearVisibleTable(APIError(status: 403, message: "revoked")))
+        XCTAssertTrue(OnlineCommandPolicy.mustClearVisibleTable(APIError(status: 401, message: "expired")))
+        XCTAssertFalse(OnlineCommandPolicy.mustClearVisibleTable(APIError(status: 409, message: "conflict")))
+        let conflict = APIError(status: 409, code: "client_event_id_conflict", message: "Conflict")
+        XCTAssertTrue(OnlineCommandPolicy.resultError(conflict).contains("请求 ID"))
+        let stale = APIError(status: 409, code: "mark_revision_mismatch", message: "Stale")
+        XCTAssertTrue(OnlineCommandPolicy.resultError(stale).contains("草稿已保留"))
+        let finished = try resultSnapshot(status: "finished")
+        XCTAssertFalse(OnlineCommandPolicy.canWrite(finished, principal: "owner"))
+        XCTAssertTrue(OnlineCommandPolicy.canConfirmSettlement(finished, principal: "owner"))
+        XCTAssertFalse(OnlineCommandPolicy.canConfirmSettlement(finished, principal: "participant"))
+        let preparing = try resultSnapshot(status: "preparing")
+        let removed = try JSONDecoder().decode(TableSnapshot.self, from: Data("""
+        {"match":{"id":"\(match)","status":"preparing","ownerPrincipalId":"owner","playerCount":4},
+         "seats":[{"seatNo":0,"principalId":"owner","status":"checked_in"},
+                  {"seatNo":1,"status":"empty"}]}
+        """.utf8))
+        XCTAssertTrue(OnlineCommandPolicy.wasRemoved(previous: preparing, updated: removed,
+                                                       status: nil, principal: "participant"))
+        XCTAssertTrue(OnlineCommandPolicy.wasRemoved(previous: preparing, updated: nil,
+                                                       status: 403, principal: "participant"))
+        XCTAssertFalse(OnlineCommandPolicy.wasRemoved(previous: preparing, updated: removed,
+                                                        status: nil, principal: "owner"))
+        XCTAssertFalse(OnlineCommandPolicy.wasRemoved(previous: preparing, updated: nil,
+                                                        status: 403, principal: "spectator-unknown"))
+        XCTAssertFalse(OnlineCommandPolicy.wasRemoved(previous: snapshot, updated: nil,
+                                                        status: 403, principal: "participant"))
+    }
+
+    func testPendingFilePreservesOriginalBytesAndPrincipalDraftIsolation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = OnlinePrivateStore(root: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let raw = Data(#"{"clientEventId":"stable-id","confirmedMarkRevision":9,"resultInput":{"winners":[],"kind":"ryuukyoku"}}"#.utf8)
+        try store.savePending(raw, handID: "hand-1", principal: "owner", match: match)
+        XCTAssertEqual(try store.loadPending(principal: "owner", match: match)?.body, raw)
+        let record = try XCTUnwrap(store.loadPending(principal: "owner", match: match))
+        XCTAssertEqual(record.principalId, "owner")
+        XCTAssertEqual(record.matchId, match)
+        XCTAssertEqual(record.handID, "hand-1")
+        XCTAssertEqual(record.rawBodyString, String(data: raw, encoding: .utf8))
+        XCTAssertEqual(record.clientEventId, "stable-id")
+        try store.savePending(raw, handID: "hand-1", principal: "owner", match: match)
+        XCTAssertThrowsError(try store.savePending(Data("{}".utf8), handID: "hand-1", principal: "owner", match: match))
+        XCTAssertNil(try store.loadPending(principal: "other", match: match))
+        var draft = ResultDraft()
+        draft.winners = [0, 2]
+        draft.han[2] = "8"
+        try store.saveDraft(draft, principal: "owner", match: match, hand: "hand-1")
+        XCTAssertEqual(try store.loadDraft(principal: "owner", match: match, hand: "hand-1"), draft)
+        XCTAssertNil(try store.loadDraft(principal: "other", match: match, hand: "hand-1"))
+        XCTAssertNil(try store.loadDraft(principal: "owner", match: "different", hand: "hand-1"))
+        try store.clearPrincipal("owner")
+        XCTAssertNil(try store.loadPending(principal: "owner", match: match))
+        XCTAssertNil(try store.loadDraft(principal: "owner", match: match, hand: "hand-1"))
+    }
+
+    @MainActor func testRawResendUsesExactJournalBody() async throws {
+        var bodies: [Data] = []
+        let client = client { request in
+            bodies.append(request.httpBody ?? Data())
+            return (200, [:], Data(#"{"perSeat":[],"nextHand":{"roundWind":"E","roundNumber":2,"dealerSeatNo":0,"honba":0,"riichiPool":0}}"#.utf8))
+        }
+        let body = try JSONEncoder().encode(ResultCommand(
+            resultInput: ["kind": .string("ryuukyoku"), "winners": .array([])],
+            confirmedMarkRevision: 9, clientEventId: UUID().uuidString))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = OnlinePrivateStore(root: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try store.savePending(body, handID: "hand-1", principal: "owner", match: match)
+        let restored = try XCTUnwrap(store.loadPending(principal: "owner", match: match))
+        let _: PaymentPreviewDTO = try await client.postRaw("/api/matches/\(match)/hands/\(restored.handID)/results", data: restored.body)
+        XCTAssertEqual(bodies, [body])
+    }
+
+    @MainActor func testHistoryIsEarliestBoundedSummaryNotReplay() async throws {
+        var path: String?
+        let client = client { request in
+            path = request.url.map { $0.path + ($0.query.map { "?\($0)" } ?? "") }
+            return (200, [:], Data("""
+            [{"handId":"hand-1","handNo":1,"roundWind":"E","roundNumber":1,
+              "dealerSeatNo":0,"honba":0,"kind":"ron",
+              "perSeat":[{"seatNo":0,"netPoints":3900},{"seatNo":1,"netPoints":-3900}]}]
+            """.utf8))
+        }
+        let hands: [HandDTO] = try await client.get("/api/matches/\(match)/hands?limit=100")
+        XCTAssertEqual(path, "/api/matches/\(match)/hands?limit=100")
+        XCTAssertEqual(hands.first?.handNo, 1)
+        XCTAssertEqual(hands.first?.perSeat.first?.netPoints, 3900)
+    }
 }

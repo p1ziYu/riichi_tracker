@@ -9,6 +9,15 @@ struct IchihimeNativeApp: App {
     @State private var showingCheckIn = false
     @State private var selectedTab = 0
     @State private var lobbyPath: [String] = []
+    @State private var historyPath: [String] = []
+    @State private var removalNotice = false
+
+    private func leaveRevokedTable() {
+        lobbyPath = []
+        historyPath = []
+        selectedTab = 0
+        removalNotice = true
+    }
 
     init() {
         let appearance = UINavigationBarAppearance()
@@ -33,17 +42,17 @@ struct IchihimeNativeApp: App {
                 } else if session.authenticated {
                     TabView(selection: $selectedTab) {
                         NavigationStack(path: $lobbyPath) {
-                            MatchListScreen(session: session, lobby: true)
+                            MatchListScreen(session: session, lobby: true, onRevoked: leaveRevokedTable)
                                 .navigationDestination(for: String.self) { id in
-                                    TableScreen(session: session, matchId: id)
+                                    TableScreen(session: session, matchId: id, onRevoked: leaveRevokedTable)
                                 }
                         }
                         .tabItem { Label("大厅", systemImage: "house") }
                         .tag(0)
-                        NavigationStack {
-                            MatchListScreen(session: session, lobby: false)
+                        NavigationStack(path: $historyPath) {
+                            MatchListScreen(session: session, lobby: false, onRevoked: leaveRevokedTable)
                                 .navigationDestination(for: String.self) { id in
-                                    TableScreen(session: session, matchId: id)
+                                    TableScreen(session: session, matchId: id, onRevoked: leaveRevokedTable)
                                 }
                         }
                         .tabItem { Label("战绩", systemImage: "list.bullet.rectangle") }
@@ -56,6 +65,9 @@ struct IchihimeNativeApp: App {
                         }
                         .tabItem { Label("我的", systemImage: "person.crop.circle") }
                         .tag(2)
+                    }
+                    .alert("你已被房主移出牌桌", isPresented: $removalNotice) {
+                        Button("知道了", role: .cancel) {}
                     }
                 } else {
                     NavigationStack { AuthScreen(session: session) }

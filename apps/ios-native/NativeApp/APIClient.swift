@@ -315,9 +315,13 @@ final class AppSession: ObservableObject {
     func signOut() async {
         generation += 1
         let current = generation
+        let oldPrincipal = principalID
         identity = .localOnly
         profile = nil
-        PendingResultStore.clearAll()
+        if let oldPrincipal {
+            do { try OnlinePrivateStore.live.clearPrincipal(oldPrincipal) }
+            catch { sessionError = "本机在线草稿清理失败：\(error.localizedDescription)" }
+        }
         let revoked = await api.signOut()
         if !revoked, generation == current {
             sessionError = "本机凭据已清除；网络请求失败，服务器会话尚未确认撤销。"

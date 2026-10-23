@@ -290,13 +290,15 @@ struct AuthScreen: View {
     }
 }
 
-struct MatchListScreen: View {
+@MainActor struct MatchListScreen: View {
     @ObservedObject var session: AppSession
     let lobby: Bool
+    let onRevoked: @MainActor () -> Void
     @State private var matches: [MatchSummary]?
     @State private var templates: [TemplateDTO] = []
     @State private var loading = false
     @State private var error: String?
+    @State private var pendingRefresh = false
     @State private var showCreate = false
     @State private var createdMatchID: String?
 
@@ -415,6 +417,12 @@ struct MatchListScreen: View {
         .navigationTitle(lobby ? "大厅" : "战绩")
         .refreshable { await refresh() }
         .task { await refresh() }
+        .onChange(of: session.generationID) { _, _ in
+            matches = nil
+            templates = []
+            createdMatchID = nil
+            Task { await refresh() }
+        }
         .sheet(isPresented: $showCreate) {
             NavigationStack {
                 RulesWizard(api: session.api) { id in
@@ -425,23 +433,40 @@ struct MatchListScreen: View {
             }
         }
         .navigationDestination(isPresented: Binding(get: { createdMatchID != nil }, set: { if !$0 { createdMatchID = nil } })) {
-            if let createdMatchID { TableScreen(session: session, matchId: createdMatchID) }
+            if let createdMatchID { TableScreen(session: session, matchId: createdMatchID, onRevoked: {
+                self.createdMatchID = nil
+                onRevoked()
+            }) }
         }
     }
 
     @MainActor private func refresh() async {
-        guard !loading else { return }
+        guard !loading else { pendingRefresh = true; return }
         loading = true
         error = nil
-        defer { loading = false }
+        let generation = session.generationID
+        defer {
+            loading = false
+            if pendingRefresh {
+                pendingRefresh = false
+                Task { await refresh() }
+            }
+        }
         do {
             let updated: [MatchSummary] = try await session.api.get("/api/matches?mine=1")
+            guard generation == session.generationID else { return }
             matches = updated
         } catch {
+            guard generation == session.generationID else { return }
+            if let failure = error as? APIError, OnlineCommandPolicy.mustClearVisibleTable(failure) {
+                matches = nil
+                templates = []
+            }
             self.error = error.localizedDescription
         }
         // Templates are optional metadata; the rule details still show their honest unknown values on failure.
-        if let updated: [TemplateDTO] = try? await session.api.get("/api/rulesets/templates") {
+        if let updated: [TemplateDTO] = try? await session.api.get("/api/rulesets/templates"),
+           generation == session.generationID {
             templates = updated
         }
     }
@@ -450,6 +475,7 @@ struct MatchListScreen: View {
 @MainActor struct TableScreen: View {
     @ObservedObject var session: AppSession
     let matchId: String
+    let onRevoked: @MainActor () -> Void
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var live: LiveUpdates
     @State private var snapshot: TableSnapshot?
@@ -461,10 +487,12 @@ struct MatchListScreen: View {
     @State private var error: String?
     @State private var visible = false
     @State private var requestGeneration = 0
+    @State private var revoked = false
 
-    init(session: AppSession, matchId: String) {
+    init(session: AppSession, matchId: String, onRevoked: @escaping @MainActor () -> Void) {
         self.session = session
         self.matchId = matchId
+        self.onRevoked = onRevoked
         _live = StateObject(wrappedValue: LiveUpdates(api: session.api))
     }
 
@@ -572,7 +600,9 @@ struct MatchListScreen: View {
                 }
                 OnlineTableActions(session: session, snapshot: snapshot) { await refresh() }
             }
-            Section(hands.map { "局记录 · 最早的 \($0.count) 局（按对局顺序）" } ?? "局记录 · 读取中") {
+            Section("局历史") {
+                Text("显示最早的已结算局摘要（最多 100 局），非完整牌谱回放；无后续分页或原始输入。")
+                    .font(.footnote).foregroundStyle(.secondary)
                 if let hands {
                     if hands.isEmpty { Text("暂无牌局记录") }
                     ForEach(hands.sorted { $0.handNo < $1.handNo }, id: \.handNo) { hand in
@@ -621,6 +651,10 @@ struct MatchListScreen: View {
         .onChange(of: session.identity) { _, identity in
             if identity == .localOnly { clearPrivateState() }
         }
+        .onChange(of: session.generationID) { _, _ in
+            clearPrivateState()
+            if session.authenticated && visible { Task { await refresh() } }
+        }
     }
 
     private func clearPrivateState() {
@@ -630,6 +664,16 @@ struct MatchListScreen: View {
         settlement = nil
         templates = []
         live.stop()
+    }
+    private func handleRevocation(updated: TableSnapshot? = nil, status: Int? = nil) -> Bool {
+        guard !revoked, OnlineCommandPolicy.wasRemoved(previous: snapshot, updated: updated,
+            status: status, principal: session.principalID) else { return false }
+        revoked = true
+        visible = false
+        pendingRefresh = false
+        clearPrivateState()
+        onRevoked()
+        return true
     }
 
     private func connect() {
@@ -657,30 +701,47 @@ struct MatchListScreen: View {
         do {
             let updated: TableSnapshot = try await session.api.get(path)
             guard !Task.isCancelled, current == requestGeneration, principalGeneration == session.generationID else { return }
+            if handleRevocation(updated: updated) { return }
             snapshot = updated
             settlement = nil
+            hands = nil
             do {
                 let updatedHands: [HandDTO] = try await session.api.get("\(path)/hands?limit=100")
                 if current == requestGeneration, principalGeneration == session.generationID { hands = updatedHands }
             } catch {
-                if current == requestGeneration { self.error = "读取局记录失败：\(error.localizedDescription)" }
+                if current == requestGeneration, principalGeneration == session.generationID {
+                    if let failure = error as? APIError {
+                        if handleRevocation(status: failure.status) { return }
+                        if OnlineCommandPolicy.mustClearVisibleTable(failure) { clearPrivateState() }
+                    }
+                    self.error = "读取局记录失败：\(error.localizedDescription)"
+                }
             }
+            guard current == requestGeneration, principalGeneration == session.generationID else { return }
             if isFinished(updated.match.status) {
                 do {
                     let updatedSettlement: SettlementPreview = try await session.api.get("\(path)/settlement/preview")
                     if current == requestGeneration, principalGeneration == session.generationID { settlement = updatedSettlement }
                 } catch {
-                    if current == requestGeneration { self.error = "读取终局成绩失败：\(error.localizedDescription)" }
+                    if current == requestGeneration, principalGeneration == session.generationID {
+                        if let failure = error as? APIError {
+                            if handleRevocation(status: failure.status) { return }
+                            if OnlineCommandPolicy.mustClearVisibleTable(failure) { clearPrivateState() }
+                        }
+                        self.error = "读取终局成绩失败：\(error.localizedDescription)"
+                    }
                 }
             }
+            guard current == requestGeneration, principalGeneration == session.generationID else { return }
             if let updatedTemplates: [TemplateDTO] = try? await session.api.get("/api/rulesets/templates"),
                current == requestGeneration, principalGeneration == session.generationID {
                 templates = updatedTemplates
             }
         } catch {
-            guard current == requestGeneration else { return }
-            if let failure = error as? APIError, failure.status == 401 || failure.status == 403 {
-                clearPrivateState()
+            guard current == requestGeneration, principalGeneration == session.generationID else { return }
+            if let failure = error as? APIError {
+                if handleRevocation(status: failure.status) { return }
+                if OnlineCommandPolicy.mustClearVisibleTable(failure) { clearPrivateState() }
             }
             self.error = error.localizedDescription
         }
