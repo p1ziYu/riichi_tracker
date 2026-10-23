@@ -27,6 +27,7 @@ enum EngineBridgeCheck {
             throw APIError(status: nil, message: "引擎预览输出格式无效")
         }
         return payment
+    }
 
     static func runSample() async -> String {
         do {

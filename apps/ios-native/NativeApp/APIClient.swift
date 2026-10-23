@@ -211,7 +211,7 @@ final class APIClient {
             // A damaged saved credential must not prevent an explicit fresh login.
             token = nil
         } else {
-            do { token = bearerOverride ?? (try store.load()) }
+            do { token = try bearerOverride ?? store.load() }
             catch {
                 onSessionExpired?()
                 throw error

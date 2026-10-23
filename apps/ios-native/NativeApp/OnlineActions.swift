@@ -372,7 +372,7 @@ struct OnlineTableActions: View {
             pendingBody = saved?.body
             pendingHand = saved?.handID
             pendingLoaded = true
-        } catch { error = error.localizedDescription }
+        } catch let loadError { error = loadError.localizedDescription }
     }
     private func clearPending() {
         if let principal = session.principalID { PendingResultStore.clear(principal: principal, match: matchID) }
