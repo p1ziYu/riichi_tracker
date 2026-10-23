@@ -1,6 +1,7 @@
 package com.p1ziyu.riichitracker.p1
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -11,8 +12,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 
-class ApiClient(private val store: TokenStore, val client: OkHttpClient = OkHttpClient()) {
+class ApiFailure(val status: Int, val code: String?, val retryAfterSeconds: Long?, message: String) : IOException(message)
+class ApiClient(private val store: TokenStore, val client: OkHttpClient = OkHttpClient.Builder()
+    .pingInterval(20, TimeUnit.SECONDS).build()) {
     val json = Json { ignoreUnknownKeys = true }
     private val origin = BuildConfig.API_BASE_URL.trimEnd('/')
     val wsOrigin: String get() = if (origin.startsWith("https://"))
@@ -20,7 +24,6 @@ class ApiClient(private val store: TokenStore, val client: OkHttpClient = OkHttp
 
     suspend fun get(path: String): String = call(path)
     suspend fun post(path: String, body: String = "{}"): String = call(path, body)
-
     private suspend fun call(path: String, body: String? = null): String = withContext(Dispatchers.IO) {
         val token = store.load()
         val builder = Request.Builder().url("$origin$path")
@@ -33,9 +36,11 @@ class ApiClient(private val store: TokenStore, val client: OkHttpClient = OkHttp
                 if (!response.isSuccessful) {
                     if (response.code == 401 && token != null && store.load() == token) store.clear()
                     val detail = runCatching { json.decodeFromString<ApiErrorDto>(text) }.getOrNull()
-                    throw IOException(detail?.message ?: detail?.error ?: text.ifBlank { "请求失败 (${response.code})" })
+                    throw ApiFailure(response.code, detail?.error, response.header("Retry-After")?.toLongOrNull(),
+                        detail?.message ?: detail?.error ?: text.ifBlank { "请求失败 (${response.code})" })
                 }
-                if (path == "/api/auth/sign-in/email" || path == "/api/auth/sign-up/email") {
+                if (path == "/api/auth/sign-in/email" || path == "/api/auth/sign-up/email" ||
+                    path == "/api/auth/sign-in/anonymous") {
                     val bearer = response.header("set-auth-token")
                         ?: runCatching { json.parseToJsonElement(text).jsonObject["token"]?.jsonPrimitive?.content }.getOrNull()
                     if (bearer.isNullOrBlank()) throw IOException("服务端未返回登录凭据")
@@ -43,6 +48,7 @@ class ApiClient(private val store: TokenStore, val client: OkHttpClient = OkHttp
                 }
                 text
             }
+        } catch (e: CancellationException) { throw e
         } catch (e: IOException) { throw e }
         catch (e: Exception) { throw IOException("网络连接失败", e) }
     }
@@ -52,6 +58,7 @@ class ApiClient(private val store: TokenStore, val client: OkHttpClient = OkHttp
         val payload = if (name == null) AuthPayload(email, password) else AuthPayload(email, password, name)
         post(path, json.encodeToString(payload))
     }
+    suspend fun anonymous() { post("/api/auth/sign-in/anonymous") }
 
     suspend fun signOut() {
         try { post("/api/auth/sign-out") }

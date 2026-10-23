@@ -1,10 +1,7 @@
 package com.p1ziyu.riichitracker.p1
 
 import android.content.Intent
-import android.content.ActivityNotFoundException
-import android.net.Uri
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
@@ -34,6 +31,7 @@ import kotlinx.serialization.Serializable
 @Serializable private object Lobby
 @Serializable private object History
 @Serializable private object Profile
+@Serializable private object Create
 @Serializable private data class Table(val id: String)
 
 class MainActivity : ComponentActivity() {
@@ -46,34 +44,34 @@ class MainActivity : ComponentActivity() {
         setContent {
             BrandTheme {
                 val state by model.ui.collectAsState()
-                if (incomingLink != null) {
-                    CheckInScreen(incomingLink, this::openExternalBrowser)
-                    androidx.activity.compose.BackHandler { incomingLink = null }
-                } else if (!state.authenticated) {
-                    AuthScreen(state.registering, state.authBusy, state.authError,
-                        onSubmit = model::login, onModeChange = model::mode)
-                } else {
-                    MainContent(model, state) { incomingLink = "" }
+                when {
+                    state.session == SessionMode.RESTORING -> {
+                        androidx.compose.foundation.layout.Column {
+                            Text(state.authError ?: "正在恢复账户身份…")
+                            if (state.authError != null) {
+                                androidx.compose.material3.Button(onClick = model::retryRestore) { Text("重试恢复") }
+                                androidx.compose.material3.TextButton(onClick = model::abandonRestore) { Text("放弃本机凭据并重新登录") }
+                            }
+                        }
+                    }
+                    state.session == SessionMode.LOCAL_ONLY -> {
+                        androidx.compose.foundation.layout.Column {
+                            Text("本地无身份 · 当前版本尚未提供离线记分；不会创建在线访客身份。")
+                            androidx.compose.material3.Button(onClick = model::online) { Text("进入在线登录") }
+                        }
+                    }
+                    state.session == SessionMode.SIGNED_OUT -> {
+                        AuthScreen(state.registering, state.authBusy, state.authError,
+                            onSubmit = model::login, onModeChange = model::mode,
+                            onGuest = model::guest, onLocal = model::localOnly)
+                    }
+                    incomingLink != null -> {
+                        CheckInScreen(incomingLink, state, model) { incomingLink = null }
+                        androidx.activity.compose.BackHandler { incomingLink = null }
+                    }
+                    else -> MainContent(model, state) { incomingLink = "" }
                 }
             }
-        }
-    }
-
-    private fun openExternalBrowser(url: String) {
-        val generic = Intent(Intent.ACTION_VIEW, Uri.parse("https://example.org/"))
-            .addCategory(Intent.CATEGORY_BROWSABLE)
-        val browser = packageManager.queryIntentActivities(generic, 0)
-            .firstOrNull { it.activityInfo.packageName != packageName }
-        if (browser == null) {
-            Toast.makeText(this, "未找到可打开网页的浏览器", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val external = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-            .addCategory(Intent.CATEGORY_BROWSABLE)
-            .setClassName(browser.activityInfo.packageName, browser.activityInfo.name)
-        try { startActivity(external) }
-        catch (_: ActivityNotFoundException) {
-            Toast.makeText(this, "无法打开浏览器", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -90,8 +88,14 @@ private fun MainContent(model: AppViewModel, state: AppState, onPasteLink: () ->
     val entry by nav.currentBackStackEntryAsState()
     val route = entry?.destination?.route.orEmpty()
     LaunchedEffect(Unit) { model.loadList() }
+    LaunchedEffect(state.createdMatchId) {
+        state.createdMatchId?.let { id ->
+            model.clearCreatedMatch()
+            nav.navigate(Table(id)) { launchSingleTop = true }
+        }
+    }
     Scaffold(bottomBar = {
-        if (!route.contains("Table")) NavigationBar {
+        if (!route.contains("Table") && !route.contains("Create")) NavigationBar {
             listOf(Triple("大厅", Lobby, route.contains("Lobby")),
                 Triple("战绩", History, route.contains("History")),
                 Triple("我的", Profile, route.contains("Profile"))).forEach { (title, destination, selected) ->
@@ -108,11 +112,16 @@ private fun MainContent(model: AppViewModel, state: AppState, onPasteLink: () ->
         NavHost(navController = nav, startDestination = Lobby, modifier = Modifier.padding(padding)) {
             composable<Lobby> {
                 MatchListScreen(true, state.matches, state.templates, state.listLoading, state.listError,
-                    state.listLoading, model::loadList, { nav.navigate(Table(it)) }, { nav.navigate(History) })
+                    state.listLoading, model::loadList, { nav.navigate(Table(it)) }, { nav.navigate(History) },
+                    { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName)
             }
             composable<History> {
                 MatchListScreen(false, state.matches, state.templates, state.listLoading, state.listError,
-                    state.listLoading, model::loadList, { nav.navigate(Table(it)) }, { nav.navigate(History) })
+                    state.listLoading, model::loadList, { nav.navigate(Table(it)) }, { nav.navigate(History) },
+                    { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName)
+            }
+            composable<Create> {
+                CreateScreen(state.templates, state.busy, state.actionError, model::createMatch) { nav.popBackStack() }
             }
             composable<Profile> {
                 LaunchedEffect(Unit) { model.loadProfile() }
@@ -122,13 +131,18 @@ private fun MainContent(model: AppViewModel, state: AppState, onPasteLink: () ->
             composable<Table> { stack ->
                 val id = stack.toRoute<Table>().id
                 val lifecycle = LocalLifecycleOwner.current
-                LaunchedEffect(id) {
+                androidx.compose.runtime.DisposableEffect(id) {
                     model.openTable(id)
-                    try { lifecycle.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { model.liveWhileVisible(id) } }
-                    finally { model.closeTable() }
+                    onDispose { model.closeTable() }
+                }
+                LaunchedEffect(id, state.connectionEpoch) {
+                    lifecycle.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                        model.refreshTable(id)
+                        model.liveWhileVisible(id)
+                    }
                 }
                 TableScreen(state.table, state.hands, state.settlement, state.templates,
-                    state.tableLoading, state.tableError, state.connection, { model.refreshTable(id) })
+                    state.tableLoading, state.tableError, state.connection, { model.refreshTable(id) }, state, model, id)
             }
         }
     }

@@ -1,7 +1,7 @@
 package com.p1ziyu.riichitracker.p1
 
-import java.text.ParsePosition
-import java.text.SimpleDateFormat
+import java.time.OffsetDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.TimeZone
 
@@ -78,18 +78,12 @@ internal fun windLabel(wind: String?): String = when (wind?.uppercase(Locale.ROO
     else -> "未提供"
 }
 
-private val fraction = Regex("\\.\\d+(?=Z$|[+-]\\d{2}:\\d{2}$)")
-
+/** Parse the API's ISO timestamp as an instant; never render UTC as if it were local wall time. */
 internal fun localMatchTime(value: String?, timeZone: TimeZone = TimeZone.getDefault()): String {
     if (value.isNullOrBlank()) return "时间未提供"
-    val normalized = value.replace(fraction, "")
-    val input = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.ROOT).apply {
-        isLenient = false
-    }
-    val position = ParsePosition(0)
-    val date = input.parse(normalized, position)
-    if (date == null || position.index != normalized.length) return "时间未提供"
-    return SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.ROOT).apply {
-        this.timeZone = timeZone
-    }.format(date)
+    return runCatching {
+        OffsetDateTime.parse(value, DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+            .atZoneSameInstant(timeZone.toZoneId())
+            .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ROOT))
+    }.getOrDefault("时间未提供")
 }

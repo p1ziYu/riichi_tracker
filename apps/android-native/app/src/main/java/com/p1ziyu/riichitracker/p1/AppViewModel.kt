@@ -13,41 +13,83 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.*
+import kotlinx.serialization.encodeToString
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.io.IOException
 import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
-private fun Throwable.chineseMessage(): String = message ?: "网络连接失败，请重试"
+private fun Throwable.chineseMessage(): String = when (this) {
+    is ApiFailure -> when (code) {
+        "check_in_not_approved" -> "尚无已获批准的座位。签到必须由桌主先批准；当前客户端不提供审批界面。"
+        "rate_limited" -> "查询过于频繁，请${retryAfterSeconds ?: "稍后"}秒后重试"
+        else -> message ?: "请求失败（$status）"
+    }
+    else -> message ?: "网络连接失败，请重试"
+}
 
+enum class SessionMode { RESTORING, SIGNED_OUT, ACCOUNT, ONLINE_GUEST, LOCAL_ONLY }
+data class PendingResult(val matchId: String, val handId: String, val body: String)
+data class BoundPreview(val handId: String, val revision: Long, val input: String, val output: PaymentPreview)
+data class BoundTerminal(val version: Long, val output: SettlementPreview)
 data class AppState(
-    val authenticated: Boolean = false, val registering: Boolean = false,
+    val session: SessionMode = SessionMode.SIGNED_OUT, val registering: Boolean = false,
     val authBusy: Boolean = false, val authError: String? = null,
     val matches: List<MatchSummary>? = null, val listLoading: Boolean = false,
     val listError: String? = null, val templates: List<TemplateDto> = emptyList(),
     val table: TableSnapshot? = null, val hands: List<HandDto>? = null,
     val settlement: SettlementPreview? = null, val tableLoading: Boolean = false,
-    val tableError: String? = null, val connection: String = "手动刷新",
+    val tableError: String? = null, val connection: String = "手动刷新", val connectionEpoch: Int = 0,
     val profile: MeResponse? = null, val profileError: String? = null,
-    val diagnostic: String? = null,
+    val diagnostic: String? = null, val busy: Boolean = false, val actionError: String? = null,
+    val invitation: CheckInTokenDto? = null, val joinError: String? = null, val joinedSeat: Int? = null,
+    val preview: BoundPreview? = null, val terminal: BoundTerminal? = null,
+    val pendingResult: PendingResult? = null, val createdMatchId: String? = null,
 )
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val store = TokenStore(application)
     private val api = ApiClient(store)
-    private val state = MutableStateFlow(AppState(authenticated = store.load() != null))
+    private val pendingStore = PendingResultStore(application)
+    private val state = MutableStateFlow(AppState(
+        session = if (store.load() != null) SessionMode.RESTORING else SessionMode.SIGNED_OUT,
+        authError = if (store.credentialInvalidated) "本机加密凭据不可读取，请重新登录" else null))
     val ui = state.asStateFlow()
     private val triggers = Channel<String>(Channel.CONFLATED)
     private var tableId: String? = null
+    private var generation = 0
 
     init {
         viewModelScope.launch {
-            for (id in triggers) if (tableId == id) loadTable(id, initial = false)
+            for (id in triggers) if (tableId == id) loadTable(id)
         }
+        if (state.value.session == SessionMode.RESTORING) restore()
+    }
+    private fun restore() {
+        val at = generation
+        viewModelScope.launch {
+            try {
+                val me = api.json.decodeFromString<MeResponse>(api.get("/api/me"))
+                if (at == generation) state.value = state.value.copy(
+                    session = if (me.principal.type == "guest") SessionMode.ONLINE_GUEST else SessionMode.ACCOUNT,
+                    profile = me, authError = null)
+            } catch (e: Exception) {
+                if (at == generation) state.value = state.value.copy(
+                    session = if (store.load() == null) SessionMode.SIGNED_OUT else SessionMode.RESTORING,
+                    authError = if (store.load() == null) "登录已失效，请重新认证" else "恢复会话失败：${e.chineseMessage()}")
+            }
+        }
+    }
+    fun retryRestore() { if (store.load() != null) restore() else state.value = AppState(authError = "登录已失效，请重新认证") }
+    fun abandonRestore() {
+        store.clear()
+        pendingStore.clear()
+        generation++
+        state.value = AppState()
     }
 
     fun mode(register: Boolean) { state.value = state.value.copy(registering = register, authError = null) }
@@ -57,46 +99,70 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             state.value = state.value.copy(authBusy = true, authError = null)
             try {
                 api.signIn(email.trim(), password, name?.trim())
-                api.json.decodeFromString<MeResponse>(api.get("/api/me"))
-                state.value = state.value.copy(authenticated = true, authBusy = false)
+                val me = api.json.decodeFromString<MeResponse>(api.get("/api/me"))
+                generation++
+                state.value = AppState(session = SessionMode.ACCOUNT, profile = me)
             } catch (error: Exception) {
-                state.value = state.value.copy(authBusy = false, authError = "登录或注册失败：${error.chineseMessage()}")
+                state.value = state.value.copy(session = if (store.load() != null) SessionMode.RESTORING else SessionMode.SIGNED_OUT,
+                    authBusy = false, authError = "登录或注册失败：${error.chineseMessage()}")
             }
         }
     }
-
-    fun logout() {
+    fun guest() {
+        if (state.value.authBusy) return
         viewModelScope.launch {
-            try { api.signOut() }
-            catch (_: Exception) { store.clear() }
-            finally {
-                tableId = null
-                state.value = AppState()
+            state.value = state.value.copy(authBusy = true, authError = null)
+            try {
+                api.anonymous()
+                val me = api.json.decodeFromString<MeResponse>(api.get("/api/me"))
+                generation++
+                state.value = AppState(session = SessionMode.ONLINE_GUEST, profile = me)
+            } catch (e: Exception) {
+                state.value = state.value.copy(session = if (store.load() != null) SessionMode.RESTORING else SessionMode.SIGNED_OUT,
+                    authBusy = false, authError = e.chineseMessage())
             }
+        }
+    }
+    fun localOnly() { state.value = state.value.copy(session = SessionMode.LOCAL_ONLY) }
+    fun online() {
+        state.value = state.value.copy(session = if (store.load() != null) SessionMode.RESTORING else SessionMode.SIGNED_OUT)
+        if (state.value.session == SessionMode.RESTORING) restore()
+    }
+    fun logout() {
+        generation++
+        pendingStore.clear()
+        tableId = null
+        state.value = AppState(authBusy = true)
+        viewModelScope.launch {
+            var remoteFailed = false
+            try { api.signOut() } catch (_: Exception) { store.clear(); remoteFailed = true }
+            state.value = AppState(authError = if (remoteFailed) "本机已退出；离线退出不保证服务器会话立即撤销" else null)
         }
     }
 
     private fun error(error: Exception): String {
-        if (store.load() == null) state.value = AppState()
+        if (store.load() == null && state.value.session != SessionMode.LOCAL_ONLY)
+            state.value = AppState(authError = "登录已失效，请重新认证")
         return error.chineseMessage()
     }
 
     fun loadList() {
+        if (state.value.session != SessionMode.ACCOUNT && state.value.session != SessionMode.ONLINE_GUEST) return
+        val at = generation
         viewModelScope.launch {
             state.value = state.value.copy(listLoading = true, listError = null)
             try {
                 val matches = api.json.decodeFromString<List<MatchSummary>>(api.get("/api/matches?mine=1"))
-                state.value = state.value.copy(matches = matches, listLoading = false)
+                if (at == generation) state.value = state.value.copy(matches = matches, listLoading = false)
             } catch (e: Exception) {
-                val message = error(e)
-                state.value = state.value.copy(listLoading = false, listError = message)
+                if (at == generation) state.value = state.value.copy(listLoading = false, listError = error(e))
             }
         }
         viewModelScope.launch {
             try {
                 val templates = api.json.decodeFromString<List<TemplateDto>>(api.get("/api/rulesets/templates"))
-                state.value = state.value.copy(templates = templates)
-            } catch (_: Exception) { /* Missing template metadata is shown honestly in UI. */ }
+                if (at == generation) state.value = state.value.copy(templates = templates)
+            } catch (e: Exception) { if (at == generation) state.value = state.value.copy(listError = "读取模板失败：${error(e)}") }
         }
     }
 
@@ -112,30 +178,50 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openTable(id: String) {
         tableId = id
-        state.value = state.value.copy(table = null, hands = null, settlement = null, tableError = null, connection = "手动刷新")
+        state.value = state.value.copy(table = null, hands = null, settlement = null, invitation = null,
+            tableError = null, preview = null, terminal = null, connection = "手动刷新",
+            pendingResult = state.value.profile?.principal?.id?.let { pendingStore.read(it, id) })
         refreshTable(id)
     }
-    fun closeTable() { tableId = null; state.value = state.value.copy(connection = "手动刷新") }
+    fun closeTable() {
+        tableId = null
+        state.value = state.value.copy(table = null, invitation = null, preview = null, terminal = null, connection = "手动刷新")
+    }
     fun refreshTable(id: String) { triggers.trySend(id) }
+    fun reconnect(id: String) {
+        if (tableId == id) {
+            state.value = state.value.copy(connectionEpoch = state.value.connectionEpoch + 1)
+            refreshTable(id)
+        }
+    }
 
-    private suspend fun loadTable(id: String, initial: Boolean) {
-        if (initial || state.value.table == null) state.value = state.value.copy(tableLoading = true)
+    private suspend fun loadTable(id: String) {
+        val at = generation
+        if (state.value.table == null) state.value = state.value.copy(tableLoading = true)
         try {
             val snapshot = api.json.decodeFromString<TableSnapshot>(api.get("/api/matches/$id"))
-            if (tableId != id) return
-            state.value = state.value.copy(table = snapshot, tableLoading = false, tableError = null)
+            if (tableId != id || at != generation) return
+            val preview = state.value.preview?.takeIf {
+                it.handId == snapshot.currentHand?.id && it.revision == snapshot.currentHand.markRevision &&
+                    snapshot.currentHand.status == "open"
+            }
+            val terminal = state.value.terminal?.takeIf { it.version == snapshot.match.version }
+            state.value = state.value.copy(table = snapshot, tableLoading = false, tableError = null,
+                preview = preview, terminal = terminal,
+                invitation = state.value.invitation?.takeIf { snapshot.match.status == "preparing" &&
+                    runCatching { java.time.Instant.parse(it.expiresAt).isAfter(java.time.Instant.now()) }.getOrDefault(false) })
             try {
                 val hands = api.json.decodeFromString<List<HandDto>>(api.get("/api/matches/$id/hands?limit=100"))
-                if (tableId == id) state.value = state.value.copy(hands = hands)
-            } catch (e: Exception) { if (tableId == id) state.value = state.value.copy(tableError = "读取局记录失败：${error(e)}") }
+                if (tableId == id && at == generation) state.value = state.value.copy(hands = hands)
+            } catch (e: Exception) { if (tableId == id && at == generation) state.value = state.value.copy(tableError = "读取局记录失败：${error(e)}") }
             if (snapshot.match.status == "finished") {
                 try {
-                    val preview = api.json.decodeFromString<SettlementPreview>(api.get("/api/matches/$id/settlement/preview"))
-                    if (tableId == id) state.value = state.value.copy(settlement = preview)
-                } catch (e: Exception) { if (tableId == id) state.value = state.value.copy(tableError = "读取终局成绩失败：${error(e)}") }
-            } else if (tableId == id) state.value = state.value.copy(settlement = null)
+                    val result = api.json.decodeFromString<SettlementPreview>(api.get("/api/matches/$id/settlement/preview"))
+                    if (tableId == id && at == generation) state.value = state.value.copy(settlement = result)
+                } catch (e: Exception) { if (tableId == id && at == generation) state.value = state.value.copy(tableError = "读取终局成绩失败：${error(e)}") }
+            } else if (tableId == id && at == generation) state.value = state.value.copy(settlement = null)
         } catch (e: Exception) {
-            if (tableId == id) state.value = state.value.copy(tableLoading = false, tableError = error(e))
+            if (tableId == id && at == generation) state.value = state.value.copy(tableLoading = false, tableError = error(e))
         }
     }
 
@@ -143,7 +229,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     suspend fun liveWhileVisible(id: String) {
         var failures = 0
         try {
-            while (kotlin.coroutines.coroutineContext.isActive && tableId == id && state.value.authenticated) {
+            while (kotlin.coroutines.coroutineContext.isActive && tableId == id && state.value.session in listOf(SessionMode.ACCOUNT, SessionMode.ONLINE_GUEST)) {
                 state.value = state.value.copy(connection = "重连中")
                 try {
                     val ticket = api.json.decodeFromString<TicketDto>(api.post("/api/matches/$id/ws-tickets")).ticket
@@ -151,38 +237,51 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     val openedAt = awaitSocket(id, ticket)
                     if (openedAt != 0L && android.os.SystemClock.elapsedRealtime() - openedAt >= 10_000L) failures = 0
                 } catch (cancel: CancellationException) { throw cancel }
-                catch (_: Exception) {
+                catch (e: Exception) {
                     if (store.load() == null) {
-                        state.value = AppState()
+                        state.value = AppState(authError = "登录已失效，请重新认证")
                         return
                     }
-                    // Manual refresh remains available when a ticket/connection fails.
+                    state.value = state.value.copy(connection = "实时连接失败：${e.chineseMessage()}，可手动刷新")
+                    if (e is ApiFailure && e.status in listOf(401, 403)) return
                 }
-                failures = (failures + 1).coerceAtMost(6)
+                failures++
+                if (failures >= 5) {
+                    state.value = state.value.copy(connection = "实时连接已暂停，可手动重连并刷新")
+                    return
+                }
                 delay((1000L shl (failures - 1)).coerceAtMost(30_000L))
             }
         } finally {
-            if (tableId == id) state.value = state.value.copy(connection = "手动刷新")
+            if (tableId == id && !state.value.connection.startsWith("实时连接失败") &&
+                !state.value.connection.startsWith("实时连接已暂停"))
+                state.value = state.value.copy(connection = "手动刷新")
         }
     }
 
     private suspend fun awaitSocket(id: String, ticket: String): Long {
-        var openedAt = 0L
+        val openedAt = java.util.concurrent.atomic.AtomicLong(0L)
         suspendCancellableCoroutine<Unit> { continuation ->
             val completed = java.util.concurrent.atomic.AtomicBoolean()
             val request = Request.Builder().url("${api.wsOrigin}/ws/matches/$id?ticket=${java.net.URLEncoder.encode(ticket, "UTF-8")}").build()
             val socket = api.client.newWebSocket(request, object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     if (continuation.isActive && tableId == id) {
-                        openedAt = android.os.SystemClock.elapsedRealtime()
-                        state.value = state.value.copy(connection = "已连接")
-                        triggers.trySend(id)
+                        openedAt.set(android.os.SystemClock.elapsedRealtime())
+                        viewModelScope.launch { state.value = state.value.copy(connection = "已连接"); triggers.trySend(id) }
                     }
                 }
-                override fun onMessage(webSocket: WebSocket, text: String) { if (tableId == id) triggers.trySend(id) }
-                override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) { if (tableId == id) triggers.trySend(id) }
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    if (tableId == id && runCatching {
+                        api.json.parseToJsonElement(text).jsonObject["type"]?.jsonPrimitive?.content
+                    }.getOrNull() != null) triggers.trySend(id)
+                }
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    if (completed.compareAndSet(false, true)) continuation.resume(Unit)
+                    if (completed.compareAndSet(false, true)) {
+                        if (response?.code == 401 || response?.code == 403)
+                            continuation.resumeWithException(ApiFailure(response.code, "ws_forbidden", null, "实时连接被拒绝"))
+                        else continuation.resume(Unit)
+                    }
                 }
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     if (completed.compareAndSet(false, true)) continuation.resume(Unit)
@@ -190,6 +289,118 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             })
             continuation.invokeOnCancellation { socket.cancel() }
         }
-        return openedAt
+        return openedAt.get()
+    }
+    private fun operation(id: String?, command: suspend () -> Unit) {
+        if (state.value.busy) return
+        val at = generation
+        viewModelScope.launch {
+            state.value = state.value.copy(busy = true, actionError = null)
+            try {
+                command()
+                if (at == generation && id != null) refreshTable(id)
+            } catch (e: CancellationException) { throw e
+            } catch (e: Exception) {
+                if (at == generation) {
+                    if (e is ApiFailure && e.status == 409 && id != null) {
+                        state.value = state.value.copy(preview = null, terminal = null)
+                        refreshTable(id)
+                    }
+                    state.value = state.value.copy(actionError = error(e))
+                }
+            } finally { if (at == generation) state.value = state.value.copy(busy = false) }
+        }
+    }
+    fun createMatch(rules: OnlineRules) = operation(null) {
+        if (state.value.session != SessionMode.ACCOUNT) throw IllegalStateException("仅注册用户可创建在线牌桌")
+        val match = api.json.decodeFromString<CreatedMatch>(api.post("/api/matches", rules.payload()))
+        state.value = state.value.copy(createdMatchId = match.match.id)
+        loadList()
+    }
+    fun clearCreatedMatch() { state.value = state.value.copy(createdMatchId = null) }
+    fun claim(id: String, seatNo: Int) = operation(id) {
+        api.post("/api/matches/$id/seats/claim", """{"seatNo":$seatNo}""")
+    }
+    fun invite(id: String) = operation(id) {
+        val token = api.json.decodeFromString<CheckInTokenDto>(api.post("/api/matches/$id/check-in-tokens"))
+        if (tableId == id) state.value = state.value.copy(invitation = token)
+    }
+    fun finalizeSeats(id: String, dealer: Int?) = operation(id) {
+        api.post("/api/matches/$id/seats/finalize", dealer?.let { """{"dealerSeatNo":$it}""" } ?: "{}")
+    }
+    fun beginCheckIn() { state.value = state.value.copy(joinedSeat = null, actionError = null) }
+    fun checkIn(link: CheckInLink) = operation(null) {
+        val token = link.token ?: throw IllegalStateException("链接缺少签到凭证")
+        val body = buildJsonObject { put("token", token) }.toString()
+        val result = api.json.decodeFromString<CheckInDto>(api.post("/api/matches/${link.matchId}/check-ins", body))
+        state.value = state.value.copy(joinedSeat = result.seat.seatNo, joinError = null)
+        loadList()
+    }
+    fun byCode(code: String, onResolved: (CheckInLink) -> Unit) = operation(null) {
+        val normalized = code.trim().uppercase(java.util.Locale.ROOT)
+        require(Regex("^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$").matches(normalized)) { "请输入六位有效房间码" }
+        val result = api.json.decodeFromString<ByCodeDto>(api.get("/api/matches/by-code/$normalized"))
+        onResolved(CheckInLink(result.matchId, result.token,
+            "https://riichi.p1ziyu.com/checkin/${result.matchId}?token=${java.net.URLEncoder.encode(result.token, "UTF-8")}"))
+    }
+    fun mark(id: String, hand: CurrentHandDto, seat: HandSeatDto, riichi: Boolean) = operation(id) {
+        val handId = requireNotNull(hand.id)
+        val revision = requireNotNull(hand.markRevision)
+        api.post("/api/matches/$id/hands/$handId/marks",
+            """{"seatNo":${seat.seatNo},"riichi":$riichi,"expectedMarkRevision":$revision}""")
+        state.value = state.value.copy(preview = null)
+    }
+    fun preview(id: String, hand: CurrentHandDto, input: JsonObject) = operation(id) {
+        val handId = requireNotNull(hand.id)
+        val revision = requireNotNull(hand.markRevision)
+        val output = api.json.decodeFromString<PaymentPreview>(api.post("/api/matches/$id/hands/$handId/preview",
+            buildJsonObject { put("resultInput", input) }.toString()))
+        val seatNos = state.value.table?.seats?.map { it.seatNo }?.toSet().orEmpty()
+        check(output.perSeat.map { it.seatNo }.toSet() == seatNos && output.perSeat.size == seatNos.size) { "服务端未提供完整支付预览" }
+        if (tableId == id && state.value.table?.currentHand?.id == handId &&
+            state.value.table?.currentHand?.markRevision == revision)
+            state.value = state.value.copy(preview = BoundPreview(handId, revision, input.toString(), output))
+    }
+    fun submit(id: String, hand: CurrentHandDto, input: JsonObject) {
+        val preview = state.value.preview ?: return
+        if (preview.handId != hand.id || preview.revision != hand.markRevision || preview.input != input.toString()) return
+        if (state.value.pendingResult != null) return
+        val eventId = java.util.UUID.randomUUID().toString()
+        val body = buildJsonObject {
+            put("resultInput", input)
+            put("confirmedMarkRevision", preview.revision)
+            put("clientEventId", eventId)
+        }.toString()
+        val pending = PendingResult(id, preview.handId, body)
+        val principalId = state.value.profile?.principal?.id ?: return
+        try { pendingStore.save(principalId, pending) }
+        catch (e: Exception) { state.value = state.value.copy(actionError = "无法保存待提交请求：${e.message}"); return }
+        state.value = state.value.copy(pendingResult = pending)
+        resend()
+    }
+    fun resend() {
+        val pending = state.value.pendingResult ?: return
+        operation(pending.matchId) {
+            api.post("/api/matches/${pending.matchId}/hands/${pending.handId}/results", pending.body)
+            pendingStore.clear()
+            state.value = state.value.copy(pendingResult = null, preview = null)
+        }
+    }
+    fun resolvePendingWithoutResend() {
+        // Only the user may discard an uncertain request after checking the authoritative table.
+        pendingStore.clear()
+        state.value = state.value.copy(pendingResult = null)
+    }
+    fun nextHand(id: String) = operation(id) { api.post("/api/matches/$id/hands") }
+    fun finish(id: String) = operation(id) { api.post("/api/matches/$id/finish") }
+    fun terminalPreview(id: String) = operation(id) {
+        val version = state.value.table?.match?.version ?: throw IllegalStateException("缺少牌桌版本")
+        val output = api.json.decodeFromString<SettlementPreview>(api.get("/api/matches/$id/settlement/preview"))
+        if (tableId == id && state.value.table?.match?.version == version) state.value = state.value.copy(terminal = BoundTerminal(version, output))
+    }
+    fun confirmSettlement(id: String) = operation(id) {
+        check(state.value.terminal?.version == state.value.table?.match?.version) { "请先预览当前终局成绩" }
+        api.post("/api/matches/$id/settlement/confirm")
+        state.value = state.value.copy(terminal = null)
     }
 }

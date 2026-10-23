@@ -35,6 +35,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -81,6 +82,8 @@ fun AuthScreen(
     error: String?,
     onSubmit: (email: String, password: String, name: String?) -> Unit,
     onModeChange: (Boolean) -> Unit,
+    onGuest: () -> Unit,
+    onLocal: () -> Unit,
 ) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
@@ -95,8 +98,10 @@ fun AuthScreen(
         BrandPanel(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { onModeChange(false) }, enabled = !busy && register) { Text("邮箱登录") }
-                    OutlinedButton(onClick = { onModeChange(true) }, enabled = !busy && !register) { Text("注册账户") }
+                    if (register) OutlinedButton(onClick = { onModeChange(false) }, enabled = !busy) { Text("邮箱登录") }
+                    else Button(onClick = { onModeChange(false) }, enabled = !busy) { Text("邮箱登录") }
+                    if (register) Button(onClick = { onModeChange(true) }, enabled = !busy) { Text("注册账户") }
+                    else OutlinedButton(onClick = { onModeChange(true) }, enabled = !busy) { Text("注册账户") }
                 }
                 if (register) OutlinedTextField(name, { name = it }, label = { Text("昵称") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth())
@@ -109,6 +114,9 @@ fun AuthScreen(
                     enabled = !busy && email.isNotBlank() && password.isNotBlank() && (!register || name.isNotBlank())) {
                     Text(if (busy) "请稍候…" else if (register) "注册并登录" else "登录")
                 }
+                OutlinedButton(onClick = onGuest, enabled = !busy) { Text("临时访客加入在线牌桌") }
+                Caption("访客与本地无身份不同。获桌主批准座位后方可签到；访客不能创建牌桌。")
+                TextButton(onClick = onLocal, enabled = !busy) { Text("本地无身份模式") }
             }
         }
     }
@@ -152,7 +160,7 @@ private fun LobbyHero(onCreate: () -> Unit) {
         Heading("落座，即开局。")
         Text("从规则到结算，给同桌每一分一个清楚的去处。", color = Color(0xFFD3DFDC))
         Button(onClick = onCreate) { Text("开桌 ↗") }
-        Caption("只读体验 · 暂不支持创建牌桌")
+        Caption("本桌在线记分 · 服务端确认每笔支付")
     }
 }
 
@@ -168,29 +176,32 @@ fun MatchListScreen(
     onRefresh: () -> Unit,
     onOpen: (String) -> Unit,
     onHistory: () -> Unit,
+    onCreate: () -> Unit,
+    onJoin: () -> Unit,
+    session: SessionMode,
+    principalName: String?,
 ) {
-    var showCreateNotice by remember { mutableStateOf(false) }
-    if (showCreateNotice) AlertDialog(onDismissRequest = { showCreateNotice = false },
-        title = { Text("只读体验") }, text = { Text("当前试用版仅供查看；完整版本将提供创建牌桌功能。") },
-        confirmButton = { TextButton(onClick = { showCreateNotice = false }) { Text("知道了") } })
     val finished = finishedOwnMatches(matches.orEmpty())
     val live = matches.orEmpty().filterNot { isFinishedMatch(it.status) }.sortedByDescending { it.createdAt }
     PullToRefreshBox(isRefreshing = refreshing, onRefresh = onRefresh, modifier = Modifier.fillMaxSize().background(Brand.background)) {
         LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (lobby) {
-                item { LobbyHero { showCreateNotice = true } }
-                item { SectionTitle("正在进行的牌桌") }
+                item { LobbyHero(onCreate) }
+                item {
+                    Text("在线身份 · ${principalName?.takeIf { it.isNotBlank() } ?: if (session == SessionMode.ACCOUNT) "账户" else "临时访客"} · ${if (session == SessionMode.ACCOUNT) "账户" else "访客"}", color = Brand.goldText)
+                    OutlinedButton(onClick = onJoin) { Text("扫码 / 链接 / 房间码加入") }
+                }
                 if (loading && matches == null) item { CircularProgressIndicator() }
                 if (error != null) item { Text("加载失败：$error", color = MaterialTheme.colorScheme.error); TextButton(onClick = onRefresh) { Text("重试") } }
                 if (!loading && matches != null && live.isEmpty()) item { Caption("暂无正在进行的牌桌，下拉刷新试试") }
                 items(live, key = { "live:${it.id}" }) { MatchRow(it, templates, onOpen) }
                 item { SectionTitle("规则模板") }
                 if (templates.isEmpty()) item { Caption("模板资料暂未提供") }
-                items(templates.take(2), key = { "template:${it.versionId}" }) { template ->
+                items(templates, key = { "template:${it.versionId}" }) { template ->
                     BrandPanel(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                             Text(template.name, color = Brand.goldText, style = MaterialTheme.typography.titleMedium)
-                            Caption("${sourceLabel(template.scope)} · ${reviewLabel(template.reviewStatus)} · 只读预览")
+                            Caption("${sourceLabel(template.scope)} · ${reviewLabel(template.reviewStatus)} · 可在开桌时调整")
                         }
                     }
                 }
@@ -253,11 +264,17 @@ fun TableScreen(
     error: String?,
     connection: String,
     onRefresh: () -> Unit,
+    app: AppState,
+    model: AppViewModel,
+    tableId: String,
 ) {
     PullToRefreshBox(isRefreshing = loading, onRefresh = onRefresh, modifier = Modifier.fillMaxSize().background(Brand.background)) {
         LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item { Heading("牌桌") }
             item { Caption("实时连接 · $connection") }
+            if (connection.startsWith("实时连接失败") || connection.startsWith("实时连接已暂停")) item {
+                OutlinedButton(onClick = { model.reconnect(tableId) }) { Text("重新连接实时牌桌") }
+            }
             if (loading && state == null) item { CircularProgressIndicator() }
             if (error != null) item {
                 Text("加载失败：$error", color = MaterialTheme.colorScheme.error)
@@ -298,6 +315,7 @@ fun TableScreen(
                         }
                     }
                 }
+                item { OnlineTableControls(state.match.id, app, model) }
                 if (isFinishedMatch(state.match.status)) item {
                     SectionTitle("最终排名")
                     if (settlement == null || settlement.standings.isEmpty()) Caption("结算数据暂未提供")
@@ -367,37 +385,47 @@ fun ProfileScreen(
             }
         }
         SectionTitle("桌边入口")
-        OutlinedButton(onClick = onCheckIn) { Text("粘贴签到链接") }
+        OutlinedButton(onClick = onCheckIn) { Text("扫码、粘贴链接或输入房间码") }
         OutlinedButton(onClick = onDiagnostic) { Text("关于 / 诊断 · 引擎自检") }
         if (diagnostic != null) BrandPanel(Modifier.fillMaxWidth()) { Text("诊断结果：$diagnostic", Modifier.padding(16.dp)) }
         Button(onClick = onLogout) { Text("退出登录") }
     }
 }
 @Composable
-fun CheckInScreen(initial: String?, onOpenBrowser: (String) -> Unit) {
+fun CheckInScreen(initial: String?, state: AppState, model: AppViewModel, onClose: () -> Unit) {
+    LaunchedEffect(initial) { model.beginCheckIn() }
     var input by remember(initial) { mutableStateOf(initial.orEmpty()) }
-    val link = parseCheckInLink(input.trim())
+    var code by remember { mutableStateOf("") }
+    var scanner by remember { mutableStateOf(false) }
+    var resolved by remember { mutableStateOf<CheckInLink?>(null) }
+    val link = resolved ?: parseCheckInLink(input)
     Column(Modifier.fillMaxSize().background(Brand.background).verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)) {
         BrandLockup()
         Heading("玩家签到")
-        BrandPanel(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("当前只读体验版暂不支持签到；可打开网页版签到。", color = Brand.text)
-                Caption("粘贴或通过链接打开后，确认对局编号与签到凭证是否存在。")
-                OutlinedTextField(input, { input = it }, label = { Text("粘贴签到链接（内容隐藏）") },
-                    visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
-                if (input.isNotBlank()) {
-                    if (link == null) Text("链接无效，请检查后重试", color = MaterialTheme.colorScheme.error)
-                    else {
-                        Caption("牌桌编号 · ${link.matchId}")
-                        Caption(if (link.hasToken) "链接含签到凭证；不会在页面展示" else "链接不含签到凭证")
-                    }
-                }
-                Button(onClick = { link?.let { onOpenBrowser(it.url) } }, enabled = link != null) {
-                    Text("打开网页版签到")
-                }
+        Text("当前身份：${if (state.session == SessionMode.ONLINE_GUEST) "临时访客" else "账户"}。房主必须已批准该身份的座位；链接和房间码并不自动批准。", color = Brand.text)
+        if (state.joinedSeat != null) {
+            Text("已签到 ${state.joinedSeat + 1} 号位", color = Brand.goldText)
+            Button(onClick = onClose) { Text("返回大厅") }
+        } else {
+            OutlinedButton(onClick = { scanner = !scanner }) { Text(if (scanner) "关闭相机" else "相机扫码") }
+            if (scanner) CheckInScanner { scanned ->
+                input = scanned
+                resolved = null
+                scanner = false
             }
+            OutlinedTextField(input, { input = it; resolved = null }, label = { Text("粘贴完整 HTTPS 签到链接") },
+                visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(code, { code = it.trim().uppercase(java.util.Locale.ROOT).take(6) },
+                label = { Text("六位房间码") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+            Button(onClick = { model.byCode(code) { result -> resolved = result; input = "" } },
+                enabled = !state.busy && Regex("^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$").matches(code)) { Text("换取十分钟签到凭证") }
+            if (input.isNotBlank() && link == null) Text("仅接受本站 /checkin/<对局编号> 安全链接", color = MaterialTheme.colorScheme.error)
+            link?.let { Caption("目标牌桌 · ${it.matchId} · ${if (it.hasToken) "已有签到凭证" else "链接无签到凭证"}") }
+            Button(onClick = { link?.let(model::checkIn) }, enabled = !state.busy && link?.hasToken == true) { Text("提交签到") }
+            state.actionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            Text("若显示“尚无已获批准的座位”，保留此身份，待桌主在服务端批准后使用有效令牌重试；本客户端无审批界面。", color = Brand.muted)
+            TextButton(onClick = onClose) { Text("关闭") }
         }
     }
 }

@@ -33,6 +33,8 @@ class TokenCipher(private val key: SecretKey) {
 class TokenStore(context: Context) {
     private val file = AtomicFile(File(context.filesDir, "auth-token.bin"))
     private val alias = "ichihime-p1-session"
+    var credentialInvalidated: Boolean = false
+        private set
 
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -50,6 +52,7 @@ class TokenStore(context: Context) {
         if (!file.baseFile.exists()) return null
         return try { TokenCipher(key()).open(file.readFully()).takeIf { it.isNotEmpty() } }
         catch (_: Exception) {
+            credentialInvalidated = true
             clear()
             // A corrupted file or invalidated hardware key must never revive a stale session.
             runCatching { KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.deleteEntry(alias) }
@@ -58,6 +61,7 @@ class TokenStore(context: Context) {
     }
 
     fun save(token: String) {
+        credentialInvalidated = false
         require(token.isNotBlank())
         val bytes = TokenCipher(key()).seal(token)
         val stream = file.startWrite()
