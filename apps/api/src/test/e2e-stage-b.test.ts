@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import '../env.js';
 import { pool } from '../db.js';
+import { loadMigrations } from '../migrate.js';
 import { buildApp } from '../index.js';
 
 interface ClientSession {
@@ -42,7 +43,7 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
         token?: string;
         origin?: string;
       } = {},
-    ): Promise<{ status: number; data: T; setCookies: string[] }> => {
+    ): Promise<{ status: number; data: T; setCookies: string[]; retryAfter: string | null }> => {
       const headers: Record<string, string> = {
         origin: opts.origin ?? 'http://127.0.0.1:5173',
       };
@@ -63,7 +64,7 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       const setCookies = res.headers.getSetCookie?.() ?? [];
       const text = await res.text();
       const data = (text ? JSON.parse(text) : undefined) as T;
-      return { status: res.status, data, setCookies };
+      return { status: res.status, data, setCookies, retryAfter: res.headers.get('retry-after') };
     };
 
     for (const origin of ['capacitor://localhost', 'https://localhost']) {
@@ -360,7 +361,7 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
 
     // 3. Create match (4p house template) as acct1 (owner)
     const createRes = await requestJson<{
-      match: { id: string; inviteCode: string; status: string };
+      match: { id: string; inviteCode: string; joinCode: string; status: string };
     }>('/api/matches', {
       method: 'POST',
       cookie: acct1.cookie,
@@ -370,9 +371,64 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     const matchId = createRes.data.match.id;
     check(Boolean(matchId), 'Match ID returned');
     checkEq(createRes.data.match.status, 'preparing', 'Initial match status is preparing');
+    checkEq(createRes.data.match.inviteCode, matchId.replace(/-/g, '').slice(0, 8).toUpperCase(),
+      'Existing invite code remains unchanged');
+    check(/^[A-HJ-NP-Z2-9]{6}$/.test(createRes.data.match.joinCode), 'Created match returns a valid six-character join code');
+    const storedCode = await pool.query<{ join_code: string }>(
+      'SELECT join_code FROM app.matches WHERE id = $1', [matchId],
+    );
+    checkEq(storedCode.rows[0].join_code, createRes.data.match.joinCode, 'Create response code matches the persisted code');
+    const concurrentCreates = await Promise.all(Array.from({ length: 12 }, () =>
+      requestJson<{ match: { id: string; joinCode: string } }>('/api/matches', {
+        method: 'POST', cookie: acct1.cookie, body: { rulesetVersionId: house4p!.versionId },
+      })));
+    check(concurrentCreates.every((response) => response.status === 200),
+      'Concurrent creation completes for every room');
+    checkEq(new Set(concurrentCreates.map((response) => response.data.match.joinCode)).size,
+      concurrentCreates.length, 'Concurrent live matches receive distinct join codes');
+    check(concurrentCreates.every((response) => /^[A-HJ-NP-Z2-9]{6}$/.test(response.data.match.joinCode)),
+      'Every concurrent room uses the complete allowed code alphabet');
+    const liveCodeCount = await pool.query<{ count: number; distinct_count: number }>(
+      `SELECT COUNT(*)::int AS count, COUNT(DISTINCT join_code)::int AS distinct_count
+       FROM app.matches WHERE deleted_at IS NULL AND state IN ('preparing', 'active') AND join_code IS NOT NULL`,
+    );
+    checkEq(liveCodeCount.rows[0].count, liveCodeCount.rows[0].distinct_count, 'Live match join codes are unique');
+    const anonymousCode = await requestJson(`/api/matches/by-code/${createRes.data.match.joinCode}`);
+    checkEq(anonymousCode.status, 401, 'Join code lookup requires authentication');
+    const byCode = await requestJson<{ matchId: string; token: string; expiresAt: string }>(
+      `/api/matches/by-code/%20${createRes.data.match.joinCode.toLowerCase()}%20`,
+      { cookie: guest1.cookie },
+    );
+    checkEq(byCode.status, 200, 'Guest resolves a trimmed, lowercase join code');
+    checkEq(byCode.data.matchId, matchId, 'Join code resolves the correct match');
+    const signedPayload = JSON.parse(Buffer.from(byCode.data.token.split('.')[0], 'base64url').toString('utf8')) as {
+      m: string; n: string; e: number;
+    };
+    checkEq(signedPayload.m, matchId, 'Join code token uses the QR check-in match payload');
+    checkEq(signedPayload.e, Date.parse(byCode.data.expiresAt), 'Join code token expiry matches signed payload');
+    check(typeof signedPayload.n === 'string' && signedPayload.n.length > 0, 'Join code token includes a nonce');
+    const codeInvite = await pool.query<{
+      scope: string; generation: number; created_by: string; expires_at: Date;
+    }>(
+      `SELECT scope, generation, created_by, expires_at
+       FROM app.match_invitations WHERE match_id = $1 AND hmac_key_id = $2`,
+      [matchId, createHash('sha256').update(byCode.data.token).digest('hex')],
+    );
+    checkEq(codeInvite.rows[0].scope, 'join', 'Join code mints the same join invitation scope as QR');
+    checkEq(codeInvite.rows[0].generation, 1, 'Join code invitation has QR generation one');
+    checkEq(codeInvite.rows[0].created_by, acct1.principalId, 'Join code invitation is attributed to its owner');
+    checkEq(codeInvite.rows[0].expires_at.toISOString(), byCode.data.expiresAt, 'Invitation expiry matches token response');
+    const unknownCode = await requestJson<{ error: string }>('/api/matches/by-code/ZZZZZZ', { cookie: acct2.cookie });
+    checkEq([unknownCode.status, unknownCode.data.error], [404, 'join_code_not_found'],
+      'Unknown join code has the stable not-found response');
+    const malformedCode = await requestJson<{ error: string }>('/api/matches/by-code/AIO123', { cookie: acct2.cookie });
+    checkEq([malformedCode.status, malformedCode.data.error], [404, 'join_code_not_found'],
+      'Malformed join code has the same not-found response');
     const ownerBeforeClaim = await requestJson<{
-      match: { rulesHash: string }; seats: { principalId: string | null; status: string }[]; checkedIn: number;
+      match: { rulesHash: string; joinCode: string }; seats: { principalId: string | null; status: string }[]; checkedIn: number;
     }>(`/api/matches/${matchId}`, { cookie: acct1.cookie });
+    checkEq(ownerBeforeClaim.data.match.joinCode, createRes.data.match.joinCode,
+      'Match detail exposes the persisted join code');
     check(ownerBeforeClaim.data.seats.every((seat) => seat.principalId === null),
       'Owner is an active member but has no assigned seat after creation');
     checkEq(ownerBeforeClaim.data.checkedIn, 0, 'Creation does not auto-check-in a seatless owner');
@@ -613,11 +669,11 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     ];
 
     for (const p of playersForCheckIn) {
-      const tokRes = await requestJson<{ token: string; expiresAt: string }>(
+      const tokRes = p.session === guest1 ? byCode : await requestJson<{ token: string; expiresAt: string }>(
         `/api/matches/${matchId}/check-in-tokens`,
         { method: 'POST', cookie: acct1.cookie, body: {} },
       );
-      checkEq(tokRes.status, 200, `POST check-in-tokens for seat ${p.expectedSeatNo} returns 200`);
+      checkEq(tokRes.status, 200, `Check-in token for seat ${p.expectedSeatNo} returns 200`);
 
       const checkIn = () => requestJson<{ seat: { seatNo: number }; grantId: string }>(
         `/api/matches/${matchId}/check-ins`,
@@ -683,6 +739,11 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       finSeats.data.seats.every((s) => s.points === 25000),
       'All 4 seats start at 25,000 points',
     );
+    const startedCode = await requestJson<{ error: string }>(
+      `/api/matches/by-code/${createRes.data.match.joinCode}`, { cookie: guest1.cookie },
+    );
+    checkEq([startedCode.status, startedCode.data.error], [409, 'match_already_started'],
+      'Active match code rejects new check-in token minting');
 
     // 7. Hand 1: marks seat0 riichi -> preview -> results (tsumo by seat0, 3han 30fu)
     const h1Start = await requestJson<{
@@ -1094,6 +1155,11 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     });
     checkEq(finishRes.status, 200, 'POST /api/matches/:id/finish returns 200');
     checkEq(finishRes.data.finished, true, 'Match finished is true');
+    const finishedCode = await requestJson<{ error: string }>(
+      `/api/matches/by-code/${createRes.data.match.joinCode}`, { cookie: acct2.cookie },
+    );
+    checkEq([finishedCode.status, finishedCode.data.error], [404, 'join_code_not_found'],
+      'Finished match code does not resolve');
     checkEq(finishRes.data.provisionalRankings.length, 4, '4 provisional rankings returned');
     // Points after Hand 2:
     // Seat 0: 25000 + 6000 + 0 = 31000 (rank 1)
@@ -2117,7 +2183,7 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     check(restoredList.data.some((m) => m.id === matchId), 'Unhide restores match in default list');
 
     // 3. Host deletes preparing match with WebSocket notification
-    const delMatchCreate = await requestJson<{ match: { id: string } }>('/api/matches', {
+    const delMatchCreate = await requestJson<{ match: { id: string; joinCode: string } }>('/api/matches', {
       method: 'POST',
       cookie: acct1.cookie,
       body: { rulesetVersionId: house4p!.versionId },
@@ -2181,6 +2247,11 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
 
     const postDelGet = await requestJson(`/api/matches/${delMatchId}`, { cookie: acct1.cookie });
     checkEq(postDelGet.status, 404, 'Subsequent GET on deleted match returns 404');
+    const deletedCode = await requestJson<{ error: string }>(
+      `/api/matches/by-code/${delMatchCreate.data.match.joinCode}`, { cookie: strangerAcct.cookie },
+    );
+    checkEq([deletedCode.status, deletedCode.data.error], [404, 'join_code_not_found'],
+      'Deleted match code does not resolve');
 
     const postDelList = await requestJson<{ id: string }[]>('/api/matches?mine=1&includeHidden=1', {
       cookie: acct1.cookie,
@@ -2384,7 +2455,82 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     checkEq(finalView.data.seats[1].status, 'checked_in', 'Vacated seat 1 is now checked_in by replacement');
     checkEq(finalView.data.seats[1].principalId, replacementUser.principalId, 'Seat 1 belongs to replacement guest');
 
+    // Reconstruct a pre-013 schema inside a rollback-only transaction: existing live
+    // rows have no join_code column until the full migration backfills them.
+    const migration013 = loadMigrations().find((migration) => migration.version === '013');
+    check(Boolean(migration013), 'Join-code migration 013 is present');
+    const migrationClient = await pool.connect();
+    try {
+      await migrationClient.query('BEGIN');
+      await migrationClient.query('ALTER TABLE app.matches DROP COLUMN join_code');
+      const matchForBackfill = overrideCreate.data.match.id;
+      await migrationClient.query(migration013!.sql);
+      const occupiedCode = await migrationClient.query<{ join_code: string }>(
+        'SELECT join_code FROM app.matches WHERE id = $1', [canonicalCreate.data.match.id],
+      );
+      const backfilled = await migrationClient.query<{ join_code: string }>(
+        'SELECT join_code FROM app.matches WHERE id = $1', [matchForBackfill],
+      );
+      check(/^[A-HJ-NP-Z2-9]{6}$/.test(backfilled.rows[0].join_code),
+        '013 backfills pre-migration live match with valid code');
+      check(backfilled.rows[0].join_code !== occupiedCode.rows[0].join_code,
+        '013 backfill avoids already assigned live codes');
+      const finishedCodeRow = await migrationClient.query<{ join_code: string }>(
+        `SELECT candidate AS join_code FROM (
+           SELECT 'AAAA' || first.d || second.d AS candidate
+           FROM unnest(ARRAY['2','3','4','5','6','7','8','9']) first(d)
+           CROSS JOIN unnest(ARRAY['2','3','4','5','6','7','8','9']) second(d)
+         ) candidates
+         WHERE NOT EXISTS (SELECT 1 FROM app.matches WHERE join_code = candidate AND state IN ('preparing', 'active') AND deleted_at IS NULL)
+         LIMIT 1`,
+      );
+      check(Boolean(finishedCodeRow.rows[0]), 'Find a code outside the live uniqueness scope');
+      await migrationClient.query('UPDATE app.matches SET join_code = $1 WHERE id = $2',
+        [finishedCodeRow.rows[0].join_code, matchId]);
+      const recycledCode = await migrationClient.query(
+        'UPDATE app.matches SET join_code = $1 WHERE id = $2',
+        [finishedCodeRow.rows[0].join_code, matchForBackfill],
+      );
+      checkEq(recycledCode.rowCount, 1, 'Partial index permits reusing a finished match code for a live match');
+      await migrationClient.query('SAVEPOINT join_code_constraints');
+      await assert.rejects(
+        migrationClient.query('UPDATE app.matches SET join_code = $1 WHERE id = $2',
+          [occupiedCode.rows[0].join_code, matchForBackfill]),
+        (err: unknown) => Boolean(err && typeof err === 'object' && 'code' in err && err.code === '23505' &&
+          'constraint' in err && err.constraint === 'ux_matches_live_join_code'),
+        '013 partial unique index prevents two live matches sharing a join code',
+      );
+      assertionsPassed++;
+      await migrationClient.query('ROLLBACK TO SAVEPOINT join_code_constraints');
+      await assert.rejects(
+        migrationClient.query('UPDATE app.matches SET join_code = $1 WHERE id = $2', ['I00000', matchForBackfill]),
+        (err: unknown) => Boolean(err && typeof err === 'object' && 'code' in err && err.code === '23514' &&
+          'constraint' in err && err.constraint === 'ck_matches_join_code'),
+        '013 check constraint rejects ambiguous and invalid characters',
+      );
+      assertionsPassed++;
+    } finally {
+      await migrationClient.query('ROLLBACK');
+      migrationClient.release();
+    }
 
+    // This rate-limit test must be the final by-code consumer: failed attempts share this IP.
+    // Earlier failures can age out if the full suite takes more than ten minutes.
+    let limitedRetryAfter: string | null = null;
+    let reachedLimit = false;
+    for (let i = 0; i < 11; i++) {
+      const attempt = await requestJson<{ error: string }>('/api/matches/by-code/IIIIII', { cookie: strangerAcct.cookie });
+      if (attempt.status === 429) {
+        checkEq(attempt.data.error, 'rate_limited', 'The per-IP failed lookup limit uses a stable error');
+        limitedRetryAfter = attempt.retryAfter;
+        reachedLimit = true;
+        break;
+      }
+      checkEq([attempt.status, attempt.data.error], [404, 'join_code_not_found'],
+        'Failures within the per-IP ten-attempt budget remain not-found');
+    }
+    check(reachedLimit, 'At most ten failed lookups from one IP are permitted within ten minutes');
+    check(Number(limitedRetryAfter) > 0, 'Rate-limited response provides positive Retry-After seconds');
     return { assertionsPassed };
   } finally {
     await app.close();

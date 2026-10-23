@@ -6,6 +6,8 @@ import {
   requirePrincipal,
 } from '../auth.js';
 import { pool } from '../db.js';
+import { generateJoinCode, normalizeJoinCode } from '../joinCode.js';
+import { JoinCodeRateLimiter } from '../rateLimit.js';
 import { broadcastMatchEvent } from '../ws.js';
 import { prepareEngineRulesConfig } from './rulesets.js';
 
@@ -197,6 +199,19 @@ function verifyCheckInTokenSignature(token: string, expectedMatchId: string): bo
   } catch {
     return false;
   }
+}
+
+async function issueCheckInToken(matchId: string, createdBy: string): Promise<{ token: string; expiresAt: string }> {
+  const expiresAtMs = Date.now() + 10 * 60 * 1000;
+  const expiresAt = new Date(expiresAtMs);
+  const token = signCheckInToken(matchId, randomUUID(), expiresAtMs);
+  const tokenHash = createHash('sha256').update(token).digest('hex');
+  await pool.query(
+    `INSERT INTO app.match_invitations (match_id, scope, generation, hmac_key_id, created_by, expires_at)
+     VALUES ($1, 'join', 1, $2, $3, $4)`,
+    [matchId, tokenHash, createdBy, expiresAt],
+  );
+  return { token, expiresAt: expiresAt.toISOString() };
 }
 
 const HONBA_PAYER_ALIASES = ['honbaPerPayer', 'honbaTsumoPerPayer', 'tsumoHonbaPerPayer', 'honbaTsumo'];
@@ -485,22 +500,40 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         rulesetVersionId = version.rows[0].id;
       }
 
-      const matchRes = await client.query<{ id: string; state: string }>(
-        `INSERT INTO app.matches (
-           owner_principal_id,
-           player_count,
-           ruleset_version_id,
-           rules_snapshot,
-           rules_hash,
-           engine_version,
-           state,
-           version
-         )
-         VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'preparing', 0)
-         RETURNING id, state`,
-        [principal.id, playerCount, rulesetVersionId, JSON.stringify(rulesSnapshot), rulesHash, ENGINE_VERSION],
-      );
-      const match = matchRes.rows[0];
+      let match: { id: string; state: string; join_code: string } | undefined;
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const joinCode = generateJoinCode();
+        await client.query('SAVEPOINT match_join_code_insert');
+        try {
+          const matchRes = await client.query<{ id: string; state: string; join_code: string }>(
+            `INSERT INTO app.matches (
+               owner_principal_id,
+               player_count,
+               ruleset_version_id,
+               rules_snapshot,
+               rules_hash,
+               engine_version,
+               state,
+               version,
+               join_code
+             )
+             VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'preparing', 0, $7)
+             RETURNING id, state, join_code`,
+            [principal.id, playerCount, rulesetVersionId, JSON.stringify(rulesSnapshot),
+              rulesHash, ENGINE_VERSION, joinCode],
+          );
+          match = matchRes.rows[0];
+          await client.query('RELEASE SAVEPOINT match_join_code_insert');
+          break;
+        } catch (err) {
+          await client.query('ROLLBACK TO SAVEPOINT match_join_code_insert');
+          await client.query('RELEASE SAVEPOINT match_join_code_insert');
+          if (!(err && typeof err === 'object' && 'code' in err && err.code === '23505' &&
+              'constraint' in err && err.constraint === 'ux_matches_live_join_code') ||
+              attempt === 7) throw err;
+        }
+      }
+      if (!match) throw new Error('Match insert did not return a row');
 
       const winds = playerCount === 3 ? ['E', 'S', 'W'] : ['E', 'S', 'W', 'N'];
       for (let seatNo = 0; seatNo < playerCount; seatNo++) {
@@ -530,6 +563,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         match: {
           id: match.id,
           inviteCode,
+          joinCode: match.join_code,
           status: MATCH_STATUS_BY_STATE[match.state] ?? match.state,
         },
       };
@@ -594,6 +628,43 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     }));
   });
 
+  const joinCodeRateLimit = new JoinCodeRateLimiter();
+  // Resolving a join code creates exactly the same single-use invitation as the owner's QR route.
+  app.get<{ Params: { code: string } }>('/api/matches/by-code/:code', async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+
+    const retryAfter = joinCodeRateLimit.check(req.ip);
+    if (retryAfter !== null) {
+      return reply.header('Retry-After', String(retryAfter)).code(429).send({
+        error: 'rate_limited', message: 'Too many join code lookups',
+      });
+    }
+    const code = normalizeJoinCode(req.params.code);
+    const match = code ? (await pool.query<{
+      id: string; state: string; owner_principal_id: string;
+    }>(
+      `SELECT id, state, owner_principal_id
+       FROM app.matches
+       WHERE join_code = $1 AND deleted_at IS NULL AND state IN ('preparing', 'active')`,
+      [code],
+    )).rows[0] : undefined;
+    if (!match) {
+      const failedRetryAfter = joinCodeRateLimit.recordFailure(req.ip);
+      if (failedRetryAfter !== null) {
+        return reply.header('Retry-After', String(failedRetryAfter)).code(429).send({
+          error: 'rate_limited', message: 'Too many join code lookups',
+        });
+      }
+      return reply.code(404).send({ error: 'join_code_not_found', message: 'Join code not found' });
+    }
+    if (match.state !== 'preparing') {
+      return reply.code(409).send({ error: 'match_already_started', message: 'Match has already started' });
+    }
+    const invitation = await issueCheckInToken(match.id, match.owner_principal_id);
+    return { matchId: match.id, ...invitation };
+  });
+
   // GET /api/matches/:id -> { match, seats:[{seatNo, principalId, displayName, points, status}], currentHand, scoreboard:[{seatNo, points}], checkedIn: number }
   app.get<{ Params: { id: string } }>('/api/matches/:id', async (req, reply) => {
     const principal = await requirePrincipal(req, reply);
@@ -609,6 +680,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     }
 
     const mRes = await pool.query<{
+      join_code: string | null;
       id: string;
       owner_principal_id: string;
       player_count: number;
@@ -738,6 +810,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     return {
       match: {
         id: m.id,
+        joinCode: m.join_code,
         ownerPrincipalId: m.owner_principal_id,
         playerCount: m.player_count,
         rulesetVersionId: m.ruleset_version_id,
@@ -1176,22 +1249,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
       return reply.code(409).send({ error: 'match_already_started', message: 'Match has already started' });
     }
 
-    const expiresAtMs = Date.now() + 10 * 60 * 1000;
-    const expiresAt = new Date(expiresAtMs);
-    const nonce = randomUUID();
-    const token = signCheckInToken(matchId, nonce, expiresAtMs);
-    const tokenHash = createHash('sha256').update(token).digest('hex');
-
-    await pool.query(
-      `INSERT INTO app.match_invitations (match_id, scope, generation, hmac_key_id, created_by, expires_at)
-       VALUES ($1, 'join', 1, $2, $3, $4)`,
-      [matchId, tokenHash, principal.id, expiresAt],
-    );
-
-    return {
-      token,
-      expiresAt: expiresAt.toISOString(),
-    };
+    return issueCheckInToken(matchId, principal.id);
   });
 
   // POST /api/matches/:id/check-ins { token, alias? } -> { seat: { seatNo }, grantId }
