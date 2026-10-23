@@ -257,12 +257,14 @@ fun calculateSettlement(
     ) invalid("isRiichiDeclarationDealIn requires a marked ron deal-in seat.")
 
     if (kind == "chombo") {
-        if (!resultInput.manualPayments.isNullOrEmpty()) {
+        val manualPayments = resultInput.manualPayments
+        if (!manualPayments.isNullOrEmpty()) {
             var manualSum = 0L
             // JS Object.entries enumerates integer property names in numerical order.
-            for ((seatNo, delta) in resultInput.manualPayments.toSortedMap()) {
+            for (seatNo in manualPayments.keys.sorted()) {
+                val delta = manualPayments.getValue(seatNo)
                 if (seatNo !in seatMap) invalid("Invalid manual payment seat: $seatNo.")
-                if (delta % 100 != 0) invalid("Invalid manual payment for seat $seatNo: $delta. Must be a multiple of 100.")
+                if (delta.toLong() % 100L != 0L) invalid("Invalid manual payment for seat $seatNo: $delta. Must be a multiple of 100.")
                 manualSum += delta
                 addEntry(seatNo, "manual_adjudication", delta.toDouble())
             }
