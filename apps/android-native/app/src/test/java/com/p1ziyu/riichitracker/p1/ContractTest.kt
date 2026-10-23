@@ -59,8 +59,11 @@ class ContractTest {
         val crypto = TokenCipher(key)
         val first = crypto.seal("bearer-secret")
         val second = crypto.seal("bearer-secret")
+        assertEquals(1, first[0].toInt())
+        assertEquals(1 + 12 + "bearer-secret".toByteArray(Charsets.UTF_8).size + 16, first.size)
         assertFalse(first.contentEquals(second))
         assertEquals("bearer-secret", crypto.open(first))
+        assertEquals("bearer-secret", crypto.open(second))
         first[first.lastIndex] = (first.last().toInt() xor 1).toByte()
         assertThrows(javax.crypto.AEADBadTagException::class.java) { crypto.open(first) }
     }

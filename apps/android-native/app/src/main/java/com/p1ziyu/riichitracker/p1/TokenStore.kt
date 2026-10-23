@@ -6,19 +6,20 @@ import android.security.keystore.KeyProperties
 import android.util.AtomicFile
 import java.io.File
 import java.security.KeyStore
-import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /** Binary format: version byte, 12-byte random nonce, authenticated ciphertext + tag. */
-class TokenCipher(private val key: SecretKey, private val random: SecureRandom = SecureRandom()) {
+class TokenCipher(private val key: SecretKey) {
     fun seal(token: String): ByteArray {
-        val nonce = ByteArray(12).also(random::nextBytes)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, nonce))
-        return byteArrayOf(1) + nonce + cipher.doFinal(token.toByteArray(Charsets.UTF_8))
+        cipher.init(Cipher.ENCRYPT_MODE, key)
+        val ciphertext = cipher.doFinal(token.toByteArray(Charsets.UTF_8))
+        val nonce = cipher.iv
+        check(nonce.size == 12) { "Invalid GCM nonce length" }
+        return byteArrayOf(1) + nonce + ciphertext
     }
 
     fun open(bytes: ByteArray): String {

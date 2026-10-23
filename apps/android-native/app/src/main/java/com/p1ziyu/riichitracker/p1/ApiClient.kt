@@ -44,7 +44,7 @@ class ApiClient(private val store: TokenStore, val client: OkHttpClient = OkHttp
                 text
             }
         } catch (e: IOException) { throw e }
-        catch (_: Exception) { throw IOException("网络连接失败") }
+        catch (e: Exception) { throw IOException("网络连接失败", e) }
     }
 
     suspend fun signIn(email: String, password: String, name: String? = null) {
