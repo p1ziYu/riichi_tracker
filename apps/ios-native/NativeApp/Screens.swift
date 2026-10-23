@@ -173,6 +173,11 @@ private struct RuleInfo: View {
 
 struct AuthScreen: View {
     @ObservedObject var session: AppSession
+    let joiningByLink: Bool
+    init(session: AppSession, joiningByLink: Bool = false) {
+        self.session = session
+        self.joiningByLink = joiningByLink
+    }
     @State private var registering = false
     @State private var email = ""
     @State private var password = ""
@@ -228,7 +233,7 @@ struct AuthScreen: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(busy || email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || password.isEmpty || (registering && name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
-                Button("以在线临时访客进入") {
+                Button(joiningByLink ? "临时访客加入此桌" : "以在线临时访客进入") {
                     Task {
                         guard !busy else { return }
                         busy = true; error = nil

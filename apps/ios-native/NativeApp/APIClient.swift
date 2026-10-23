@@ -113,10 +113,13 @@ private final class SameOriginRedirects: NSObject, URLSessionTaskDelegate {
 final class APIClient {
     private let store = TokenStore()
     private let origin: URLComponents?
-    private let transport = URLSession(configuration: .default, delegate: SameOriginRedirects(), delegateQueue: nil)
+    private let transport: URLSession
+    private let bearerOverride: String?
     var onSessionExpired: (() -> Void)?
 
-    init() {
+    init(transport: URLSession? = nil, bearerOverride: String? = nil) {
+        self.transport = transport ?? URLSession(configuration: .default, delegate: SameOriginRedirects(), delegateQueue: nil)
+        self.bearerOverride = bearerOverride
         let configured = (Bundle.main.object(forInfoDictionaryKey: "APIBaseURL") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let value = configured.flatMap { $0.isEmpty ? nil : $0 } ?? "https://riichi.p1ziyu.com"
@@ -171,6 +174,7 @@ final class APIClient {
               let url = URL(string: "/api/auth/sign-out", relativeTo: baseURL)?.absoluteURL else { return false }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.setValue("https://riichi.p1ziyu.com", forHTTPHeaderField: "Origin")
         request.setValue("Bearer \(oldToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data("{}".utf8)
@@ -207,7 +211,7 @@ final class APIClient {
             // A damaged saved credential must not prevent an explicit fresh login.
             token = nil
         } else {
-            do { token = try store.load() }
+            do { token = bearerOverride ?? (try store.load()) }
             catch {
                 onSessionExpired?()
                 throw error
@@ -215,6 +219,8 @@ final class APIClient {
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
+        // Better Auth requires a trusted Origin on native sign-in; bearer match requests do not.
+        if isAuth { request.setValue("https://riichi.p1ziyu.com", forHTTPHeaderField: "Origin") }
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if let encodedBody {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -228,7 +234,7 @@ final class APIClient {
             throw APIError(status: nil, message: "服务器响应无效")
         }
         guard (200..<300).contains(response.statusCode) else {
-            if response.statusCode == 401, let token, (try? store.load()) == token {
+            if response.statusCode == 401, bearerOverride == nil, let token, (try? store.load()) == token {
                 store.clear()
                 onSessionExpired?()
             }

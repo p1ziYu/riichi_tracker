@@ -9,13 +9,36 @@ struct PendingResultEnvelope: Codable {
     let handID: String
     let body: Data
 }
-private struct FinalizeSeats: Encodable { let dealerSeatNo: Int? }
-private struct MarkCommand: Encodable { let seatNo: Int; let riichi: Bool; let expectedMarkRevision: Int64 }
+struct FinalizeSeats: Encodable { let dealerSeatNo: Int? }
+struct MarkCommand: Encodable { let seatNo: Int; let riichi: Bool; let expectedMarkRevision: Int64 }
 private struct ResultPreviewCommand: Encodable { let resultInput: [String: JSONValue] }
-private struct ResultCommand: Encodable {
+struct ResultCommand: Encodable {
     let resultInput: [String: JSONValue]
     let confirmedMarkRevision: Int64
     let clientEventId: String
+}
+
+enum OnlineCommandPolicy {
+    static func canToggle(_ seat: HandSeatDTO, points: Int, allowLowPointRiichi: Bool) -> Bool {
+        if seat.isRiichi { return seat.riichiChangeUsage.cancels < 1 }
+        return seat.riichiChangeUsage.declares < 2 && (allowLowPointRiichi || points >= 1000)
+    }
+    static func refreshAfter(_ error: APIError) -> Bool { error.status == 409 }
+    static func approvalError(_ error: APIError) -> String? {
+        switch error.code {
+        case "seat_taken": return "座位已被占用，请刷新牌桌并选择其他空座。"
+        case "join_request_already_decided": return "这份申请已被处理，不能再次批准。"
+        case "join_request_not_found": return "申请编号不存在或不属于本桌，请核对回执。"
+        case "match_already_started": return "牌桌已经开局，无法批准新的申请。"
+        default: return nil
+        }
+    }
+    static func previewBinding(handID: String, revision: Int64, input: [String: JSONValue]) -> String? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(input) else { return nil }
+        return "\(handID):\(revision):\(data.base64EncodedString())"
+    }
 }
 
 /// Keychain retains the exact bytes of an ambiguous result POST, scoped to the authenticated principal.
@@ -69,7 +92,8 @@ struct InvitationQR: View {
         Group {
             if let image {
                 Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
-                    .frame(maxWidth: 240, maxHeight: 240).accessibilityLabel("签到链接二维码")
+                    .frame(maxWidth: 240, maxHeight: 240)
+                    .accessibilityLabel(link.hasPrefix("{") ? "申请回执二维码" : "签到链接二维码")
             } else { Text("正在生成二维码；也可复制链接") }
         }
         .task(id: link) { image = makeQR() }
@@ -83,7 +107,7 @@ struct InvitationQR: View {
         return UIImage(cgImage: image)
     }
 }
-private enum InvitationClock {
+enum InvitationClock {
     static let fractional: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -114,11 +138,21 @@ struct OnlineTableActions: View {
     @State private var pendingHand: String?
     @State private var pendingLoaded = false
     @State private var confirmDiscard = false
+    @State private var receiptInput = ""
+    @State private var scanningReceipt = false
+    @State private var approvalSeat: Int?
 
     private var matchID: String { snapshot.match.id }
     private var base: String { "/api/matches/\(matchID)" }
     private var isOwner: Bool { session.principalID != nil && session.principalID == snapshot.match.ownerPrincipalId }
     private var signedIn: Bool { snapshot.seats.contains { $0.principalId == session.principalID && $0.status == "checked_in" } }
+    private var scannedReceipt: JoinReceipt? { JoinReceipt(receiptInput) }
+    private var approvalReceipt: JoinReceipt? {
+        JoinFlow.receipt(receiptInput, forMatch: matchID)
+    }
+    private var emptySeats: [SeatDTO] {
+        snapshot.seats.filter { $0.principalId == nil }.sorted { $0.seatNo < $1.seatNo }
+    }
     private var invitationURL: String? {
         guard let invitation, !invitationExpired, snapshot.match.status == "preparing",
               let expires = InvitationClock.expiration(invitation.expiresAt), expires > Date(),
@@ -135,8 +169,44 @@ struct OnlineTableActions: View {
                 Button("复制房间码") { UIPasteboard.general.string = code }
             }
             if isOwner && snapshot.match.status == "preparing" {
-                Text("签到码仅供已获服务端批准座位的玩家。当前客户端不提供申请批准入口；未批准玩家无法签到或帮助开局。")
+                Text("申请者须出示申请回执。房主扫描或粘贴回执，批准一个空座后，再发送一次性签到凭证。")
                     .font(.footnote).foregroundStyle(.secondary)
+                TextField("粘贴申请回执 JSON", text: $receiptInput, axis: .vertical)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                Button("粘贴申请回执") { receiptInput = UIPasteboard.general.string ?? "" }
+                Button("扫码确认入座") { scanningReceipt = true }
+                if let approvalReceipt {
+                    Text("自述昵称（未验证）：\(approvalReceipt.name)")
+                    Text("申请编号：\(approvalReceipt.joinRequestId)")
+                        .font(.caption2).textSelection(.enabled)
+                    if !emptySeats.isEmpty {
+                        Picker("批准座位", selection: $approvalSeat) {
+                            Text("请选择空座").tag(Int?.none)
+                            ForEach(emptySeats) { seat in Text("\(seat.seatNo + 1) 号位").tag(Optional(seat.seatNo)) }
+                        }
+                        Button("批准申请者入座") {
+                            guard let seat = approvalSeat, emptySeats.contains(where: { $0.seatNo == seat }) else { return }
+                            execute {
+                                do {
+                                    let _: [String: JSONValue] = try await session.api.post(
+                                        "\(base)/join-requests/\(approvalReceipt.joinRequestId)/approve",
+                                        body: SeatClaim(seatNo: seat))
+                                    receiptInput = ""
+                                    approvalSeat = nil
+                                } catch let failure as APIError {
+                                    throw APIError(status: failure.status, code: failure.code,
+                                                   retryAfter: failure.retryAfter,
+                                                   message: OnlineCommandPolicy.approvalError(failure) ?? failure.localizedDescription)
+                                }
+                            }
+                        }.disabled(busy || approvalSeat == nil || !emptySeats.contains(where: { $0.seatNo == approvalSeat }))
+                    } else { Text("没有可批准的空座。").foregroundStyle(.secondary) }
+                } else if !receiptInput.isEmpty {
+                    Text(scannedReceipt == nil
+                         ? "申请回执格式无效，请重新扫码或粘贴完整 JSON。"
+                         : "申请回执不属于本桌，请核对牌桌编号。")
+                        .foregroundStyle(.red)
+                }
                 ForEach(snapshot.seats.sorted { $0.seatNo < $1.seatNo }) { seat in
                     if seat.principalId == nil || (seat.principalId == session.principalID && seat.status != "checked_in") {
                         Button("房主选择 \(seat.seatNo + 1) 号位") {
@@ -170,13 +240,12 @@ struct OnlineTableActions: View {
                         let _: [String: JSONValue] = try await session.api.post("\(base)/seats/finalize", body: FinalizeSeats(dealerSeatNo: dealer))
                     }
                 }
-                .disabled(busy || snapshot.seats.contains { $0.status != "checked_in" })
+                .disabled(busy || snapshot.seats.count != snapshot.match.playerCount || snapshot.seats.contains { $0.status != "checked_in" })
             }
             if snapshot.match.status == "in_progress", signedIn {
                 if let hand = snapshot.currentHand, hand.state == "open" {
                     ForEach(hand.seats, id: \.seatNo) { seat in
                         let used = seat.riichiChangeUsage
-                        let eligible = seat.isRiichi ? used.cancels < 1 : used.declares < 2
                         let points = snapshot.seats.first { $0.seatNo == seat.seatNo }?.points ?? 0
                         let lowAllowed = snapshot.match.rulesSnapshot?["allowLowPointRiichi"] == .bool(true)
                         Button("\(seat.seatNo + 1) 号位 · \(seat.isRiichi ? "取消立直" : "宣言立直") · 宣言 \(used.declares)/2 取消 \(used.cancels)/1") {
@@ -184,7 +253,7 @@ struct OnlineTableActions: View {
                                 let _: CommandReceiptDTO = try await session.api.post("\(base)/hands/\(hand.id)/marks", body: MarkCommand(seatNo: seat.seatNo, riichi: !seat.isRiichi, expectedMarkRevision: hand.markRevision))
                             }
                         }
-                        .disabled(busy || !eligible || (!seat.isRiichi && !lowAllowed && points < 1000))
+                        .disabled(busy || !OnlineCommandPolicy.canToggle(seat, points: points, allowLowPointRiichi: lowAllowed))
                     }
                     Button("录入本局结果") { showResult = true }
                         .disabled(busy || !pendingLoaded || pendingBody != nil)
@@ -250,6 +319,18 @@ struct OnlineTableActions: View {
         } message: {
             Text("先刷新确认服务器仍显示本局未结算。放弃后若旧请求实际已入账，新输入可能与服务器状态冲突；服务器始终只允许一笔有效结果。")
         }
+        .sheet(isPresented: $scanningReceipt) {
+            NavigationStack {
+                CameraScanner { text in
+                    scanningReceipt = false
+                    receiptInput = text
+                }
+                .navigationTitle("扫描申请回执")
+                .toolbar { ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { scanningReceipt = false }
+                } }
+            }
+        }
         .sheet(isPresented: $showResult) {
             if let hand = snapshot.currentHand {
                 NavigationStack {
@@ -303,7 +384,7 @@ struct OnlineTableActions: View {
         Task {
             do { try await operation(); if refresh { await onUpdated() } }
             catch {
-                if let failure = error as? APIError, failure.status == 409 { await onUpdated() }
+                if let failure = error as? APIError, OnlineCommandPolicy.refreshAfter(failure) { await onUpdated() }
                 self.error = error.localizedDescription
             }
             busy = false
@@ -365,10 +446,7 @@ private struct ResultEntry: View {
     }
     private var inputBinding: String? {
         guard let input else { return nil }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        guard let data = try? encoder.encode(input) else { return nil }
-        return "\(hand.id):\(hand.markRevision):\(data.base64EncodedString())"
+        return OnlineCommandPolicy.previewBinding(handID: hand.id, revision: hand.markRevision, input: input)
     }
     var body: some View {
         Form {
@@ -411,7 +489,7 @@ private struct ResultEntry: View {
                         }
                     }
                     Text("下一局：\(preview.nextHand.roundWind) \(preview.nextHand.roundNumber) · 庄 \(preview.nextHand.dealerSeatNo + 1) · 本场 \(preview.nextHand.honba) · 供托 \(preview.nextHand.riichiPool) 点")
-                    Button("确认并结算") { Task { await submit() } }.disabled(busy)
+                    Button("确认并结算") { Task { await submit() } }.disabled(busy || submitted)
                 } else { Text("输入或立直版本变化后，请重新预览。") }
             }
         }
@@ -449,7 +527,7 @@ private struct ResultEntry: View {
         } catch { self.error = error.localizedDescription }
     }
     private func submit() async {
-        guard !busy, preview != nil, binding == inputBinding, let input else { return }
+        guard !busy, !submitted, preview != nil, binding == inputBinding, let input else { return }
         busy = true; error = nil
         defer { busy = false }
         do {

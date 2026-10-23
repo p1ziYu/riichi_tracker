@@ -7,6 +7,8 @@ struct IchihimeNativeApp: App {
     @StateObject private var session = AppSession()
     @State private var checkInLink: String?
     @State private var showingCheckIn = false
+    @State private var selectedTab = 0
+    @State private var lobbyPath: [String] = []
 
     init() {
         let appearance = UINavigationBarAppearance()
@@ -29,14 +31,15 @@ struct IchihimeNativeApp: App {
                 if session.identity == .restoring {
                     ProgressView("恢复安全会话中…")
                 } else if session.authenticated {
-                    TabView {
-                        NavigationStack {
+                    TabView(selection: $selectedTab) {
+                        NavigationStack(path: $lobbyPath) {
                             MatchListScreen(session: session, lobby: true)
                                 .navigationDestination(for: String.self) { id in
                                     TableScreen(session: session, matchId: id)
                                 }
                         }
                         .tabItem { Label("大厅", systemImage: "house") }
+                        .tag(0)
                         NavigationStack {
                             MatchListScreen(session: session, lobby: false)
                                 .navigationDestination(for: String.self) { id in
@@ -44,6 +47,7 @@ struct IchihimeNativeApp: App {
                                 }
                         }
                         .tabItem { Label("战绩", systemImage: "list.bullet.rectangle") }
+                        .tag(1)
                         NavigationStack {
                             ProfileScreen(session: session, onCheckIn: {
                                 checkInLink = nil
@@ -51,6 +55,7 @@ struct IchihimeNativeApp: App {
                             })
                         }
                         .tabItem { Label("我的", systemImage: "person.crop.circle") }
+                        .tag(2)
                     }
                 } else {
                     NavigationStack { AuthScreen(session: session) }
@@ -72,11 +77,14 @@ struct IchihimeNativeApp: App {
                 NavigationStack {
                     Group {
                         if session.authenticated {
-                            CheckInScreen(session: session, link: checkInLink) {
+                            CheckInScreen(session: session, link: checkInLink) { matchID in
                                 checkInLink = nil
+                                selectedTab = 0
+                                lobbyPath = [matchID]
+                                showingCheckIn = false
                             }
                         } else {
-                            AuthScreen(session: session)
+                            AuthScreen(session: session, joiningByLink: checkInLink != nil)
                                 .safeAreaInset(edge: .bottom) {
                                     Button("关闭签到") { showingCheckIn = false; checkInLink = nil }
                                         .frame(maxWidth: .infinity).padding()
@@ -90,6 +98,12 @@ struct IchihimeNativeApp: App {
             }
             .onChange(of: showingCheckIn) { _, shown in
                 if !shown { checkInLink = nil }
+            }
+            .onChange(of: session.identity) { _, identity in
+                if identity == .localOnly {
+                    lobbyPath = []
+                    selectedTab = 0
+                }
             }
             .onOpenURL { url in
                 if CheckInDestination(url.absoluteString) != nil {
