@@ -32,13 +32,17 @@ private val presets = mapOf("startingPoints" to listOf(25000, 30000, 35000),
 
 @Composable
 fun CreateScreen(templates: List<TemplateDto>, busy: Boolean, serverError: String?,
-                 onCreate: (OnlineRules) -> Unit, onBack: () -> Unit) {
+                 onCreate: (OnlineRules) -> Unit, onBack: () -> Unit,
+                 onCreateLocal: ((OnlineRules, String, List<String>, Int) -> Unit)? = null) {
     var selected by remember { mutableStateOf<OnlineRules?>(null) }
     var step by remember { mutableIntStateOf(0) }
     var changeWarning by remember { mutableStateOf<TemplateDto?>(null) }
     var expanded by remember { mutableStateOf(true) }
     var editVersion by remember { mutableIntStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
+    var localName by remember { mutableStateOf("") }
+    var playerNames by remember { mutableStateOf(List(4) { "" }) }
+    var dealer by remember { mutableIntStateOf(0) }
     val rules = selected
     Column(Modifier.fillMaxSize().background(Brand.background).verticalScroll(rememberScrollState()).padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -136,10 +140,25 @@ fun CreateScreen(templates: List<TemplateDto>, busy: Boolean, serverError: Strin
                 val validationError = evaluated.exceptionOrNull()?.message
                 Button(onClick = { step = 2 }, enabled = validationError == null) { Text("确认规则 →") }
             } else {
-                Text("规则仅调整此桌；提交后服务端冻结规则快照。", color = Brand.text)
+                Text(if (onCreateLocal == null) "规则仅调整此桌；提交后服务端冻结规则快照。" else "规则仅调整此桌；创建后保存完整本地规则快照。", color = Brand.text)
                 Text("已自定义 ${rules.changed} 项 · ${rules.playerCount} 麻", color = Brand.text)
-                Button(onClick = { onCreate(rules) }, enabled = !busy && runCatching { rules.validated() }.isSuccess) { Text(if (busy) "正在创建…" else "创建在线牌桌") }
-                Text("创建后桌主先选座；其他玩家可用房间码或链接直接选座签到，座位齐备后确认开局。", color = Brand.muted)
+                if (onCreateLocal != null) {
+                    OutlinedTextField(localName, { localName = it }, label = { Text("牌桌名称") }, modifier = Modifier.fillMaxWidth())
+                    repeat(rules.playerCount) { seat ->
+                        OutlinedTextField(playerNames[seat], { value ->
+                            if (value.length <= 40) playerNames = playerNames.toMutableList().also { it[seat] = value }
+                        }, label = { Text("${seat + 1}号位玩家（最多 40 字）") }, modifier = Modifier.fillMaxWidth())
+                        OutlinedButton(onClick = { dealer = seat }) { Text("${if (dealer == seat) "●" else "○"} 指定 ${seat + 1}号位起家") }
+                    }
+                    Button(onClick = { onCreateLocal(rules, localName.trim(), playerNames.take(rules.playerCount), dealer) },
+                        enabled = !busy && localName.isNotBlank() && runCatching { rules.validated() }.isSuccess) {
+                        Text(if (busy) "正在创建…" else "创建本地牌桌并开首局")
+                    }
+                    Text("仅保存在此设备；没有身份、签到或云端同步。", color = Brand.muted)
+                } else {
+                    Button(onClick = { onCreate(rules) }, enabled = !busy && runCatching { rules.validated() }.isSuccess) { Text(if (busy) "正在创建…" else "创建在线牌桌") }
+                    Text("创建后桌主先选座；其他玩家可用房间码或链接直接选座签到，座位齐备后确认开局。", color = Brand.muted)
+                }
             }
             OutlinedButton(onClick = { step = if (step == 2) 1 else 0 }) { Text("返回上一步") }
         }

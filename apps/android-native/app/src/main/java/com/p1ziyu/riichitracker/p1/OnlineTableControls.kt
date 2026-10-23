@@ -116,7 +116,8 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
         confirmButton = { TextButton(onClick = { confirmFinish = false; model.finish(id) }) { Text("确认终局") } },
         dismissButton = { TextButton(onClick = { confirmFinish = false }) { Text("取消") } })
     if (showResult && participant && hand != null && open) {
-        ResultEditor(id, table, hand, state, model) { showResult = false }
+        ResultEditor(id, table, hand, state, { model.saveDraft(id, hand, it) },
+            { model.preview(id, hand, it) }, { model.submit(id, hand, it) }) { showResult = false }
     }
     movingSeat?.let { from ->
         val source = table.seats.firstOrNull { it.seatNo == from && it.principalId != null }
@@ -150,8 +151,10 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
     }
 }
 
-@Composable private fun ResultEditor(id: String, table: TableSnapshot, hand: CurrentHandDto,
-                                      state: AppState, model: AppViewModel, onDismiss: () -> Unit) {
+@Composable fun ResultEditor(id: String, table: TableSnapshot, hand: CurrentHandDto,
+                             state: AppState, onSave: (ResultDraft) -> Unit,
+                             onPreview: (JsonObject) -> Unit, onSubmit: (JsonObject) -> Unit,
+                             onDismiss: () -> Unit) {
     val seats = table.seats.sortedBy { it.seatNo }
     var draft by remember(hand.id) {
         mutableStateOf(state.draft?.takeIf { it.matchId == id && it.handId == hand.id }?.draft
@@ -160,14 +163,14 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
     }
     fun update(next: ResultDraft) {
         draft = next
-        model.saveDraft(id, hand, next)
+        onSave(next)
     }
     val cap = ronWinnerLimit(table.match.rulesSnapshot, table.match.playerCount)
     val validated = validateResultDraft(draft, table, hand)
     val input = validated.input
     val preview = state.preview?.takeIf { input != null && it.matches(hand, input) }
     AlertDialog(onDismissRequest = { if (!state.busy) onDismiss() },
-        title = { Text("本局支付 · 以服务端预览为准") },
+        title = { Text(if (state.session == SessionMode.LOCAL_ONLY) "本局支付 · 本机引擎预览" else "本局支付 · 以服务端预览为准") },
         text = {
             Column(Modifier.heightIn(max = 550.dp).verticalScroll(androidx.compose.foundation.rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -274,9 +277,9 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
         },
         confirmButton = {
             Column {
-                Button(onClick = { input?.let { model.preview(id, hand, it) } },
-                    enabled = input != null && !state.busy && state.pendingResult == null) { Text("服务端预览") }
-                Button(onClick = { input?.let { model.submit(id, hand, it) } },
+                Button(onClick = { input?.let(onPreview) },
+                    enabled = input != null && !state.busy && state.pendingResult == null) { Text("预览支付") }
+                Button(onClick = { input?.let(onSubmit) },
                     enabled = preview != null && !state.busy && state.pendingResult == null) { Text("确认并结算") }
             }
         }, dismissButton = { TextButton(onClick = onDismiss, enabled = !state.busy) { Text("关闭") } })

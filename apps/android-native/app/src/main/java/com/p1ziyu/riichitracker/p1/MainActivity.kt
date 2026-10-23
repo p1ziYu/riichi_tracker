@@ -36,6 +36,7 @@ import kotlinx.serialization.Serializable
 
 class MainActivity : ComponentActivity() {
     private val model: AppViewModel by viewModels()
+    private val localModel: LocalViewModel by viewModels()
     private var incomingLink by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,15 +51,14 @@ class MainActivity : ComponentActivity() {
                             Text(state.authError ?: "正在恢复账户身份…")
                             if (state.authError != null) {
                                 androidx.compose.material3.Button(onClick = model::retryRestore) { Text("重试恢复") }
+                                androidx.compose.material3.OutlinedButton(onClick = model::localOnly) { Text("改用本地无身份模式（保留在线凭据）") }
                                 androidx.compose.material3.TextButton(onClick = model::abandonRestore) { Text("放弃本机凭据并重新登录") }
                             }
                         }
                     }
                     state.session == SessionMode.LOCAL_ONLY -> {
-                        androidx.compose.foundation.layout.Column {
-                            Text("本地无身份 · 当前版本尚未提供离线记分；不会创建在线访客身份。")
-                            androidx.compose.material3.Button(onClick = model::online) { Text("进入在线登录") }
-                        }
+                        val local by localModel.ui.collectAsState()
+                        LocalContent(local, localModel, model::online)
                     }
                     state.session == SessionMode.SIGNED_OUT -> {
                         AuthScreen(state.registering, state.authBusy, state.authError,
@@ -142,12 +142,13 @@ private fun MainContent(model: AppViewModel, state: AppState, onPasteLink: () ->
                     { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName)
             }
             composable<Create> {
-                CreateScreen(state.templates, state.busy, state.actionError, model::createMatch) { nav.popBackStack() }
+                CreateScreen(state.templates, state.busy, state.actionError, model::createMatch,
+                    onBack = { nav.popBackStack() })
             }
             composable<Profile> {
                 LaunchedEffect(Unit) { model.loadProfile() }
                 ProfileScreen(state.profile, state.profileError, state.diagnostic,
-                    model::runDiagnostic, model::logout, onPasteLink, model::loadProfile)
+                    model::runDiagnostic, model::logout, onPasteLink, model::loadProfile, model::localOnly)
             }
             composable<Table> { stack ->
                 val id = stack.toRoute<Table>().id

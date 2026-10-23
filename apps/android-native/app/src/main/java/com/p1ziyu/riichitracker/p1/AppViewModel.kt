@@ -126,9 +126,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
-    fun localOnly() { state.value = state.value.copy(session = SessionMode.LOCAL_ONLY) }
+    fun localOnly() {
+        generation++
+        liveSocket?.cancel()
+        liveSocket = null
+        tableId = null
+        state.value = AppState(session = SessionMode.LOCAL_ONLY)
+    }
     fun online() {
-        state.value = state.value.copy(session = if (store.load() != null) SessionMode.RESTORING else SessionMode.SIGNED_OUT)
+        generation++
+        state.value = AppState(session = if (store.load() != null) SessionMode.RESTORING else SessionMode.SIGNED_OUT)
         if (state.value.session == SessionMode.RESTORING) restore()
     }
     fun logout() {

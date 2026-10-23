@@ -373,6 +373,7 @@ fun ProfileScreen(
     onLogout: () -> Unit,
     onCheckIn: () -> Unit,
     onRetry: () -> Unit,
+    onLocal: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize().background(Brand.background).verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -396,6 +397,7 @@ fun ProfileScreen(
         SectionTitle("桌边入口")
         OutlinedButton(onClick = onCheckIn) { Text("扫码、粘贴链接或输入房间码") }
         OutlinedButton(onClick = onDiagnostic) { Text("关于 / 诊断 · 引擎自检") }
+        OutlinedButton(onClick = onLocal) { Text("进入本地无身份模式") }
         if (diagnostic != null) BrandPanel(Modifier.fillMaxWidth()) { Text("诊断结果：$diagnostic", Modifier.padding(16.dp)) }
         Button(onClick = onLogout) { Text("退出登录") }
     }

@@ -57,4 +57,16 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.17")
+    // Robolectric publishes no Linux arm64 native runtime. Keep any community-built
+    // test-only loader outside the repository and pass its verified path explicitly.
+    providers.gradleProperty("robolectricArm64Runtime").orNull?.let { path ->
+        require(file(path).isFile) { "Robolectric arm64 test runtime not found: $path" }
+        testRuntimeOnly(files(path))
+    }
+}
+
+tasks.withType<Test>().configureEach {
+    // Robolectric's SDK 36 FileDescriptor interceptor needs this JDK 21 export.
+    jvmArgs("--add-exports=java.base/jdk.internal.access=ALL-UNNAMED")
 }
