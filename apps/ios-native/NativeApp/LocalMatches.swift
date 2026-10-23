@@ -173,7 +173,7 @@ struct LocalFailure: LocalizedError {
         for (number, sql) in Self.migrations where number > version {
             try run("BEGIN IMMEDIATE")
             do { try run(sql); try run("PRAGMA user_version = \(number)"); try run("COMMIT") }
-            catch { try? run("ROLLBACK"); throw error("本地迁移失败") }
+            catch { try? run("ROLLBACK"); throw self.error("本地迁移失败") }
         }
     }
     private func statement(_ sql: String) throws -> OpaquePointer {
