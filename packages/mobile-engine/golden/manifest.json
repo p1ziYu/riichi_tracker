@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "engineVersion": "0.1.0",
+  "engineSourceSha256": "e17744271610b2a82b0825c8ca4bfa7aa4604ccbdb5577cefc032a2d9b003df4",
+  "gitCommit": "ab02fc7d8799cc576b3ed96bb3545396a9d147c0",
+  "generatorVersion": "1.0.0",
+  "files": {
+    "fixtures-unit.jsonl": {
+      "counts": {
+        "normalizeRulesConfig": 34,
+        "calculateSettlement": 204,
+        "isAutomaticMatchEnd": 8,
+        "calculateTerminalSettlement": 11
+      },
+      "totalCount": 257,
+      "sha256": "a1fbd089bb017930d63fbdb23fcf79eee26109629219ed75787c041f92203fb2"
+    },
+    "fixtures-property.jsonl": {
+      "counts": {
+        "normalizeRulesConfig": 0,
+        "calculateSettlement": 6706,
+        "isAutomaticMatchEnd": 0,
+        "calculateTerminalSettlement": 4000
+      },
+      "totalCount": 10706,
+      "sha256": "a9f358632178ba5c949c7df6614f3b599d073dfda65e12fb83eaaa6d6538f3d8"
+    },
+    "fixtures-supplementary.jsonl": {
+      "counts": {
+        "normalizeRulesConfig": 13,
+        "calculateSettlement": 487,
+        "isAutomaticMatchEnd": 6,
+        "calculateTerminalSettlement": 44
+      },
+      "totalCount": 550,
+      "sha256": "a4912e99498f0636e4c052811d02872b9e48656b20c6b8c01909efd050334e2e"
+    }
+  },
+  "totalCount": 11513
+}
