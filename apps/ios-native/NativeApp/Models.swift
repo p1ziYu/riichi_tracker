@@ -186,9 +186,31 @@ struct JoinCodeDTO: Decodable {
     let expiresAt: String
 }
 
+struct CheckInSeatsDTO: Decodable {
+    struct Match: Decodable {
+        let id: String
+        let playerCount: Int
+        let status: String
+    }
+    struct Seat: Decodable {
+        let seatNo: Int
+        let principalId: String?
+        let displayName: String?
+        let status: String?
+    }
+
+    let match: Match
+    let seats: [Seat]
+
+    func seat(at number: Int) -> Seat? {
+        seats.first { $0.seatNo == number }
+    }
+}
+
 struct CheckInResultDTO: Decodable {
     struct Seat: Decodable { let seatNo: Int }
     let seat: Seat
+    let grantId: String
 }
 
 struct CommandReceiptDTO: Decodable {

@@ -20,7 +20,6 @@ private final class StubProtocol: URLProtocol {
 
 final class JoinFlowTests: XCTestCase {
     private let match = "11111111-1111-4111-8111-111111111111"
-    private let requestID = "22222222-2222-4222-8222-222222222222"
 
     @MainActor private func client(_ handler: @escaping (URLRequest) -> (Int, [String: String], Data)) -> APIClient {
         StubProtocol.handler = handler
@@ -78,134 +77,208 @@ final class JoinFlowTests: XCTestCase {
         XCTAssertNotEqual(original, try JSONEncoder().encode(edited))
     }
 
-    func testCodeValidationReceiptRoundTripAndMatchMismatch() throws {
+    func testCodeValidationAndUniversalLinkRouting() {
         XCTAssertEqual(JoinFlow.canonicalCode(" abcd23 \n"), "ABCD23")
         for invalid in ["ABCD01", "IIIIII", "OOOOOO", "ABC23", "ABC2345", "ABC/23"] {
             XCTAssertNil(JoinFlow.canonicalCode(invalid), invalid)
         }
-        let receipt = try XCTUnwrap(JoinReceipt(matchId: match, joinRequestId: requestID, name: "访客"))
-        XCTAssertEqual(JoinReceipt(receipt.text), receipt)
-        XCTAssertEqual(JoinFlow.receipt(receipt.text, forMatch: match), receipt)
-        XCTAssertNil(JoinFlow.receipt(receipt.text, forMatch: UUID().uuidString))
-        XCTAssertNil(JoinFlow.receipt("not JSON", forMatch: match))
-        XCTAssertNil(JoinReceipt(receipt.text.replacingOccurrences(of: "\"v\":1", with: "\"v\":2")))
-        XCTAssertNil(JoinReceipt(matchId: match, joinRequestId: "bad", name: "访客"))
-        XCTAssertNotNil(CheckInDestination("https://riichi.p1ziyu.com/checkin/\(match)?token=valid"))
-        XCTAssertNil(CheckInDestination("https://evil.example/checkin/\(match)?token=valid"))
+        let link = "https://riichi.p1ziyu.com/checkin/\(match)?token=abc%2B%26"
+        XCTAssertEqual(CheckInDestination(link)?.matchID, match)
+        XCTAssertEqual(CheckInDestination(link)?.token, "abc+&")
+        XCTAssertEqual(CheckInDestination("ichihime-native://checkin/\(match)?token=valid")?.matchID, match)
+        for invalid in [
+            "http://riichi.p1ziyu.com/checkin/\(match)?token=valid",
+            "https://evil.example/checkin/\(match)?token=valid",
+            "https://riichi.p1ziyu.com.evil.example/checkin/\(match)?token=valid",
+            "https://riichi.p1ziyu.com/checkin/\(match)?token=a&token=b",
+            "https://riichi.p1ziyu.com/checkin/\(match)?token=valid&other=1",
+            "https://riichi.p1ziyu.com/checkin/not-a-uuid?token=valid"
+        ] { XCTAssertNil(CheckInDestination(invalid), invalid) }
     }
 
-    @MainActor func testFakeHTTPJoinIsSingleRequestAndApprovalPath() async throws {
-        var posts: [String] = []
+    func testPreviewOccupancyMapsZeroBasedSeatsAndMissingSlots() throws {
+        let preview = try JSONDecoder().decode(CheckInSeatsDTO.self, from: Data("""
+        {"match":{"id":"\(match)","playerCount":4,"status":"preparing"},
+         "seats":[{"seatNo":2,"principalId":"guest","displayName":"访客","status":"checked_in"},
+                  {"seatNo":0,"principalId":"owner","displayName":"桌主","status":"checked_in"}]}
+        """.utf8))
+        XCTAssertEqual(preview.match.playerCount, 4)
+        XCTAssertEqual(preview.seat(at: 0)?.displayName, "桌主")
+        XCTAssertNil(preview.seat(at: 1)?.principalId)
+        XCTAssertEqual(preview.seat(at: 2)?.displayName, "访客")
+        XCTAssertNil(preview.seat(at: 3)?.principalId)
+        XCTAssertEqual(preview.seats.filter { $0.principalId != nil }.count, 2)
+    }
+
+    @MainActor func testDirectPreviewExplicitAndAutoCheckInAndIdempotentResponse() async throws {
+        var requests: [URLRequest] = []
         let client = client { request in
-            let path = request.url!.path
-            posts.append(path)
-            if path.hasSuffix("/join-requests") {
-                return (200, [:], Data(#"{"joinRequestId":"22222222-2222-4222-8222-222222222222","status":"pending"}"#.utf8))
+            requests.append(request)
+            if request.httpMethod == "GET" {
+                return (200, [:], Data("""
+                {"match":{"id":"\(self.match)","playerCount":4,"status":"preparing"},
+                 "seats":[{"seatNo":0,"principalId":"owner","displayName":"桌主","status":"checked_in"}]}
+                """.utf8))
             }
-            return (200, [:], Data(#"{"ok":true,"joinRequestId":"22222222-2222-4222-8222-222222222222","seatNo":2}"#.utf8))
+            return (200, [:], Data(#"{"seat":{"seatNo":2},"grantId":"grant-1"}"#.utf8))
         }
-        let joined: JoinRequestDTO = try await client.post("/api/matches/\(match)/join-requests")
-        XCTAssertEqual(joined.joinRequestId, requestID)
-        let _: [String: JSONValue] = try await client.post("/api/matches/\(match)/join-requests/\(joined.joinRequestId)/approve", body: ["seatNo": 2])
-        XCTAssertEqual(posts, ["/api/matches/\(match)/join-requests", "/api/matches/\(match)/join-requests/\(requestID)/approve"])
+        let preview = try await client.checkInSeats(matchID: match, token: "a&b +")
+        XCTAssertEqual(preview.seat(at: 0)?.displayName, "桌主")
+        let explicit = try await client.checkIn(matchID: match, command: CheckInCommand(token: "valid", seatNo: 2, alias: "访客"))
+        let auto = try await client.checkIn(matchID: match, command: CheckInCommand(token: "valid", seatNo: nil, alias: nil))
+        let repeated = try await client.checkIn(matchID: match, command: CheckInCommand(token: "valid", seatNo: 2, alias: "访客"))
+        XCTAssertEqual(explicit.seat.seatNo, 2)
+        XCTAssertEqual(explicit.grantId, "grant-1")
+        XCTAssertEqual(auto.seat.seatNo, explicit.seat.seatNo)
+        XCTAssertEqual(repeated.seat.seatNo, explicit.seat.seatNo)
+        XCTAssertEqual(repeated.grantId, explicit.grantId)
+        XCTAssertEqual(requests.map { $0.httpMethod }, ["GET", "POST", "POST", "POST"])
+        XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer test-bearer" })
+        XCTAssertEqual(requests.map { $0.url!.path }, [
+            "/api/matches/\(match)/check-in-seats",
+            "/api/matches/\(match)/check-ins",
+            "/api/matches/\(match)/check-ins",
+            "/api/matches/\(match)/check-ins"
+        ])
+        XCTAssertEqual(URLComponents(url: requests[0].url!, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "token" })?.value, "a&b +")
+        let explicitJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[1].httpBody!) as? [String: Any])
+        XCTAssertEqual(explicitJSON["token"] as? String, "valid")
+        XCTAssertEqual(explicitJSON["seatNo"] as? Int, 2)
+        XCTAssertEqual(explicitJSON["alias"] as? String, "访客")
+        XCTAssertEqual(requests[3].httpBody, requests[1].httpBody)
+        let autoJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[2].httpBody!) as? [String: Any])
+        XCTAssertEqual(autoJSON["token"] as? String, "valid")
+        XCTAssertNil(autoJSON["seatNo"])
+        XCTAssertNil(autoJSON["alias"])
     }
 
-    @MainActor func testWaiting403AndCodeLookupErrorMappingViaFakeHTTP() async throws {
+    @MainActor func testCodeLookupReturnsShortLivedCheckInToken() async throws {
+        var requestedPath: String?
+        let client = client { request in
+            requestedPath = request.url?.path
+            return (200, [:], Data("""
+            {"matchId":"\(self.match)","token":"signed-token","expiresAt":"2026-10-23T12:10:00Z"}
+            """.utf8))
+        }
+        let code = try XCTUnwrap(JoinFlow.canonicalCode(" abcd23 "))
+        let result: JoinCodeDTO = try await client.get("/api/matches/by-code/\(code)")
+        XCTAssertEqual(requestedPath, "/api/matches/by-code/ABCD23")
+        XCTAssertEqual(result.matchId, match)
+        XCTAssertEqual(result.token, "signed-token")
+        XCTAssertEqual(result.expiresAt, "2026-10-23T12:10:00Z")
+    }
+
+    @MainActor func testCodeLookupErrorMappingViaFakeHTTP() async throws {
         let client = client { request in
             if request.url!.path.contains("by-code") {
                 return (429, ["Retry-After": "37"], Data(#"{"error":"rate_limited","message":"Too many requests"}"#.utf8))
             }
-            return (403, [:], Data(#"{"error":"forbidden","message":"Access denied"}"#.utf8))
-        }
-        do {
-            let _: TableSnapshot = try await client.get("/api/matches/\(match)")
-            XCTFail("Unapproved guest must not read table")
-        } catch let error as APIError {
-            XCTAssertTrue(JoinFlow.isWaiting(error))
-            XCTAssertEqual(error.status, 403)
+            return (400, [:], Data(#"{"error":"invalid_token","message":"Invalid"}"#.utf8))
         }
         do {
             let _: JoinCodeDTO = try await client.get("/api/matches/by-code/ABCD23")
             XCTFail("Rate-limited lookup must fail")
         } catch let error as APIError {
-            XCTAssertEqual(error.code, "rate_limited")
             XCTAssertEqual(error.retryAfter, 37)
-            XCTAssertFalse(JoinFlow.isWaiting(error))
             XCTAssertEqual(JoinFlow.codeError(error), "房间码查询过于频繁，请在 37 秒后重试。")
         }
-    }
-
-    @MainActor func testExpiredTokenCodeRecoveryAndLinkPrompt() async throws {
-        XCTAssertTrue(JoinFlow.canResolveExpiredToken(code: " ABCD23 ", resolvedByCode: true))
-        XCTAssertFalse(JoinFlow.canResolveExpiredToken(code: "", resolvedByCode: false))
-        XCTAssertFalse(JoinFlow.canResolveExpiredToken(code: "ABCD23", resolvedByCode: false))
-        XCTAssertTrue(JoinFlow.tokenExpired(APIError(status: 400, code: "invalid_token", message: "Expired signature")))
-        XCTAssertFalse(JoinFlow.tokenExpired(APIError(status: 403, code: "check_in_not_approved", message: "Waiting")))
-        let client = client { request in
-            if request.url!.path.contains("by-code") {
-                return (200, [:], Data(#"{"matchId":"11111111-1111-4111-8111-111111111111","token":"new-token","expiresAt":"2099-01-01T00:00:00Z"}"#.utf8))
-            }
-            return (400, [:], Data(#"{"error":"token_consumed_or_expired","message":"Expired"}"#.utf8))
-        }
         do {
-            let _: CheckInResultDTO = try await client.post("/api/matches/\(match)/check-ins", body: ["token": "old-token"])
-            XCTFail("Expired token must fail")
+            let _: CheckInSeatsDTO = try await client.checkInSeats(matchID: match, token: "invalid")
+            XCTFail("Invalid token must fail before joining")
         } catch let error as APIError {
             XCTAssertTrue(JoinFlow.tokenExpired(error))
+            XCTAssertEqual(JoinFlow.joinError(error), "签到凭证无效或已过期。请重新输入房间码，或向桌主索取新的签到链接。")
         }
-        let renewed: JoinCodeDTO = try await client.get("/api/matches/by-code/ABCD23")
-        XCTAssertEqual(renewed.matchId, match)
-        XCTAssertEqual(renewed.token, "new-token")
     }
-    @MainActor func testCodeNotFoundAndSeatConflictMapping() async throws {
+
+    @MainActor func testConsumedPreviewCanRecoverExistingCheckedInSeat() async throws {
+        var requests: [URLRequest] = []
         let client = client { request in
-            if request.url!.path.contains("by-code") {
-                return (404, [:], Data(#"{"error":"join_code_not_found","message":"Not found"}"#.utf8))
+            requests.append(request)
+            if request.httpMethod == "GET" {
+                return (400, [:], Data(#"{"error":"token_consumed_or_expired","message":"Consumed"}"#.utf8))
             }
-            return (409, [:], Data(#"{"error":"seat_taken","message":"Seat taken"}"#.utf8))
+            return (200, [:], Data(#"{"seat":{"seatNo":1},"grantId":"existing-grant"}"#.utf8))
         }
         do {
-            let _: JoinCodeDTO = try await client.get("/api/matches/by-code/ABCD23")
-            XCTFail("Missing code must fail")
+            let _: CheckInSeatsDTO = try await client.checkInSeats(matchID: match, token: "signed-token")
+            XCTFail("Consumed invitation should not reveal the seat preview")
         } catch let error as APIError {
-            XCTAssertEqual(error.status, 404)
-            XCTAssertEqual(error.code, "join_code_not_found")
-            XCTAssertEqual(JoinFlow.codeError(error), "房间码不存在或已失效，请向房主核对。")
+            XCTAssertEqual(error.code, "token_consumed_or_expired")
         }
-        do {
-            let _: [String: JSONValue] = try await client.post("/api/matches/\(match)/join-requests/\(requestID)/approve", body: ["seatNo": 1])
-            XCTFail("Occupied seat must fail")
-        } catch let error as APIError {
-            XCTAssertEqual(error.code, "seat_taken")
-            XCTAssertTrue(OnlineCommandPolicy.refreshAfter(error))
-            XCTAssertEqual(OnlineCommandPolicy.approvalError(error), "座位已被占用，请刷新牌桌并选择其他空座。")
-        }
+        let result = try await client.checkIn(
+            matchID: match, command: CheckInCommand(token: "signed-token", seatNo: nil, alias: nil))
+        XCTAssertEqual(result.seat.seatNo, 1)
+        XCTAssertEqual(result.grantId, "existing-grant")
+        XCTAssertEqual(requests.map { $0.url!.path }, [
+            "/api/matches/\(match)/check-in-seats", "/api/matches/\(match)/check-ins"
+        ])
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[1].httpBody!) as? [String: Any])
+        XCTAssertEqual(body["token"] as? String, "signed-token")
+        XCTAssertNil(body["seatNo"])
+        XCTAssertNil(body["alias"])
     }
 
-    func testStartedCodeAndResolvedApprovalHaveDistinctMessages() {
-        let started = APIError(status: 409, code: "match_already_started", message: "Started")
-        let resolved = APIError(status: 409, code: "join_request_already_decided", message: "Resolved")
-        let missing = APIError(status: 404, code: "join_request_not_found", message: "Missing")
-        XCTAssertEqual(JoinFlow.codeError(started), "牌桌已经开局，无法再通过房间码申请。")
-        XCTAssertEqual(OnlineCommandPolicy.approvalError(started), "牌桌已经开局，无法批准新的申请。")
-        XCTAssertEqual(OnlineCommandPolicy.approvalError(resolved), "这份申请已被处理，不能再次批准。")
-        XCTAssertEqual(OnlineCommandPolicy.approvalError(missing), "申请编号不存在或不属于本桌，请核对回执。")
+    @MainActor func testDirectJoinSeatTakenFullStartedAndExpiredErrors() async throws {
+        for (code, status, message) in [
+            ("seat_taken", 409, "座位已被占用，请重新选择空座。"),
+            ("match_full", 409, "牌桌已满，无法加入。"),
+            ("match_already_started", 409, "牌桌已经开局，无法加入。"),
+            ("token_consumed_or_expired", 400, "签到凭证无效或已过期。请重新输入房间码，或向桌主索取新的签到链接。"),
+            ("guest_already_bound", 403, "当前临时访客已绑定其他牌桌，请使用账户身份加入。")
+        ] {
+            let client = client { _ in
+                (status, [:], Data(#"{"error":"\#(code)","message":"Rejected"}"#.utf8))
+            }
+            do {
+                let _ = try await client.checkIn(matchID: match, command: CheckInCommand(token: "token", seatNo: 1, alias: nil))
+                XCTFail("\(code) must fail")
+            } catch let error as APIError {
+                XCTAssertEqual(error.status, status)
+                XCTAssertEqual(error.code, code)
+                XCTAssertEqual(JoinFlow.joinError(error), message)
+            }
+        }
+        let missing = APIError(status: 404, code: "join_code_not_found", message: "Missing")
+        XCTAssertEqual(JoinFlow.codeError(missing), "房间码不存在或已失效，请向房主核对。")
+        XCTAssertEqual(JoinFlow.codeError(APIError(status: 409, code: "match_already_started", message: "Started")),
+                       "牌桌已经开局，无法通过房间码加入。")
     }
 
-    @MainActor func testStartedRoomCode409MapsToChineseState() async throws {
-        let client = client { _ in
-            (409, [:], Data(#"{"error":"match_already_started","message":"Started"}"#.utf8))
+    @MainActor func testHostReassignMoveSwapAndRemoveShapes() async throws {
+        var requests: [URLRequest] = []
+        let guest = "33333333-3333-4333-8333-333333333333"
+        let client = client { request in
+            requests.append(request)
+            if request.url!.path.hasSuffix("/remove") {
+                return (200, [:], Data(#"{"removed":true}"#.utf8))
+            }
+            if requests.count == 1 {
+                return (200, [:], Data(#"{"fromSeatNo":0,"toSeatNo":2,"swapped":true}"#.utf8))
+            }
+            return (200, [:], Data(#"{"fromSeatNo":2,"toSeatNo":1,"swapped":false}"#.utf8))
         }
-        do {
-            let _: JoinCodeDTO = try await client.get("/api/matches/by-code/ABCD23")
-            XCTFail("Started table must reject room code")
-        } catch let error as APIError {
-            XCTAssertEqual(error.status, 409)
-            XCTAssertEqual(error.code, "match_already_started")
-            XCTAssertEqual(JoinFlow.codeError(error), "牌桌已经开局，无法再通过房间码申请。")
+        let swap = try await client.reassignSeat(matchID: match, from: 0, to: 2)
+        let move = try await client.reassignSeat(matchID: match, from: 2, to: 1)
+        let removed = try await client.removeMember(matchID: match, principalID: guest)
+        XCTAssertTrue(swap.swapped)
+        XCTAssertEqual(swap.toSeatNo, 2)
+        XCTAssertFalse(move.swapped)
+        XCTAssertEqual(move.fromSeatNo, 2)
+        XCTAssertEqual(move.toSeatNo, 1)
+        XCTAssertTrue(removed.removed)
+        XCTAssertEqual(requests.map { $0.url!.path }, [
+            "/api/matches/\(match)/seats/reassign",
+            "/api/matches/\(match)/seats/reassign",
+            "/api/matches/\(match)/members/\(guest)/remove"
+        ])
+        for (request, from, to) in [(requests[0], 0, 2), (requests[1], 2, 1)] {
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Int])
+            XCTAssertEqual(body, ["fromSeatNo": from, "toSeatNo": to])
         }
+        XCTAssertEqual(String(data: requests[2].httpBody!, encoding: .utf8), "{}")
     }
-
     @MainActor func testNativeAuthOriginOnlyOnSignIn() async throws {
         var requests: [URLRequest] = []
         let client = client { request in
@@ -224,34 +297,5 @@ final class JoinFlowTests: XCTestCase {
         XCTAssertEqual(requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer test-bearer")
     }
 
-    @MainActor func testApprovalPollTransitionsFrom403ToCheckInWithoutEarlyPost() async throws {
-        var reads = 0
-        var checkIns = 0
-        let client = client { request in
-            if request.httpMethod == "GET" {
-                reads += 1
-                if reads == 1 {
-                    return (403, [:], Data(#"{"error":"forbidden","message":"Waiting"}"#.utf8))
-                }
-                let body = Data(#"{"match":{"id":"11111111-1111-4111-8111-111111111111","status":"preparing","playerCount":4},"seats":[{"seatNo":0,"status":"assigned"}],"currentHand":null}"#.utf8)
-                return (200, [:], body)
-            }
-            checkIns += 1
-            return (200, [:], Data(#"{"seat":{"seatNo":0}}"#.utf8))
-        }
-        do {
-            let _: TableSnapshot = try await client.get("/api/matches/\(match)")
-            XCTFail("Pending match access should be forbidden")
-        } catch let error as APIError {
-            XCTAssertTrue(JoinFlow.isWaiting(error))
-        }
-        XCTAssertEqual(checkIns, 0)
-        let table: TableSnapshot = try await client.get("/api/matches/\(match)")
-        XCTAssertEqual(table.seats.first?.status, "assigned")
-        let signed: CheckInResultDTO = try await client.post("/api/matches/\(match)/check-ins", body: ["token": "valid"])
-        XCTAssertEqual(signed.seat.seatNo, 0)
-        XCTAssertEqual(reads, 2)
-        XCTAssertEqual(checkIns, 1)
-    }
 
 }

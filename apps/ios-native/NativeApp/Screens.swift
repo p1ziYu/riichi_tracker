@@ -501,6 +501,14 @@ struct MatchListScreen: View {
                     RuleInfo(snapshot: snapshot.match.rulesSnapshot, templates: templates, versionID: snapshot.match.rulesetVersionId)
                 }
                 .listRowBackground(Brand.panel)
+                if snapshot.match.status == "preparing",
+                   let ownSeat = snapshot.seats.first(where: { $0.principalId == session.principalID && $0.status == "checked_in" }) {
+                    Section {
+                        Text("你在 \(ownSeat.seatNo + 1) 号位，等待房主开局。")
+                            .foregroundStyle(Brand.gold)
+                    }
+                    .listRowBackground(Brand.panel)
+                }
                 Section("座位与点数") {
                     ForEach(snapshot.seats.sorted { $0.seatNo < $1.seatNo }, id: \.seatNo) { seat in
                         HStack(spacing: 12) {

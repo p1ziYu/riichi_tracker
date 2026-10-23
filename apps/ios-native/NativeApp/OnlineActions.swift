@@ -5,6 +5,21 @@ import CoreImage.CIFilterBuiltins
 import UIKit
 
 private struct SeatClaim: Encodable { let seatNo: Int }
+struct ReassignSeatCommand: Encodable { let fromSeatNo: Int; let toSeatNo: Int }
+struct ReassignSeatResultDTO: Decodable { let fromSeatNo: Int; let toSeatNo: Int; let swapped: Bool }
+struct RemoveMemberResultDTO: Decodable { let removed: Bool }
+
+@MainActor
+extension APIClient {
+    func reassignSeat(matchID: String, from: Int, to: Int) async throws -> ReassignSeatResultDTO {
+        try await post("/api/matches/\(matchID)/seats/reassign",
+                       body: ReassignSeatCommand(fromSeatNo: from, toSeatNo: to))
+    }
+
+    func removeMember(matchID: String, principalID: String) async throws -> RemoveMemberResultDTO {
+        try await post("/api/matches/\(matchID)/members/\(principalID)/remove")
+    }
+}
 struct PendingResultEnvelope: Codable {
     let handID: String
     let body: Data
@@ -24,12 +39,10 @@ enum OnlineCommandPolicy {
         return seat.riichiChangeUsage.declares < 2 && (allowLowPointRiichi || points >= 1000)
     }
     static func refreshAfter(_ error: APIError) -> Bool { error.status == 409 }
-    static func approvalError(_ error: APIError) -> String? {
+    static func seatError(_ error: APIError) -> String? {
         switch error.code {
-        case "seat_taken": return "座位已被占用，请刷新牌桌并选择其他空座。"
-        case "join_request_already_decided": return "这份申请已被处理，不能再次批准。"
-        case "join_request_not_found": return "申请编号不存在或不属于本桌，请核对回执。"
-        case "match_already_started": return "牌桌已经开局，无法批准新的申请。"
+        case "seat_taken": return "座位已被占用，请刷新牌桌后重试。"
+        case "match_already_started": return "牌桌已经开局，无法再调整座次。"
         default: return nil
         }
     }
@@ -93,7 +106,7 @@ struct InvitationQR: View {
             if let image {
                 Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
                     .frame(maxWidth: 240, maxHeight: 240)
-                    .accessibilityLabel(link.hasPrefix("{") ? "申请回执二维码" : "签到链接二维码")
+                    .accessibilityLabel("签到链接二维码")
             } else { Text("正在生成二维码；也可复制链接") }
         }
         .task(id: link) { image = makeQR() }
@@ -138,20 +151,17 @@ struct OnlineTableActions: View {
     @State private var pendingHand: String?
     @State private var pendingLoaded = false
     @State private var confirmDiscard = false
-    @State private var receiptInput = ""
-    @State private var scanningReceipt = false
-    @State private var approvalSeat: Int?
+    @State private var fromSeat: Int?
+    @State private var toSeat: Int?
+    @State private var memberToRemove: String?
+    @State private var memberName = ""
 
     private var matchID: String { snapshot.match.id }
     private var base: String { "/api/matches/\(matchID)" }
     private var isOwner: Bool { session.principalID != nil && session.principalID == snapshot.match.ownerPrincipalId }
     private var signedIn: Bool { snapshot.seats.contains { $0.principalId == session.principalID && $0.status == "checked_in" } }
-    private var scannedReceipt: JoinReceipt? { JoinReceipt(receiptInput) }
-    private var approvalReceipt: JoinReceipt? {
-        JoinFlow.receipt(receiptInput, forMatch: matchID)
-    }
-    private var emptySeats: [SeatDTO] {
-        snapshot.seats.filter { $0.principalId == nil }.sorted { $0.seatNo < $1.seatNo }
+    private var occupiedSeats: [SeatDTO] {
+        snapshot.seats.filter { $0.principalId != nil }.sorted { $0.seatNo < $1.seatNo }
     }
     private var invitationURL: String? {
         guard let invitation, !invitationExpired, snapshot.match.status == "preparing",
@@ -169,43 +179,58 @@ struct OnlineTableActions: View {
                 Button("复制房间码") { UIPasteboard.general.string = code }
             }
             if isOwner && snapshot.match.status == "preparing" {
-                Text("申请者须出示申请回执。房主扫描或粘贴回执，批准一个空座后，再发送一次性签到凭证。")
+                Text("访客通过签到链接或房间码直接选择空座入座；加入者会实时显示在下方。")
                     .font(.footnote).foregroundStyle(.secondary)
-                TextField("粘贴申请回执 JSON", text: $receiptInput, axis: .vertical)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                Button("粘贴申请回执") { receiptInput = UIPasteboard.general.string ?? "" }
-                Button("扫码确认入座") { scanningReceipt = true }
-                if let approvalReceipt {
-                    Text("自述昵称（未验证）：\(approvalReceipt.name)")
-                    Text("申请编号：\(approvalReceipt.joinRequestId)")
-                        .font(.caption2).textSelection(.enabled)
-                    if !emptySeats.isEmpty {
-                        Picker("批准座位", selection: $approvalSeat) {
-                            Text("请选择空座").tag(Int?.none)
-                            ForEach(emptySeats) { seat in Text("\(seat.seatNo + 1) 号位").tag(Optional(seat.seatNo)) }
+                if !occupiedSeats.isEmpty {
+                    Group {
+                        Text("已加入成员 · 调整座次").font(.headline)
+                        ForEach(occupiedSeats) { seat in
+                            HStack {
+                                Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "未命名")")
+                                Spacer()
+                                if seat.principalId != snapshot.match.ownerPrincipalId, let principal = seat.principalId {
+                                    Button("移除") {
+                                        memberName = seat.displayName ?? "此成员"
+                                        memberToRemove = principal
+                                    }
+                                    .disabled(busy)
+                                }
+                            }
                         }
-                        Button("批准申请者入座") {
-                            guard let seat = approvalSeat, emptySeats.contains(where: { $0.seatNo == seat }) else { return }
+                        Picker("从座位", selection: $fromSeat) {
+                            Text("选择成员").tag(Int?.none)
+                            ForEach(occupiedSeats) { seat in
+                                Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "未命名")").tag(Optional(seat.seatNo))
+                            }
+                        }
+                        Picker("到座位", selection: $toSeat) {
+                            Text("选择目标").tag(Int?.none)
+                            ForEach(0..<snapshot.match.playerCount, id: \.self) { number in
+                                let occupant = snapshot.seats.first { $0.seatNo == number }
+                                Text("\(number + 1) 号位 · \(occupant?.displayName ?? "空座")").tag(Optional(number))
+                            }
+                        }
+                        Button(snapshot.seats.contains { $0.seatNo == toSeat && $0.principalId != nil }
+                               ? "交换座位" : "移动到空座") {
+                            guard let fromSeat, let toSeat, fromSeat != toSeat,
+                                  occupiedSeats.contains(where: { $0.seatNo == fromSeat }),
+                                  (0..<snapshot.match.playerCount).contains(toSeat) else { return }
                             execute {
                                 do {
-                                    let _: [String: JSONValue] = try await session.api.post(
-                                        "\(base)/join-requests/\(approvalReceipt.joinRequestId)/approve",
-                                        body: SeatClaim(seatNo: seat))
-                                    receiptInput = ""
-                                    approvalSeat = nil
+                                    let _: ReassignSeatResultDTO = try await session.api.reassignSeat(matchID: matchID, from: fromSeat, to: toSeat)
+                                    self.fromSeat = nil
+                                    self.toSeat = nil
+                                    dealer = nil
                                 } catch let failure as APIError {
                                     throw APIError(status: failure.status, code: failure.code,
                                                    retryAfter: failure.retryAfter,
-                                                   message: OnlineCommandPolicy.approvalError(failure) ?? failure.localizedDescription)
+                                                   message: OnlineCommandPolicy.seatError(failure) ?? failure.localizedDescription)
                                 }
                             }
-                        }.disabled(busy || approvalSeat == nil || !emptySeats.contains(where: { $0.seatNo == approvalSeat }))
-                    } else { Text("没有可批准的空座。").foregroundStyle(.secondary) }
-                } else if !receiptInput.isEmpty {
-                    Text(scannedReceipt == nil
-                         ? "申请回执格式无效，请重新扫码或粘贴完整 JSON。"
-                         : "申请回执不属于本桌，请核对牌桌编号。")
-                        .foregroundStyle(.red)
+                        }
+                        .disabled(busy || fromSeat == nil || toSeat == nil || fromSeat == toSeat ||
+                                  !occupiedSeats.contains(where: { $0.seatNo == fromSeat }))
+                    }
                 }
                 ForEach(snapshot.seats.sorted { $0.seatNo < $1.seatNo }) { seat in
                     if seat.principalId == nil || (seat.principalId == session.principalID && seat.status != "checked_in") {
@@ -319,17 +344,22 @@ struct OnlineTableActions: View {
         } message: {
             Text("先刷新确认服务器仍显示本局未结算。放弃后若旧请求实际已入账，新输入可能与服务器状态冲突；服务器始终只允许一笔有效结果。")
         }
-        .sheet(isPresented: $scanningReceipt) {
-            NavigationStack {
-                CameraScanner { text in
-                    scanningReceipt = false
-                    receiptInput = text
+        .alert("移除成员？", isPresented: Binding(
+            get: { memberToRemove != nil },
+            set: { if !$0 { memberToRemove = nil } }
+        )) {
+            Button("取消", role: .cancel) { memberToRemove = nil }
+            Button("移除", role: .destructive) {
+                guard let principal = memberToRemove else { return }
+                memberToRemove = nil
+                execute {
+                    let result = try await session.api.removeMember(matchID: matchID, principalID: principal)
+                    guard result.removed else { throw APIError(status: nil, message: "服务器未确认移除成员") }
+                    fromSeat = nil; toSeat = nil; dealer = nil
                 }
-                .navigationTitle("扫描申请回执")
-                .toolbar { ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { scanningReceipt = false }
-                } }
             }
+        } message: {
+            Text("移除 \(memberName) 将释放其座位；对方可使用新的有效凭证重新加入。")
         }
         .sheet(isPresented: $showResult) {
             if let hand = snapshot.currentHand {
