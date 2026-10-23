@@ -446,121 +446,8 @@ struct OnlineTableActions: View {
                 LabeledContent("房间码", value: code)
                 Button("复制房间码") { UIPasteboard.general.string = code }
             }
-            if isOwner && snapshot.match.status == "preparing" {
-                Text("访客通过签到链接或房间码直接选择空座入座；加入者会实时显示在下方。")
-                    .font(.footnote).foregroundStyle(.secondary)
-                if !occupiedSeats.isEmpty {
-                    Group {
-                        Text("已加入成员 · 调整座次").font(.headline)
-                        ForEach(occupiedSeats) { seat in
-                            HStack {
-                                Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "未命名")")
-                                Spacer()
-                                if seat.principalId != snapshot.match.ownerPrincipalId, let principal = seat.principalId {
-                                    Button("移除") {
-                                        memberName = seat.displayName ?? "此成员"
-                                        memberToRemove = principal
-                                    }
-                                    .disabled(busy)
-                                }
-                            }
-                        }
-                        Picker("从座位", selection: $fromSeat) {
-                            Text("选择成员").tag(Int?.none)
-                            ForEach(occupiedSeats) { seat in
-                                Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "未命名")").tag(Optional(seat.seatNo))
-                            }
-                        }
-                        Picker("到座位", selection: $toSeat) {
-                            Text("选择目标").tag(Int?.none)
-                            ForEach(0..<snapshot.match.playerCount, id: \.self) { number in
-                                let occupant = snapshot.seats.first { $0.seatNo == number }
-                                Text("\(number + 1) 号位 · \(occupant?.displayName ?? "空座")").tag(Optional(number))
-                            }
-                        }
-                        Button(snapshot.seats.contains { $0.seatNo == toSeat && $0.principalId != nil }
-                               ? "交换座位" : "移动到空座") {
-                            guard let fromSeat, let toSeat, fromSeat != toSeat,
-                                  occupiedSeats.contains(where: { $0.seatNo == fromSeat }),
-                                  (0..<snapshot.match.playerCount).contains(toSeat) else { return }
-                            execute {
-                                do {
-                                    let _: ReassignSeatResultDTO = try await session.api.reassignSeat(matchID: matchID, from: fromSeat, to: toSeat)
-                                    self.fromSeat = nil
-                                    self.toSeat = nil
-                                    dealer = nil
-                                } catch let failure as APIError {
-                                    throw APIError(status: failure.status, code: failure.code,
-                                                   retryAfter: failure.retryAfter,
-                                                   message: OnlineCommandPolicy.seatError(failure) ?? failure.localizedDescription)
-                                }
-                            }
-                        }
-                        .disabled(busy || fromSeat == nil || toSeat == nil || fromSeat == toSeat ||
-                                  !occupiedSeats.contains(where: { $0.seatNo == fromSeat }))
-                    }
-                }
-                ForEach(snapshot.seats.sorted { $0.seatNo < $1.seatNo }) { seat in
-                    if seat.principalId == nil || (seat.principalId == session.principalID && seat.status != "checked_in") {
-                        Button("房主选择 \(seat.seatNo + 1) 号位") {
-                            execute {
-                                let _: [String: JSONValue] = try await session.api.post("\(base)/seats/claim", body: SeatClaim(seatNo: seat.seatNo))
-                                dealer = nil
-                            }
-                        }.disabled(busy)
-                    }
-                }
-                Button("生成单人签到链接（10 分钟）") {
-                    execute {
-                        invitation = nil
-                        invitationExpired = false
-                        issuingCount = snapshot.seats.filter { $0.status == "checked_in" }.count
-                        invitation = try await session.api.post("\(base)/check-in-tokens")
-                    }
-                }.disabled(busy)
-                if let invitationURL {
-                    InvitationQR(link: invitationURL)
-                    Button("复制签到链接") { UIPasteboard.general.string = invitationURL }
-                    Text("签入凭证仅供一人使用。请勿公开转发；使用或过期后需重新生成。")
-                        .font(.footnote)
-                }
-                Picker("指定起家（可选）", selection: $dealer) {
-                    Text("服务器随机").tag(Int?.none)
-                    ForEach(snapshot.seats) { seat in Text("\(seat.seatNo + 1) 号位").tag(Optional(seat.seatNo)) }
-                }
-                Button("全员签到后确认座次") {
-                    execute {
-                        let _: [String: JSONValue] = try await session.api.post("\(base)/seats/finalize", body: FinalizeSeats(dealerSeatNo: dealer))
-                    }
-                }
-                .disabled(busy || snapshot.seats.count != snapshot.match.playerCount || snapshot.seats.contains { $0.status != "checked_in" })
-            }
-            if OnlineCommandPolicy.canWrite(snapshot, principal: session.principalID) {
-                if let hand = snapshot.currentHand, hand.state == "open" {
-                    ForEach(hand.seats, id: \.seatNo) { seat in
-                        let used = seat.riichiChangeUsage
-                        let points = snapshot.seats.first { $0.seatNo == seat.seatNo }?.points ?? 0
-                        let lowAllowed = snapshot.match.rulesSnapshot?["allowLowPointRiichi"] == .bool(true)
-                        Button("\(seat.seatNo + 1) 号位 · \(seat.isRiichi ? "取消立直" : "宣言立直") · 宣言 \(used.declares)/2 取消 \(used.cancels)/1") {
-                            execute {
-                                let _: CommandReceiptDTO = try await session.api.post("\(base)/hands/\(hand.id)/marks", body: MarkCommand(seatNo: seat.seatNo, riichi: !seat.isRiichi, expectedMarkRevision: hand.markRevision))
-                            }
-                        }
-                        .disabled(busy || !OnlineCommandPolicy.canToggle(seat, points: points, allowLowPointRiichi: lowAllowed))
-                    }
-                    Button("录入本局结果") { showResult = true }
-                        .disabled(busy || !pendingLoaded || pendingBody != nil)
-                } else {
-                    Button("新开一局") {
-                        execute { let _: [String: JSONValue] = try await session.api.post("\(base)/hands") }
-                    }.disabled(busy)
-                    if isOwner, snapshot.match.rulesSnapshot?["automaticEndPolicy"] != .string("ranked_sanma") {
-                        Button("终局") {
-                            execute { let _: [String: JSONValue] = try await session.api.post("\(base)/finish") }
-                        }.disabled(busy)
-                    }
-                }
-            }
+            preparingControls
+            handControls
             if OnlineCommandPolicy.canWrite(snapshot, principal: session.principalID) && !pendingLoaded {
                 Button("重试读取安全保存的结算请求") { loadPending() }
             }
@@ -691,6 +578,127 @@ struct OnlineTableActions: View {
             if !Task.isCancelled { invitationExpired = true }
         }
     }
+    @ViewBuilder private var preparingControls: some View {
+            if isOwner && snapshot.match.status == "preparing" {
+                Text("访客通过签到链接或房间码直接选择空座入座；加入者会实时显示在下方。")
+                    .font(.footnote).foregroundStyle(.secondary)
+                if !occupiedSeats.isEmpty {
+                    Group {
+                        Text("已加入成员 · 调整座次").font(.headline)
+                        ForEach(occupiedSeats) { seat in
+                            HStack {
+                                Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "未命名")")
+                                Spacer()
+                                if seat.principalId != snapshot.match.ownerPrincipalId, let principal = seat.principalId {
+                                    Button("移除") {
+                                        memberName = seat.displayName ?? "此成员"
+                                        memberToRemove = principal
+                                    }
+                                    .disabled(busy)
+                                }
+                            }
+                        }
+                        Picker("从座位", selection: $fromSeat) {
+                            Text("选择成员").tag(Int?.none)
+                            ForEach(occupiedSeats) { seat in
+                                Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "未命名")").tag(Optional(seat.seatNo))
+                            }
+                        }
+                        Picker("到座位", selection: $toSeat) {
+                            Text("选择目标").tag(Int?.none)
+                            ForEach(0..<snapshot.match.playerCount, id: \.self) { number in
+                                let occupant = snapshot.seats.first { $0.seatNo == number }
+                                Text("\(number + 1) 号位 · \(occupant?.displayName ?? "空座")").tag(Optional(number))
+                            }
+                        }
+                        Button(snapshot.seats.contains { $0.seatNo == toSeat && $0.principalId != nil }
+                               ? "交换座位" : "移动到空座") {
+                            guard let fromSeat, let toSeat, fromSeat != toSeat,
+                                  occupiedSeats.contains(where: { $0.seatNo == fromSeat }),
+                                  (0..<snapshot.match.playerCount).contains(toSeat) else { return }
+                            execute {
+                                do {
+                                    let _: ReassignSeatResultDTO = try await session.api.reassignSeat(matchID: matchID, from: fromSeat, to: toSeat)
+                                    self.fromSeat = nil
+                                    self.toSeat = nil
+                                    dealer = nil
+                                } catch let failure as APIError {
+                                    throw APIError(status: failure.status, code: failure.code,
+                                                   retryAfter: failure.retryAfter,
+                                                   message: OnlineCommandPolicy.seatError(failure) ?? failure.localizedDescription)
+                                }
+                            }
+                        }
+                        .disabled(busy || fromSeat == nil || toSeat == nil || fromSeat == toSeat ||
+                                  !occupiedSeats.contains(where: { $0.seatNo == fromSeat }))
+                    }
+                }
+                ForEach(snapshot.seats.sorted { $0.seatNo < $1.seatNo }) { seat in
+                    if seat.principalId == nil || (seat.principalId == session.principalID && seat.status != "checked_in") {
+                        Button("房主选择 \(seat.seatNo + 1) 号位") {
+                            execute {
+                                let _: [String: JSONValue] = try await session.api.post("\(base)/seats/claim", body: SeatClaim(seatNo: seat.seatNo))
+                                dealer = nil
+                            }
+                        }.disabled(busy)
+                    }
+                }
+                Button("生成单人签到链接（10 分钟）") {
+                    execute {
+                        invitation = nil
+                        invitationExpired = false
+                        issuingCount = snapshot.seats.filter { $0.status == "checked_in" }.count
+                        invitation = try await session.api.post("\(base)/check-in-tokens")
+                    }
+                }.disabled(busy)
+                if let invitationURL {
+                    InvitationQR(link: invitationURL)
+                    Button("复制签到链接") { UIPasteboard.general.string = invitationURL }
+                    Text("签入凭证仅供一人使用。请勿公开转发；使用或过期后需重新生成。")
+                        .font(.footnote)
+                }
+                Picker("指定起家（可选）", selection: $dealer) {
+                    Text("服务器随机").tag(Int?.none)
+                    ForEach(snapshot.seats) { seat in Text("\(seat.seatNo + 1) 号位").tag(Optional(seat.seatNo)) }
+                }
+                Button("全员签到后确认座次") {
+                    execute {
+                        let _: [String: JSONValue] = try await session.api.post("\(base)/seats/finalize", body: FinalizeSeats(dealerSeatNo: dealer))
+                    }
+                }
+                .disabled(busy || snapshot.seats.count != snapshot.match.playerCount || snapshot.seats.contains { $0.status != "checked_in" })
+            }
+    }
+    @ViewBuilder private var handControls: some View {
+            if OnlineCommandPolicy.canWrite(snapshot, principal: session.principalID) {
+                if let hand = snapshot.currentHand, hand.state == "open" {
+                    ForEach(hand.seats, id: \.seatNo) { seat in
+                        let used = seat.riichiChangeUsage
+                        let points = snapshot.seats.first { $0.seatNo == seat.seatNo }?.points ?? 0
+                        let lowAllowed = snapshot.match.rulesSnapshot?["allowLowPointRiichi"] == .bool(true)
+                        let markTitle: String = "\(seat.seatNo + 1) 号位 · \(seat.isRiichi ? "取消立直" : "宣言立直") · 宣言 \(used.declares)/2 取消 \(used.cancels)/1"
+                        let toggleDisabled: Bool = busy || !OnlineCommandPolicy.canToggle(seat, points: points, allowLowPointRiichi: lowAllowed)
+                        Button(markTitle) {
+                            execute {
+                                let _: CommandReceiptDTO = try await session.api.post("\(base)/hands/\(hand.id)/marks", body: MarkCommand(seatNo: seat.seatNo, riichi: !seat.isRiichi, expectedMarkRevision: hand.markRevision))
+                            }
+                        }
+                        .disabled(toggleDisabled)
+                    }
+                    Button("录入本局结果") { showResult = true }
+                        .disabled(busy || !pendingLoaded || pendingBody != nil)
+                } else {
+                    Button("新开一局") {
+                        execute { let _: [String: JSONValue] = try await session.api.post("\(base)/hands") }
+                    }.disabled(busy)
+                    if isOwner, snapshot.match.rulesSnapshot?["automaticEndPolicy"] != .string("ranked_sanma") {
+                        Button("终局") {
+                            execute { let _: [String: JSONValue] = try await session.api.post("\(base)/finish") }
+                        }.disabled(busy)
+                    }
+                }
+            }
+    }
     private func resolvePending() async {
         guard let principal = session.principalID, let handID = pendingHand, pendingCommand != nil else { return }
         pendingReviewed = false
@@ -781,6 +789,7 @@ private struct ResultEntry: View {
     @State private var draftReady = false
     @State private var submitted = false
     @State private var revisionChanged = false
+    @State private var confirmClose = false
     private var seats: [SeatDTO] { snapshot.seats.sorted { $0.seatNo < $1.seatNo } }
     private var base: String { "/api/matches/\(snapshot.match.id)/hands/\(hand.id)" }
     private var input: [String: JSONValue]? {
@@ -922,11 +931,34 @@ struct ResultInputFields: View {
                         Toggle("放铳牌是立直宣言牌（不扣宣言棒）", isOn: $draft.declarationDealIn)
                     }
                 }
+                winningControls
+                if draft.kind == "ryuukyoku" || draft.kind == "nagashi_mangan" {
+                    ForEach(seats) { seat in
+                        Toggle("\(seat.seatNo + 1) 号位听牌", isOn: Binding(
+                            get: { draft.tenpai[seat.seatNo] ?? false },
+                            set: { draft.tenpai[seat.seatNo] = $0 }))
+                    }
+                }
+                if input == nil {
+                    Text("请填写合法座位、每位赢家番符及役满数；流满须提供每位赢家完整的弃牌河。")
+                        .foregroundStyle(.red)
+                }
+            }
+    }
+    @ViewBuilder private var winningControls: some View {
                 if draft.kind == "ron" || draft.kind == "tsumo" || draft.kind == "nagashi_mangan" {
                     ForEach(seats) { seat in
+                        winnerSeatFields(seat)
+                    }
+                    if draft.kind == "nagashi_mangan" {
+                        Toggle("确认每位赢家的弃牌河完整且未被鸣走", isOn: $draft.attested)
+                    }
+                }
+    }
+    @ViewBuilder private func winnerSeatFields(_ seat: SeatDTO) -> some View {
                         let number = seat.seatNo
                         if draft.kind == "ron" || draft.kind == "nagashi_mangan" {
-                            Toggle("\(number + 1) 号位 · \(seat.displayName ?? "未命名")和牌", isOn: Binding(
+                            let winnerBinding: Binding<Bool> = Binding(
                                 get: { draft.winners.contains(number) },
                                 set: { selected in
                                     if selected && !draft.winners.contains(number) &&
@@ -936,11 +968,13 @@ struct ResultInputFields: View {
                                         draft.winners.append(number)
                                     }
                                     if !selected { draft.winners.removeAll { $0 == number } }
-                                }))
-                                .disabled(draft.kind == "ron" && !draft.winners.contains(number) &&
-                                          (number == draft.dealIn || draft.winners.count >=
-                                           ResultInputBuilder.ronCap(rules: snapshot.match.rulesSnapshot,
-                                                                     playerCount: seats.count)))
+                                })
+                            let selectionDisabled: Bool = draft.kind == "ron" && !draft.winners.contains(number) &&
+                                (number == draft.dealIn || draft.winners.count >=
+                                 ResultInputBuilder.ronCap(rules: snapshot.match.rulesSnapshot,
+                                                           playerCount: seats.count))
+                            Toggle("\(number + 1) 号位 · \(seat.displayName ?? "未命名")和牌", isOn: winnerBinding)
+                                .disabled(selectionDisabled)
                         } else {
                             Button("\(number + 1) 号位 · \(seat.displayName ?? "未命名")\(draft.winners == [number] ? " ✓" : "")") {
                                 draft.winners = [number]
@@ -984,23 +1018,6 @@ struct ResultInputFields: View {
                                 }
                             }
                         }
-                    }
-                    if draft.kind == "nagashi_mangan" {
-                        Toggle("确认每位赢家的弃牌河完整且未被鸣走", isOn: $draft.attested)
-                    }
-                }
-                if draft.kind == "ryuukyoku" || draft.kind == "nagashi_mangan" {
-                    ForEach(seats) { seat in
-                        Toggle("\(seat.seatNo + 1) 号位听牌", isOn: Binding(
-                            get: { draft.tenpai[seat.seatNo] ?? false },
-                            set: { draft.tenpai[seat.seatNo] = $0 }))
-                    }
-                }
-                if input == nil {
-                    Text("请填写合法座位、每位赢家番符及役满数；流满须提供每位赢家完整的弃牌河。")
-                        .foregroundStyle(.red)
-                }
-            }
     }
     private func field(_ seat: Int, keyPath: WritableKeyPath<ResultDraft, [Int: String]>,
                        fallback: String = "") -> Binding<String> {

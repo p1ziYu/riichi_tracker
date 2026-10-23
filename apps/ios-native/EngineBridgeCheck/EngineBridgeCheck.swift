@@ -76,7 +76,7 @@ enum EngineBridgeCheck {
             // NSNumber(value:) preserves the objCType tag (i/q/d) that Kotlin/Native
             // maps back to Int/Long/Double; constructing KotlinInt/KotlinLong/KotlinDouble
             // directly would reference the unexported MobileEngineNumber class and fail to link.
-            return integer >= Int32.min && integer <= Int32.max
+            return integer >= Int64(Int32.min) && integer <= Int64(Int32.max)
                 ? NSNumber(value: Int32(integer)) : NSNumber(value: integer)
         }
         return value
@@ -95,7 +95,7 @@ enum EngineBridgeCheck {
         if let dict = value as? [String: Any], let tag = dict["$type"] as? String {
             if tag == "undefined" { return nil }
             if tag == "bigint", let decimal = dict["value"] as? String,
-               let wide = Int64(decimal), wide >= Int32.min && wide <= Int32.max {
+               let wide = Int64(decimal), wide >= Int64(Int32.min) && wide <= Int64(Int32.max) {
                 return KotlinInt(int: Int32(wide))
             }
             throw NSError(domain: "EngineBridgeCheck", code: 3,
