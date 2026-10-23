@@ -27,8 +27,8 @@ enum EngineBridgeCheck {
         try invoke(["operation": operation, "args": args])
     }
     static func samplePayment(config: [String: Any], input: [String: Any]) throws -> [String: Any] {
-        guard let count = config["playerCount"] as? Int, (3...4).contains(count),
-              let start = config["startingPoints"] as? Int, start > 0 else {
+        guard let count = (config["playerCount"] as? NSNumber)?.intValue, (3...4).contains(count),
+              let start = (config["startingPoints"] as? NSNumber)?.intValue, start > 0 else {
             throw APIError(status: nil, message: "引擎预览缺少合法人数或起始点")
         }
         let hand: [String: Any] = [
@@ -197,11 +197,11 @@ enum EngineBridgeCheck {
 
     private static func normalize(_ config: EngineRulesConfig) -> [String: Any] {
         var fields: [String: Any] = [
-            "playerCount": config.playerCount, "startingPoints": config.startingPoints,
-            "returnPoints": config.returnPoints, "targetPoints": config.targetPoints,
+            "playerCount": Int(config.playerCount), "startingPoints": Int(config.startingPoints),
+            "returnPoints": Int(config.returnPoints), "targetPoints": Int(config.targetPoints),
             "uma": config.uma, "oka": config.oka,
-            "honbaPerPayer": config.honbaPerPayer, "honbaRon": config.honbaRon,
-            "notenPenaltyTotal": config.notenPenaltyTotal, "kiriageMangan": config.kiriageMangan,
+            "honbaPerPayer": Int(config.honbaPerPayer), "honbaRon": Int(config.honbaRon),
+            "notenPenaltyTotal": Int(config.notenPenaltyTotal), "kiriageMangan": config.kiriageMangan,
             "kazoeYakuman": config.kazoeYakuman, "compositeYakuman": config.compositeYakuman,
             "doubleYakuman": config.doubleYakuman, "nagashiManganEnabled": config.nagashiManganEnabled,
             "nagashiDealerRepeatRequiresTenpai": config.nagashiDealerRepeatRequiresTenpai,
@@ -219,8 +219,8 @@ enum EngineBridgeCheck {
     }
 
     private static func payment(_ value: SeatPayment) -> [String: Any] {
-        ["seatNo": value.seatNo, "netPoints": value.netPoints,
-         "breakdown": value.breakdown.map { ["reason": $0.reason, "amount": $0.amount] }]
+        ["seatNo": Int(value.seatNo), "netPoints": Int(value.netPoints),
+         "breakdown": value.breakdown.map { ["reason": $0.reason, "amount": Int($0.amount)] }]
     }
     private static func next(_ value: NextHandState) -> [String: Any] {
         ["roundWind": value.roundWind, "roundNumber": value.roundNumber,

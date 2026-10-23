@@ -83,7 +83,7 @@ struct RulesWizard: View {
                         } label: {
                             VStack(alignment: .leading) {
                                 Text(template.name)
-                                Text("\(template.scope == "system" ? "系统" : "参考") · \(template.reviewStatus == "pending" ? "待审核" : template.reviewStatus)")
+                                Text("\(template.scope == "system" ? "系统" : "参考") · \(reviewLabel(template.reviewStatus))")
                                     .font(.footnote).foregroundStyle(Brand.muted)
                             }
                         }

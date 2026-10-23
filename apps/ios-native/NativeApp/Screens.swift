@@ -127,7 +127,7 @@ private func windLabel(_ wind: String?) -> String {
     }
 }
 
-private func reviewLabel(_ review: String) -> String {
+func reviewLabel(_ review: String) -> String {
     switch review.lowercased() {
     case "approved", "verified": "已审核"
     case "reviewed": "已复核"

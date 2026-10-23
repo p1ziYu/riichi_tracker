@@ -24,6 +24,7 @@ final class ScreenshotTourTests: XCTestCase {
 
     private func scrollTo(_ element: XCUIElement, in app: XCUIApplication,
                           file: StaticString = #filePath, line: UInt = #line) {
+        dismissPasswordPromptIfPresent(in: app)
         for _ in 0..<12 where !element.isHittable { app.swipeUp() }
         XCTAssertTrue(element.isHittable, "Missing visible UI control: \(element.identifier)", file: file, line: line)
     }
@@ -35,6 +36,7 @@ final class ScreenshotTourTests: XCTestCase {
     }
 
     private func tab(_ name: String, in app: XCUIApplication) {
+        dismissPasswordPromptIfPresent(in: app)
         tap(app.tabBars.buttons[name])
     }
 
@@ -62,8 +64,31 @@ final class ScreenshotTourTests: XCTestCase {
         XCTAssertTrue(app.buttons["以在线临时访客进入"].waitForExistence(timeout: timeout))
     }
 
+
+    // The simulator's iCloud Keychain prompt can surface long after sign-in and
+    // then swallows later gestures. Depending on the OS build it is owned by the
+    // app process or by SpringBoard, so check both, more than once.
+    private func dismissPasswordPromptIfPresent(in app: XCUIApplication) {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        if app.buttons["Not Now"].exists { app.buttons["Not Now"].tap(); return }
+        if springboard.buttons["Not Now"].exists { springboard.buttons["Not Now"].tap(); return }
+        _ = app.tabBars.firstMatch.waitForExistence(timeout: 1)
+        if app.buttons["Not Now"].exists { app.buttons["Not Now"].tap(); return }
+        if springboard.buttons["Not Now"].exists { springboard.buttons["Not Now"].tap(); return }
+    }
+
+
+    private func installPromptMonitor() {
+        addUIInterruptionMonitor(withDescription: "System save-password prompt") { element in
+            let notNow = element.buttons["Not Now"]
+            if notNow.exists { notNow.tap(); return true }
+            return false
+        }
+    }
+
     func testAuthTour() {
         let app = launch(["-UITestSeed"])
+        installPromptMonitor()
         showSignedOutAuth(in: app)
         capture("tour-online-01-auth", in: app)
     }
@@ -93,9 +118,9 @@ final class ScreenshotTourTests: XCTestCase {
         capture("tour-local-04-wizard-names", in: app)
         tap(app.buttons["local.wizard.create"])
 
-        XCTAssertTrue(app.buttons["local.table.enterResult"].waitForExistence(timeout: timeout))
+        XCTAssertTrue(app.staticTexts["座位与点数"].waitForExistence(timeout: 30))
         capture("tour-local-05-table", in: app)
-        tap(app.buttons["local.table.enterResult"])
+        scrollToAndTap(app.buttons["local.table.enterResult"], in: app)
         XCTAssertTrue(app.buttons["local.result.preview"].waitForExistence(timeout: timeout))
         capture("tour-local-06-result-entry", in: app)
         // A dealer counted yakuman bankrupts seat 2 under the bundled house rules,
@@ -108,7 +133,15 @@ final class ScreenshotTourTests: XCTestCase {
         scrollTo(app.staticTexts["local.result.payment.1"], in: app)
         capture("tour-local-07-settle-preview", in: app)
         scrollToAndTap(app.buttons["local.result.settle"], in: app)
-        XCTAssertTrue(app.staticTexts["四麻家规 · 已结束"].waitForExistence(timeout: timeout))
+        // House rules end manually (automaticEndPolicy=manual): settling one hand
+        // does not finish the match, even with a seat below zero.
+        scrollToAndTap(app.buttons["手动终局"], in: app)
+        tap(app.buttons["继续确认"])
+        tap(app.buttons["放弃当前局并终局"])
+        if app.buttons["确认并保存最终成绩"].waitForExistence(timeout: 5) {
+            scrollToAndTap(app.buttons["确认并保存最终成绩"], in: app)
+        }
+        XCTAssertTrue(app.staticTexts["四麻家规 · 已结束"].waitForExistence(timeout: 30))
         scrollTo(app.staticTexts["已结算逐局历史 · 保存的原始输入及引擎输出"], in: app)
         scrollTo(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "local.table.history.")).firstMatch, in: app)
         capture("tour-local-08-table-after-settle", in: app)
@@ -118,7 +151,7 @@ final class ScreenshotTourTests: XCTestCase {
         tap(app.buttons["local.wizard.nextRules"])
         scrollToAndTap(app.buttons["local.wizard.nextNames"], in: app)
         tap(app.buttons["local.wizard.create"])
-        XCTAssertTrue(app.buttons["local.table.enterResult"].waitForExistence(timeout: timeout))
+        XCTAssertTrue(app.staticTexts["座位与点数"].waitForExistence(timeout: 30))
         returnToLocalLobby(in: app)
         XCTAssertTrue(app.staticTexts["三麻家规"].waitForExistence(timeout: timeout))
         if !app.staticTexts["四麻家规"].isHittable { app.swipeUp() }
@@ -135,6 +168,7 @@ final class ScreenshotTourTests: XCTestCase {
         try XCTSkipUnless(!email.isEmpty && !password.isEmpty, "Set UITEST_EMAIL and UITEST_PASSWORD for seeded online tour")
 
         let app = launch(["-UITestSeed"])
+        installPromptMonitor()
         showSignedOutAuth(in: app)
         let emailField = app.textFields["邮箱"]
         let passwordField = app.secureTextFields["密码"]
@@ -144,6 +178,7 @@ final class ScreenshotTourTests: XCTestCase {
         passwordField.typeText(password)
         tap(app.buttons["登录"])
         XCTAssertTrue(app.buttons["开桌 ↗"].waitForExistence(timeout: timeout), "Seeded account did not enter the signed-in lobby")
+        dismissPasswordPromptIfPresent(in: app)
         scrollTo(app.buttons["online.match.active"], in: app)
         capture("tour-online-02-lobby", in: app)
 
@@ -152,8 +187,10 @@ final class ScreenshotTourTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["选择系统规则模板"].waitForExistence(timeout: timeout))
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "rulesWizard.template."))
             .firstMatch.waitForExistence(timeout: timeout), "Seeded backend must serve a selectable ruleset template")
+        dismissPasswordPromptIfPresent(in: app)
         capture("tour-online-03-wizard", in: app)
         // This wizard is a dismissible sheet, without a Close toolbar item.
+        dismissPasswordPromptIfPresent(in: app)
         for origin in [0.12, 0.06] where !app.buttons["online.wizard.open"].isHittable {
             let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: origin))
             let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
@@ -163,17 +200,94 @@ final class ScreenshotTourTests: XCTestCase {
 
         tab("我的", in: app)
         tap(app.buttons["扫描二维码 / 粘贴签到链接 / 房间码"])
+        if !app.textFields["checkIn.roomCode"].waitForExistence(timeout: timeout) {
+            // Sheet presentation occasionally lags a beat behind the profile tab
+            // switch; one more tap on the still-visible row is harmless.
+            tap(app.buttons["扫描二维码 / 粘贴签到链接 / 房间码"])
+        }
         XCTAssertTrue(app.textFields["checkIn.roomCode"].waitForExistence(timeout: timeout))
         capture("tour-online-04-checkin", in: app)
         tap(app.buttons["关闭"])
-        tab("大厅", in: app)
+        XCTAssertFalse(app.textFields["checkIn.roomCode"].waitForExistence(timeout: 3), "Check-in sheet did not close")
+    }
+
+    func testSeededTableTour() throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(environment["UITEST_SEEDED"] == "1", "Requires disposable seeded online backend (UITEST_SEEDED=1)")
+        let email = environment["UITEST_EMAIL"] ?? ""
+        let password = environment["UITEST_PASSWORD"] ?? ""
+        try XCTSkipUnless(!email.isEmpty && !password.isEmpty, "Set UITEST_EMAIL and UITEST_PASSWORD for seeded online tour")
+
+        let app = launch(["-UITestSeed"])
+        installPromptMonitor()
+        showSignedOutAuth(in: app)
+        let emailField = app.textFields["邮箱"]
+        let passwordField = app.secureTextFields["密码"]
+        tap(emailField)
+        emailField.typeText(email)
+        tap(passwordField)
+        passwordField.typeText(password)
+        tap(app.buttons["登录"])
+        XCTAssertTrue(app.buttons["开桌 ↗"].waitForExistence(timeout: timeout), "Seeded account did not enter the signed-in lobby")
+        dismissPasswordPromptIfPresent(in: app)
         scrollToAndTap(app.buttons["online.match.active"], in: app)
         XCTAssertTrue(app.staticTexts["对局信息"].waitForExistence(timeout: timeout), "Seeded match did not load")
         capture("tour-online-05-table", in: app)
-        scrollToAndTap(app.buttons["online.table.resultEntry"], in: app)
-        XCTAssertTrue(app.buttons["online.result.preview"].waitForExistence(timeout: timeout), "Seeded match must have a writable current hand")
+        dismissPasswordPromptIfPresent(in: app)
+        // The hand-controls area loads asynchronously: poll for either state
+        // (open hand -> result entry, or no hand yet -> open-hand button)
+        // instead of racing a single short existence wait.
+        // Hand controls sit below the seats section; offscreen List rows are
+        // not realized in the accessibility tree, so scroll while polling.
+        var handState = ""
+        for _ in 0..<20 {
+            dismissPasswordPromptIfPresent(in: app)
+            if app.buttons["online.table.resultEntry"].exists { handState = "entry"; break }
+            if app.buttons["新开一局"].exists { handState = "open"; break }
+            app.swipeUp()
+        }
+        if handState == "open" {
+            // A freshly finalized match has no open hand yet; the host opens the
+            // first one from the table, exactly as in the Web UI.
+            dismissPasswordPromptIfPresent(in: app)
+            scrollToAndTap(app.buttons["新开一局"], in: app)
+            XCTAssertTrue(app.buttons["online.table.resultEntry"].waitForExistence(timeout: 15))
+        }
+        // The entry button stays disabled until the pending-result check has
+        // loaded; tapping it earlier is a silent no-op.
+        let entryButton = app.buttons["online.table.resultEntry"]
+        if !entryButton.waitForExistence(timeout: timeout) {
+            dismissPasswordPromptIfPresent(in: app)
+            _ = entryButton.waitForExistence(timeout: timeout)
+        }
+        XCTAssertTrue(entryButton.exists, "Result entry button never appeared")
+        var enableWait = 0
+        while enableWait < 20 {
+            if entryButton.exists && entryButton.isEnabled { break }
+            dismissPasswordPromptIfPresent(in: app)
+            _ = entryButton.waitForExistence(timeout: 1)
+            enableWait += 1
+        }
+        XCTAssertTrue(entryButton.exists && entryButton.isEnabled, "Result entry never became writable")
+        // A live-snapshot re-render can swallow the first sheet presentation;
+        // retry the tap a few times before giving up (a human would tap again).
+        var formOpened = false
+        for _ in 0..<3 where !formOpened {
+            dismissPasswordPromptIfPresent(in: app)
+            scrollToAndTap(entryButton, in: app)
+            formOpened = app.buttons["online.result.preview"].waitForExistence(timeout: 5)
+        }
+        XCTAssertTrue(formOpened, "Result entry form never presented")
+        scrollTo(app.buttons["online.result.preview"], in: app)
         capture("tour-online-06-result-entry", in: app)
         tap(app.buttons["关闭"])
+        let alertSave = app.alerts.buttons["保存草稿并关闭"]
+        if alertSave.waitForExistence(timeout: 3) {
+            alertSave.tap()
+        } else if app.buttons["保存草稿并关闭"].waitForExistence(timeout: 1) {
+            tap(app.buttons["保存草稿并关闭"])
+        }
+        XCTAssertTrue(app.buttons["online.table.resultEntry"].waitForExistence(timeout: timeout), "Result form did not close back to the table")
         tab("战绩", in: app)
         XCTAssertTrue(app.navigationBars["战绩"].waitForExistence(timeout: timeout))
         scrollTo(app.buttons["online.match.active"], in: app)

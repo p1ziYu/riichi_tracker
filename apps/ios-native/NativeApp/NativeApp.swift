@@ -136,6 +136,7 @@ struct IchihimeNativeApp: App {
                 }
             }
             .tint(Brand.gold)
+            .preferredColorScheme(.dark)
             .task {
                 // CI/verification hook: `simctl launch ... -EngineSelfCheck` runs the
                 // bundled golden-fixture replay through the MobileEngine framework and
