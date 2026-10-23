@@ -107,6 +107,33 @@ function nextHandText(nextHand: PaymentPreview['nextHand']): string {
   return `${round} · ${dealer} · ${honba} · ${pool}`;
 }
 
+export function FinalizeDealerBlock({
+  dealerSeatNo,
+  busy = false,
+  onSelectDealer,
+}: {
+  dealerSeatNo: number | null;
+  busy?: boolean;
+  onSelectDealer: (seatNo: number | null) => void;
+}) {
+  return (
+    <div className="table-dealer-block">
+      <div className="dealer-row">
+        <span>起家：</span>
+        <button
+          type="button"
+          aria-pressed={dealerSeatNo === null}
+          disabled={busy}
+          onClick={() => onSelectDealer(null)}
+        >
+          随机（默认）
+        </button>
+      </div>
+      <small className="dealer-helper">点击已入座玩家的座位指定东家</small>
+    </div>
+  );
+}
+
 export default function Table() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -480,14 +507,23 @@ export default function Table() {
           {isOwner && ['preparing', 'lobby'].includes(state.match.status) && seat.principalId &&
             <button type="button" className="text-button" aria-pressed={dealerSeatNo === seat.seatNo} disabled={busy} onClick={() => setDealerSeatNo(seat.seatNo)}>{dealerSeatNo === seat.seatNo ? '起家 · 东家' : '设为起家'}</button>}
         </div>)}</div>
-        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && <><div className="table-controls"><span>起家：</span><button type="button" aria-pressed={dealerSeatNo === null} disabled={busy} onClick={() => setDealerSeatNo(null)}>随机（默认）</button><small>点击已入座玩家的座位指定东家</small></div>
-          <div className="table-controls"><button type="button" disabled={busy} onClick={() => void action(async () => {
-            setToken(null);
-            const result = await post<TokenResponse>(`${base}/check-in-tokens`, {});
-            if (!result?.token) throw new Error('服务端未返回签到令牌');
-            setToken({ id: id!, value: result.token, expiresAt: result.expiresAt,
-              checkedInAtIssue: typeof state.checkedIn === 'number' ? state.checkedIn : 0 });
-          })}>生成玩家签到链接</button><button type="button" className="primary" disabled={busy} onClick={() => void action(async () => { await post(`${base}/seats/finalize`, dealerSeatNo === null ? {} : { dealerSeatNo }); await refresh(); })}>确认座次</button></div></>}
+        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && <>
+          <FinalizeDealerBlock
+            dealerSeatNo={dealerSeatNo}
+            busy={busy}
+            onSelectDealer={setDealerSeatNo}
+          />
+          <div className="table-controls table-controls-finalize">
+            <button type="button" disabled={busy} onClick={() => void action(async () => {
+              setToken(null);
+              const result = await post<TokenResponse>(`${base}/check-in-tokens`, {});
+              if (!result?.token) throw new Error('服务端未返回签到令牌');
+              setToken({ id: id!, value: result.token, expiresAt: result.expiresAt,
+                checkedInAtIssue: typeof state.checkedIn === 'number' ? state.checkedIn : 0 });
+            })}>生成玩家签到链接</button>
+            <button type="button" className="primary" disabled={busy} onClick={() => void action(async () => { await post(`${base}/seats/finalize`, dealerSeatNo === null ? {} : { dealerSeatNo }); await refresh(); })}>确认座次</button>
+          </div>
+        </>}
         {isOwner && ['preparing', 'lobby'].includes(state.match.status) && token?.id === id &&
           !checkInUrl && <p className="notice" role="status">签到链接已使用或过期，请重新生成。</p>}
         {isOwner && ['preparing', 'lobby'].includes(state.match.status) && checkInUrl && <div className="table-invite"><div className="table-qr">{qrCode?.url === checkInUrl ? <img src={qrCode.image} width="256" height="256" alt="扫描二维码打开签到链接" /> : <span role="status">{qrError ? '二维码生成失败，请使用下方链接' : '正在生成签到二维码…'}</span>}</div><div className="table-invite-details"><p>玩家签到链接（房主免签到）：</p><small>每个链接仅供一位已获座位的玩家使用，签到后请为下一位重新生成。</small><a href={checkInUrl}>{checkInUrl}</a>{token?.expiresAt && <small>截止 {token.expiresAt}</small>}<button type="button" onClick={() => void copyCheckIn()}>复制签到链接</button>{copyStatus && <small role="status">{copyStatus}</small>}</div></div>}
