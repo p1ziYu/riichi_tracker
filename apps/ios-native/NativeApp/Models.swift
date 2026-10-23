@@ -260,7 +260,7 @@ func ruleDetails(snapshot: [String: JSONValue]?, template: TemplateDTO?) -> Rule
     let base = metadata?["baseConfig"]?.object ?? template?.config
     let excluded: Set<String> = ["metadata", "oka", "okaTenths", "umaTenths", "startPoints", "endTarget", "ryuukyokuPenaltyTotal", "ryuukyokuPoolTotal", "bustEndsMatch"]
     let customizedKeys: [String]
-    if let snapshot, let base {
+    if let snapshot = snapshot, let base = base {
         customizedKeys = snapshot.keys.filter { key in
             !excluded.contains(key) && base[key] != nil && snapshot[key] != base[key]
         }.sorted()

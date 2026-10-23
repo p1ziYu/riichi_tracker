@@ -415,9 +415,7 @@ import SwiftUI
         .scrollContentBackground(.hidden).background(Brand.background).tint(Brand.gold)
         .navigationTitle(match?.name ?? "本地牌桌")
         .sheet(isPresented: $entering) {
-            if let match, let hand = match.currentHand {
-                NavigationStack { LocalResultEntry(store: store, match: match, hand: hand) }
-            }
+            resultEntrySheet
         }
         .confirmationDialog("放弃未结算局并终局？", isPresented: $abandonFirst, titleVisibility: .visible) {
             Button("保留当前局", role: .cancel) {}
@@ -431,6 +429,11 @@ import SwiftUI
             TextField("姓名（最多 40 字）", text: $newName)
             Button("取消", role: .cancel) { editSeat = nil }
             Button("保存") { if let editSeat { action { try store.rename(id, seat: editSeat, name: newName) } }; editSeat = nil }
+        }
+    }
+    @ViewBuilder private var resultEntrySheet: some View {
+        if let match = match, let hand = match.currentHand {
+            NavigationStack { LocalResultEntry(store: store, match: match, hand: hand) }
         }
     }
     private func action(_ block: () throws -> Void) {
@@ -489,7 +492,7 @@ import SwiftUI
             if let issue { Section { Text(issue).foregroundStyle(.red) } }
             Section("本机引擎支付预览") {
                 Button("计算逐座支付") { calculate() }.disabled(input == nil || !draftSaved)
-                if let preview, let previewInput, previewInput == input,
+                if let preview = preview, let previewInput = previewInput, previewInput == input,
                    liveMatch?.currentHand?.handId == hand.handId,
                    liveMatch?.currentHand?.markRevision == hand.markRevision, draftSaved {
                     if let rows = preview["perSeat"]?.arrayValue {

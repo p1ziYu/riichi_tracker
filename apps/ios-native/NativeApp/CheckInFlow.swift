@@ -221,45 +221,7 @@ struct CheckInScreen: View {
                 Section { Text("请先登录账户或选择在线临时访客，再回到此处签到。离线本地身份不能签到。") }
             }
             if let notice { Section { Text(notice).foregroundStyle(joinedSeat == nil ? Color.orange : Color.green) } }
-            if let joinedSeat, let destination {
-                Section("已加入牌桌") {
-                    Text("你在 \(joinedSeat + 1) 号位，等待房主开局。")
-                    Button("查看牌桌") { onCompleted(destination.matchID) }
-                }
-            } else if let destination, session.authenticated {
-                Section("选择座位") {
-                    if loadingSeats { ProgressView("读取座位中…") }
-                    if let preview, previewKey == destinationKey, preview.match.id == destination.matchID {
-                        let occupiedCount = preview.seats.reduce(0) { $0 + ($1.principalId == nil ? 0 : 1) }
-                        let fullForGuest = occupiedCount >= preview.match.playerCount &&
-                            !preview.seats.contains(where: { $0.principalId == session.principalID })
-                        Text("\(preview.match.playerCount) 人牌桌 · \(preview.match.status == "preparing" ? "待开局" : "已开局")")
-                        Picker("座位", selection: $selectedSeat) {
-                            Text("自动选择第一个空座").tag(Int?.none)
-                            ForEach(0..<preview.match.playerCount, id: \.self) { number in
-                                let seat = preview.seat(at: number)
-                                Text("\(number + 1) 号位 · \(seat?.principalId == nil ? "空座" : seat?.displayName ?? "已占用")")
-                                    .tag(Optional(number))
-                                    .disabled(seat?.principalId != nil)
-                            }
-                        }
-                        Text("已有成员：\(occupiedCount) / \(preview.match.playerCount)。自动选择会在提交时取最低空座。")
-                            .font(.footnote).foregroundStyle(.secondary)
-                        if fullForGuest {
-                            Text("牌桌已满，暂无可选座位。").foregroundStyle(.orange)
-                        }
-                        TextField("昵称（可选；更新个人展示名）", text: $alias)
-                            .textInputAutocapitalization(.words)
-                        Button(busy ? "正在签到…" : "确认座位并加入") { Task { await checkIn() } }
-                            .disabled(busy || loadingSeats || preview.match.status != "preparing" || fullForGuest ||
-                                      (selectedSeat.map { preview.seat(at: $0)?.principalId != nil } ?? false))
-                    }
-                    if recoverableKey == destinationKey, preview == nil {
-                        Button("已签到？找回座位") { Task { await recoverCheckIn() } }.disabled(busy || loadingSeats)
-                    }
-                    Button("刷新座位") { Task { await loadSeats() } }.disabled(loadingSeats || busy)
-                }
-            }
+            joinedSeatControls
         }
         .scrollContentBackground(.hidden)
         .background(Brand.background)
@@ -288,6 +250,47 @@ struct CheckInScreen: View {
                 }
                 .navigationTitle("扫描签到二维码")
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { scanning = false } } }
+            }
+        }
+    }
+    @ViewBuilder private var joinedSeatControls: some View {
+        if let joinedSeat = joinedSeat, let destination = destination {
+            Section("已加入牌桌") {
+                Text("你在 \(joinedSeat + 1) 号位，等待房主开局。")
+                Button("查看牌桌") { onCompleted(destination.matchID) }
+            }
+        } else if let destination, session.authenticated {
+            Section("选择座位") {
+                if loadingSeats { ProgressView("读取座位中…") }
+                if let preview, previewKey == destinationKey, preview.match.id == destination.matchID {
+                    let occupiedCount = preview.seats.reduce(0) { $0 + ($1.principalId == nil ? 0 : 1) }
+                    let fullForGuest = occupiedCount >= preview.match.playerCount &&
+                        !preview.seats.contains(where: { $0.principalId == session.principalID })
+                    Text("\(preview.match.playerCount) 人牌桌 · \(preview.match.status == "preparing" ? "待开局" : "已开局")")
+                    Picker("座位", selection: $selectedSeat) {
+                        Text("自动选择第一个空座").tag(Int?.none)
+                        ForEach(0..<preview.match.playerCount, id: \.self) { number in
+                            let seat = preview.seat(at: number)
+                            Text("\(number + 1) 号位 · \(seat?.principalId == nil ? "空座" : seat?.displayName ?? "已占用")")
+                                .tag(Optional(number))
+                                .disabled(seat?.principalId != nil)
+                        }
+                    }
+                    Text("已有成员：\(occupiedCount) / \(preview.match.playerCount)。自动选择会在提交时取最低空座。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    if fullForGuest {
+                        Text("牌桌已满，暂无可选座位。").foregroundStyle(.orange)
+                    }
+                    TextField("昵称（可选；更新个人展示名）", text: $alias)
+                        .textInputAutocapitalization(.words)
+                    Button(busy ? "正在签到…" : "确认座位并加入") { Task { await checkIn() } }
+                        .disabled(busy || loadingSeats || preview.match.status != "preparing" || fullForGuest ||
+                                  (selectedSeat.map { preview.seat(at: $0)?.principalId != nil } ?? false))
+                }
+                if recoverableKey == destinationKey, preview == nil {
+                    Button("已签到？找回座位") { Task { await recoverCheckIn() } }.disabled(busy || loadingSeats)
+                }
+                Button("刷新座位") { Task { await loadSeats() } }.disabled(loadingSeats || busy)
             }
         }
     }
@@ -325,7 +328,7 @@ struct CheckInScreen: View {
         }
     }
     private func loadSeats() async {
-        guard let destination, let key = destinationKey else { return }
+        guard let destination = destination, let key = destinationKey else { return }
         seatsRequest += 1
         let request = seatsRequest
         loadingSeats = true

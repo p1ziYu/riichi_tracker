@@ -85,7 +85,7 @@ enum OnlineCommandPolicy {
     }
     static func pendingResolution(_ command: ResultCommand?, handID: String,
                                   snapshot: TableSnapshot?) -> PendingResolution {
-        guard let command, let snapshot else { return .unverified }
+        guard let command = command, let snapshot = snapshot else { return .unverified }
         let hand = snapshot.currentHand
         if snapshot.match.status == "finished" || hand?.state == "settled" ||
             (hand != nil && hand?.id != handID) { return .settled }
@@ -105,13 +105,13 @@ enum OnlineCommandPolicy {
     }
     static func wasRemoved(previous: TableSnapshot?, updated: TableSnapshot?,
                            status: Int?, principal: String?) -> Bool {
-        guard let previous, let principal, previous.match.status == "preparing",
+        guard let previous = previous, let principal = principal, previous.match.status == "preparing",
               previous.seats.contains(where: { $0.principalId == principal }) else { return false }
         if status == 403 { return true }
         return updated.map { !$0.seats.contains(where: { $0.principalId == principal }) } ?? false
     }
     static func canResend(_ command: ResultCommand?, hand: CurrentHandDTO?, handID: String) -> Bool {
-        guard let command, let hand else { return false }
+        guard let command = command, let hand = hand else { return false }
         return hand.id == handID && hand.state == "open" &&
             hand.markRevision == command.confirmedMarkRevision
     }
@@ -451,36 +451,7 @@ struct OnlineTableActions: View {
             if OnlineCommandPolicy.canWrite(snapshot, principal: session.principalID) && !pendingLoaded {
                 Button("重试读取安全保存的结算请求") { loadPending() }
             }
-            if let pendingBody, let pendingHand, signedIn {
-                Text("结果未确认：待确认请求必须先核对，不能编辑后复用旧 clientEventId。")
-                if let pendingCommand, snapshot.currentHand?.id == pendingHand,
-                   snapshot.currentHand?.markRevision != pendingCommand.confirmedMarkRevision {
-                    Text("立直标记版本已变化；旧请求不可更改版本后重发。请核对标记并重新预览。")
-                        .foregroundStyle(.orange)
-                }
-                Button("刷新确认服务端状态") { Task { await resolvePending() } }
-                    .disabled(busy)
-                Button("原样重发结算请求") {
-                    execute {
-                        guard let principal = session.principalID,
-                              OnlineCommandPolicy.canWrite(snapshot, principal: principal),
-                              pendingReviewed,
-                              OnlineCommandPolicy.canResend(pendingCommand, hand: reviewedHand, handID: pendingHand),
-                              OnlineCommandPolicy.canResend(pendingCommand, hand: snapshot.currentHand, handID: pendingHand) else {
-                            throw APIError(status: nil, message: "标记已变化或尚未刷新核对，请重新预览")
-                        }
-                        let _: PaymentPreviewDTO = try await session.api.postRaw("\(base)/hands/\(pendingHand)/results", data: pendingBody)
-                        try OnlinePrivateStore.live.clearPending(principal: principal, match: matchID)
-                        if session.principalID == principal {
-                            pendingBody = nil; self.pendingHand = nil; pendingCommand = nil
-                        }
-                        try? OnlinePrivateStore.live.clearDraft(principal: principal, match: matchID, hand: pendingHand)
-                    }
-                }.disabled(busy || !pendingReviewed ||
-                            !OnlineCommandPolicy.canWrite(snapshot, principal: session.principalID) ||
-                            !OnlineCommandPolicy.canResend(pendingCommand, hand: reviewedHand, handID: pendingHand) ||
-                            !OnlineCommandPolicy.canResend(pendingCommand, hand: snapshot.currentHand, handID: pendingHand))
-            }
+            pendingResolutionControls
             if snapshot.match.status == "finished" {
                 Button("预览终局成绩") {
                     execute(refresh: false) {
@@ -571,11 +542,43 @@ struct OnlineTableActions: View {
             if pendingBody != nil { await resolvePending() }
         }
         .task(id: invitation?.token) {
-            guard let invitation, let expires = InvitationClock.expiration(invitation.expiresAt) else { return }
+            guard let invitation = invitation, let expires = InvitationClock.expiration(invitation.expiresAt) else { return }
             let seconds = max(0, min(600, expires.timeIntervalSinceNow))
             do { try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
             catch { return }
             if !Task.isCancelled { invitationExpired = true }
+        }
+    }
+    @ViewBuilder private var pendingResolutionControls: some View {
+        if let pendingBody = pendingBody, let pendingHand = pendingHand, signedIn {
+            Text("结果未确认：待确认请求必须先核对，不能编辑后复用旧 clientEventId。")
+            if let pendingCommand, snapshot.currentHand?.id == pendingHand,
+               snapshot.currentHand?.markRevision != pendingCommand.confirmedMarkRevision {
+                Text("立直标记版本已变化；旧请求不可更改版本后重发。请核对标记并重新预览。")
+                    .foregroundStyle(.orange)
+            }
+            Button("刷新确认服务端状态") { Task { await resolvePending() } }
+                .disabled(busy)
+            Button("原样重发结算请求") {
+                execute {
+                    guard let principal = session.principalID,
+                          OnlineCommandPolicy.canWrite(snapshot, principal: principal),
+                          pendingReviewed,
+                          OnlineCommandPolicy.canResend(pendingCommand, hand: reviewedHand, handID: pendingHand),
+                          OnlineCommandPolicy.canResend(pendingCommand, hand: snapshot.currentHand, handID: pendingHand) else {
+                        throw APIError(status: nil, message: "标记已变化或尚未刷新核对，请重新预览")
+                    }
+                    let _: PaymentPreviewDTO = try await session.api.postRaw("\(base)/hands/\(pendingHand)/results", data: pendingBody)
+                    try OnlinePrivateStore.live.clearPending(principal: principal, match: matchID)
+                    if session.principalID == principal {
+                        pendingBody = nil; self.pendingHand = nil; pendingCommand = nil
+                    }
+                    try? OnlinePrivateStore.live.clearDraft(principal: principal, match: matchID, hand: pendingHand)
+                }
+            }.disabled(busy || !pendingReviewed ||
+                        !OnlineCommandPolicy.canWrite(snapshot, principal: session.principalID) ||
+                        !OnlineCommandPolicy.canResend(pendingCommand, hand: reviewedHand, handID: pendingHand) ||
+                        !OnlineCommandPolicy.canResend(pendingCommand, hand: snapshot.currentHand, handID: pendingHand))
         }
     }
     @ViewBuilder private var preparingControls: some View {
@@ -613,7 +616,7 @@ struct OnlineTableActions: View {
                         }
                         Button(snapshot.seats.contains { $0.seatNo == toSeat && $0.principalId != nil }
                                ? "交换座位" : "移动到空座") {
-                            guard let fromSeat, let toSeat, fromSeat != toSeat,
+                            guard let fromSeat = fromSeat, let toSeat = toSeat, fromSeat != toSeat,
                                   occupiedSeats.contains(where: { $0.seatNo == fromSeat }),
                                   (0..<snapshot.match.playerCount).contains(toSeat) else { return }
                             execute {
