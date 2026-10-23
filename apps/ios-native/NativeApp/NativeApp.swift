@@ -38,6 +38,18 @@ struct IchihimeNativeApp: App {
                     NavigationStack { AuthScreen(session: session) }
                 }
             }
+            .task {
+                // CI/verification hook: `simctl launch ... -EngineSelfCheck` runs the
+                // bundled golden-fixture replay through the MobileEngine framework and
+                // writes the summary to Documents/engine-selfcheck.txt.
+                if ProcessInfo.processInfo.arguments.contains("-EngineSelfCheck") {
+                    let result = await EngineBridgeCheck.runSample()
+                    let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                        .appendingPathComponent("engine-selfcheck.txt")
+                    try? result.write(to: url, atomically: true, encoding: .utf8)
+                    print("ENGINE_SELFCHECK_RESULT: \(result)")
+                }
+            }
             .sheet(isPresented: $showingCheckIn) {
                 NavigationStack {
                     CheckInScreen(link: checkInLink)

@@ -5,14 +5,16 @@ import MobileEngine
 /// Replays bundled JS-golden vectors through the exported Kotlin/Native framework.
 /// No fixture result is synthesized from its expected value.
 enum EngineBridgeCheck {
-    static let version = MobileEngineCoreKt.ENGINE_VERSION
+    static let version = CoreKt.ENGINE_VERSION
 
     static func runSample() async -> String {
         do {
-            let (total, failures) = try replay()
+            let (total, failures, bridgeSkipped) = try replay()
+            let skippedNote = bridgeSkipped.isEmpty ? ""
+                : " · 桥接不可表示 \(bridgeSkipped.count) 条（错类型入参无法经类型化桥表达，JVM 原始路径已覆盖）：\(bridgeSkipped.joined(separator: ","))"
             return failures.isEmpty
-                ? "通过 \(total)/\(total) · ENGINE_VERSION \(version)"
-                : "失败 \(failures.count)/\(total) · ENGINE_VERSION \(version) · \(failures.prefix(3).joined(separator: "; "))"
+                ? "通过 \(total - bridgeSkipped.count)/\(total) · ENGINE_VERSION \(version)\(skippedNote)"
+                : "失败 \(failures.count)/\(total) · ENGINE_VERSION \(version) · \(failures.prefix(3).joined(separator: "; "))\(skippedNote)"
         } catch {
             return "自检失败 · ENGINE_VERSION \(version) · \(error.localizedDescription)"
         }
@@ -30,35 +32,76 @@ enum EngineBridgeCheck {
         if let number = value as? NSNumber {
             if CFGetTypeID(number) == CFBooleanGetTypeID() { return KotlinBoolean(bool: number.boolValue) }
             if ["d", "f"].contains(String(cString: number.objCType)) {
-                return KotlinDouble(double: number.doubleValue)
+                return NSNumber(value: number.doubleValue)
             }
             let integer = number.int64Value
+            // NSNumber(value:) preserves the objCType tag (i/q/d) that Kotlin/Native
+            // maps back to Int/Long/Double; constructing KotlinInt/KotlinLong/KotlinDouble
+            // directly would reference the unexported MobileEngineNumber class and fail to link.
             return integer >= Int32.min && integer <= Int32.max
-                ? KotlinInt(int: Int32(integer)) : KotlinLong(longLong: integer)
+                ? NSNumber(value: Int32(integer)) : NSNumber(value: integer)
         }
         return value
     }
     private static func bridgedObject(_ value: Any?) -> [String: Any] {
         bridged(object(value)) as? [String: Any] ?? [:]
     }
-    private static func optInteger(_ value: Any?) -> KotlinInt? {
-        guard let number = value as? NSNumber else { return nil }
+    // Optional-field readers must distinguish ABSENT (nil/NSNull -> nil) from
+    // PRESENT-BUT-MISTYPED: a mistyped value has no representation in the typed
+    // bridge, so surface it instead of silently dropping it (the JVM raw-map
+    // differential covers those fixtures through the core's own validation).
+    private static func optInteger(_ value: Any?) throws -> KotlinInt? {
+        guard let value, !(value is NSNull) else { return nil }
+        // Golden-format tagged values (see packages/mobile-engine PORTING-NOTES):
+        // undefined == absent; bigint carries a decimal string.
+        if let dict = value as? [String: Any], let tag = dict["$type"] as? String {
+            if tag == "undefined" { return nil }
+            if tag == "bigint", let decimal = dict["value"] as? String,
+               let wide = Int64(decimal), wide >= Int32.min && wide <= Int32.max {
+                return KotlinInt(int: Int32(wide))
+            }
+            throw NSError(domain: "EngineBridgeCheck", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "Bridge cannot represent tagged \(tag) as an integer"])
+        }
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else {
+            throw NSError(domain: "EngineBridgeCheck", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "Bridge cannot represent \(type(of: value)) as an integer"])
+        }
         return KotlinInt(int: number.int32Value)
     }
-    private static func optBoolean(_ value: Any?) -> KotlinBoolean? {
-        guard let number = value as? NSNumber else { return nil }
+    private static func optBoolean(_ value: Any?) throws -> KotlinBoolean? {
+        guard let value, !(value is NSNull) else { return nil }
+        if let dict = value as? [String: Any], let tag = dict["$type"] as? String {
+            if tag == "undefined" { return nil }
+            throw NSError(domain: "EngineBridgeCheck", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "Bridge cannot represent tagged \(tag) as a boolean"])
+        }
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+            throw NSError(domain: "EngineBridgeCheck", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "Bridge cannot represent \(type(of: value)) as a boolean"])
+        }
         return KotlinBoolean(bool: number.boolValue)
     }
 
-    private static func hand(_ value: Any?) -> MobileEngineHandState {
-        let item = object(value)
-        let seats = array(item["seats"]).map { entry -> MobileEngineSeatState in
-            let seat = object(entry)
-            return MobileEngineSeatState(seatNo: integer(seat["seatNo"]), points: integer(seat["points"]),
-                                         isRiichi: (seat["isRiichi"] as? NSNumber)?.boolValue ?? false,
-                                         isTenpai: optBoolean(seat["isTenpai"]))
+    private static func handKind(_ value: String?) -> HandKind {
+        switch value {
+        case "tsumo": return HandKind.tsumo
+        case "ryuukyoku": return HandKind.ryuukyoku
+        case "chombo": return HandKind.chombo
+        case "nagashi_mangan": return HandKind.nagashiMangan
+        default: return HandKind.ron
         }
-        return MobileEngineHandState(handId: item["handId"] as? String ?? "",
+    }
+
+    private static func hand(_ value: Any?) throws -> HandState {
+        let item = object(value)
+        let seats = try array(item["seats"]).map { entry -> SeatState in
+            let seat = object(entry)
+            return SeatState(seatNo: integer(seat["seatNo"]), points: integer(seat["points"]),
+                                         isRiichi: try optBoolean(seat["isRiichi"])?.boolValue ?? false,
+                                         isTenpai: try optBoolean(seat["isTenpai"]))
+        }
+        return HandState(handId: item["handId"] as? String ?? "",
                                      roundWind: item["roundWind"] as? String ?? "",
                                      roundNumber: integer(item["roundNumber"]),
                                      dealerSeatNo: integer(item["dealerSeatNo"]),
@@ -68,25 +111,25 @@ enum EngineBridgeCheck {
                                      resultRevision: (item["resultRevision"] as? NSNumber)?.int64Value ?? 0)
     }
 
-    private static func result(_ value: Any?) -> MobileEngineResultInput {
+    private static func result(_ value: Any?) throws -> ResultInput {
         let item = object(value)
-        let winners = array(item["winners"]).map { entry -> MobileEngineWinnerInput in
+        let winners = try array(item["winners"]).map { entry -> WinnerInput in
             let winner = object(entry)
-            return MobileEngineWinnerInput(seatNo: integer(winner["seatNo"]), han: integer(winner["han"]),
-                                           fu: integer(winner["fu"]), yakumanCount: optInteger(winner["yakumanCount"]),
-                                           dealInSeatNo: optInteger(winner["dealInSeatNo"]),
-                                           doubleYakumanCount: optInteger(winner["doubleYakumanCount"]),
-                                           isRiichiDeclarationDealIn: optBoolean(winner["isRiichiDeclarationDealIn"]))
+            return WinnerInput(seatNo: integer(winner["seatNo"]), han: integer(winner["han"]),
+                                           fu: integer(winner["fu"]), yakumanCount: try optInteger(winner["yakumanCount"]),
+                                           dealInSeatNo: try optInteger(winner["dealInSeatNo"]),
+                                           doubleYakumanCount: try optInteger(winner["doubleYakumanCount"]),
+                                           isRiichiDeclarationDealIn: try optBoolean(winner["isRiichiDeclarationDealIn"]))
         }
-        let nagashi: [MobileEngineNagashiEligibilityInput]? = item["nagashiEligibility"].map { source in
+        let nagashi: [NagashiEligibilityInput]? = item["nagashiEligibility"].map { source in
             array(source).map { entry in
                 let eligibility = object(entry)
-                let discards = array(eligibility["discards"]).map { value -> MobileEngineDiscardInput in
+                let discards = array(eligibility["discards"]).map { value -> DiscardInput in
                     let discard = object(value)
-                    return MobileEngineDiscardInput(tile: discard["tile"] as? String ?? "",
+                    return DiscardInput(tile: discard["tile"] as? String ?? "",
                                                     called: (discard["called"] as? NSNumber)?.boolValue ?? false)
                 }
-                return MobileEngineNagashiEligibilityInput(seatNo: integer(eligibility["seatNo"]), discards: discards)
+                return NagashiEligibilityInput(seatNo: integer(eligibility["seatNo"]), discards: discards)
             }
         }
         let roles = (item["chomboRole"] as? [String: String])?.reduce(into: [KotlinInt: String]()) {
@@ -95,26 +138,26 @@ enum EngineBridgeCheck {
         let payments = (item["manualPayments"] as? [String: NSNumber])?.reduce(into: [KotlinInt: KotlinInt]()) {
             if let seat = Int32($1.key) { $0[KotlinInt(int: seat)] = KotlinInt(int: $1.value.int32Value) }
         }
-        return MobileEngineResultInput(kind: item["kind"] as? String ?? "", winners: winners,
+        return ResultInput(kind: handKind(item["kind"] as? String), winners: winners,
                                        nagashiEligibility: nagashi,
-                                       tenpai: (item["tenpai"] as? [NSNumber])?.map(\.boolValue),
-                                       chomboRole: roles, riichiDeclarationDealInSeatNo: optInteger(item["riichiDeclarationDealInSeatNo"]),
+                                       tenpai: (item["tenpai"] as? [NSNumber])?.map { KotlinBoolean(bool: $0.boolValue) },
+                                       chomboRole: roles, riichiDeclarationDealInSeatNo: try optInteger(item["riichiDeclarationDealInSeatNo"]),
                                        manualPayments: payments)
     }
 
-    private static func rules(_ value: Any?) -> MobileEngineRulesSnapshot {
+    private static func rules(_ value: Any?) -> RulesSnapshot {
         let raw = object(value)
-        return MobileEngineRulesSnapshot(rulesHash: raw["rulesHash"] as? String ?? "",
+        return RulesSnapshot(rulesHash: raw["rulesHash"] as? String ?? "",
                                          config: bridgedObject(raw["config"]))
     }
-    private static func nextHand(_ value: Any?) -> MobileEngineNextHandState {
+    private static func nextHand(_ value: Any?) -> NextHandState {
         let raw = object(value)
-        return MobileEngineNextHandState(roundWind: raw["roundWind"] as? String ?? "",
+        return NextHandState(roundWind: raw["roundWind"] as? String ?? "",
                                          roundNumber: integer(raw["roundNumber"]), dealerSeatNo: integer(raw["dealerSeatNo"]),
                                          honba: integer(raw["honba"]), riichiPool: integer(raw["riichiPool"]))
     }
 
-    private static func normalize(_ config: MobileEngineEngineRulesConfig) -> [String: Any] {
+    private static func normalize(_ config: EngineRulesConfig) -> [String: Any] {
         var fields: [String: Any] = [
             "playerCount": config.playerCount, "startingPoints": config.startingPoints,
             "returnPoints": config.returnPoints, "targetPoints": config.targetPoints,
@@ -137,18 +180,18 @@ enum EngineBridgeCheck {
         return fields
     }
 
-    private static func payment(_ value: MobileEngineSeatPayment) -> [String: Any] {
+    private static func payment(_ value: SeatPayment) -> [String: Any] {
         ["seatNo": value.seatNo, "netPoints": value.netPoints,
          "breakdown": value.breakdown.map { ["reason": $0.reason, "amount": $0.amount] }]
     }
-    private static func next(_ value: MobileEngineNextHandState) -> [String: Any] {
+    private static func next(_ value: NextHandState) -> [String: Any] {
         ["roundWind": value.roundWind, "roundNumber": value.roundNumber,
          "dealerSeatNo": value.dealerSeatNo, "honba": value.honba, "riichiPool": value.riichiPool]
     }
-    private static func terminalSeat(_ value: MobileEngineTerminalSeatEntry) -> [String: Any] {
+    private static func terminalSeat(_ value: TerminalSeatEntry) -> [String: Any] {
         var fields: [String: Any] = ["seatNo": value.seatNo, "rawPoints": value.rawPoints,
                                      "finalPoints": value.finalPoints]
-        if let ranked = value as? MobileEngineTerminalSeatResult {
+        if let ranked = value as? TerminalSeatResult {
             fields.merge(["rank": ranked.rank, "baseTenths": ranked.baseTenths,
                           "umaTenths": ranked.umaTenths, "okaTenths": ranked.okaTenths,
                           "penaltyTenths": ranked.penaltyTenths, "totalTenths": ranked.totalTenths,
@@ -156,7 +199,7 @@ enum EngineBridgeCheck {
         }
         return fields
     }
-    private static func terminal(_ value: MobileEngineTerminalSettlementOutput) -> [String: Any] {
+    private static func terminal(_ value: TerminalSettlementOutput) -> [String: Any] {
         ["isGameEnd": value.isGameEnd, "gameEndReason": value.gameEndReason,
          "unclaimedRiichiPoints": value.unclaimedRiichiPoints,
          "poolRecipientSeatNo": value.poolRecipientSeatNo as Any? ?? NSNull(),
@@ -168,31 +211,26 @@ enum EngineBridgeCheck {
         let args = array(fixture["args"])
         switch fixture["operation"] as? String {
         case "normalizeRulesConfig":
-            let inferred = args.count > 1 ? optInteger(args[1]) : nil
-            return normalize(MobileEngineCoreKt.normalizeRulesConfig(rawConfig: bridgedObject(args[0]),
+            let inferred = args.count > 1 ? try optInteger(args[1]) : nil
+            return normalize(try CoreKt.normalizeRulesConfig(rawConfig: bridgedObject(args[0]),
                                                                      inferredPlayerCount: inferred))
         case "calculateSettlement":
-            let value = MobileEngineSettlementKt.calculateSettlement(
-                rulesSnapshot: rules(args[0]), handState: hand(args[1]), resultInput: result(args[2]),
+            let value = try SettlementKt.calculateSettlement(
+                rulesSnapshot: rules(args[0]), handState: try hand(args[1]), resultInput: try result(args[2]),
                 engineVersion: args[3] as? String ?? version)
             return ["perSeat": value.perSeat.map(payment), "nextHand": next(value.nextHand)]
         case "isAutomaticMatchEnd":
-            let balances = array(args[4]).map { entry -> MobileEngineSeatBalance in
+            let balances = array(args[4]).map { entry -> SeatBalance in
                 let raw = object(entry)
-                return MobileEngineSeatBalance(seatNo: integer(raw["seatNo"]), points: integer(raw["points"]))
+                return SeatBalance(seatNo: integer(raw["seatNo"]), points: integer(raw["points"]))
             }
-            return MobileEngineSettlementKt.isAutomaticMatchEnd(
-                rawConfig: bridgedObject(args[0]), handState: hand(args[1]), resultInput: result(args[2]),
+            return try SettlementKt.isAutomaticMatchEnd(
+                rawConfig: bridgedObject(args[0]), handState: try hand(args[1]), resultInput: try result(args[2]),
                 nextHand: nextHand(args[3]), pointsAfter: balances)
         case "calculateTerminalSettlement":
-            let rawOptions = args.count > 2 ? object(args[2]) : [:]
-            let options = MobileEngineTerminalSettlementOptions(
-                riichiPool: optInteger(rawOptions["riichiPool"]),
-                startingDealerSeatNo: optInteger(rawOptions["startingDealerSeatNo"]),
-                requireTargetPoints: optBoolean(rawOptions["requireTargetPoints"]),
-                completedSouth4: optBoolean(rawOptions["completedSouth4"]))
-            return terminal(MobileEngineTerminalKt.calculateTerminalSettlement(
-                finalPoints: bridged(args[0]), rules: bridged(args[1]), options: options))
+            let rawOptions: [String: Any] = args.count > 2 ? object(args[2]) : [:]
+            return terminal(try TerminalKt.calculateTerminalSettlement(
+                finalPoints: bridged(args[0]), rules: bridged(args[1]), options__: rawOptions))
         default:
             throw NSError(domain: "EngineBridgeCheck", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "Unsupported fixture operation"])
@@ -215,25 +253,48 @@ enum EngineBridgeCheck {
         return "unsupported:\(type(of: value))"
     }
 
-    static func replay() throws -> (Int, [String]) {
+    static func replay() throws -> (Int, [String], [String]) {
         guard let url = Bundle.main.url(forResource: "bridge-sample", withExtension: "jsonl") else {
             throw NSError(domain: "EngineBridgeCheck", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: "Missing bundled bridge fixtures"])
         }
         let lines = try String(contentsOf: url, encoding: .utf8).split(separator: "\n")
         var failures: [String] = []
+        var bridgeSkipped: [String] = []
         for line in lines {
             let fixture = try JSONSerialization.jsonObject(with: Data(line.utf8)) as! [String: Any]
             let expected = object(fixture["expected"])
-            guard expected["kind"] as? String == "return" else {
-                failures.append("\(fixture["id"] ?? "?"): unsupported throw fixture")
+            let fixtureId = fixture["id"] ?? "?"
+            if expected["kind"] as? String == "throw" {
+                // Mirror the JVM differential: a thrown Kotlin EngineException is a
+                // match when its message matches the fixture's expected message.
+                do {
+                    _ = try invoke(fixture)
+                    failures.append("\(fixtureId): expected throw, got return")
+                } catch let error as NSError {
+                    if error.domain == "EngineBridgeCheck" {
+                        // Input cannot be represented in the typed bridge (e.g. a
+                        // string where a boolean belongs); not a core result.
+                        bridgeSkipped.append("\(fixtureId)")
+                    } else {
+                        let expectedMessage = expected["message"] as? String ?? ""
+                        let haystack = "\(error.domain) \(error.localizedDescription)"
+                        if !expectedMessage.isEmpty && !haystack.contains(expectedMessage) {
+                            failures.append("\(fixtureId): throw mismatch domain=\(error.domain) desc=\(error.localizedDescription) expected=\(expectedMessage)")
+                        }
+                    }
+                }
                 continue
             }
-            let actual = try invoke(fixture)
-            if canonical(actual) != canonical(expected["value"] ?? NSNull()) {
-                failures.append("\(fixture["id"] ?? "?"): output mismatch")
+            do {
+                let actual = try invoke(fixture)
+                if canonical(actual) != canonical(expected["value"] ?? NSNull()) {
+                    failures.append("\(fixtureId): output mismatch")
+                }
+            } catch let error as NSError {
+                failures.append("\(fixtureId): unexpected throw \(error.domain): \(error.localizedDescription)")
             }
         }
-        return (lines.count, failures)
+        return (lines.count, failures, bridgeSkipped)
     }
 }
