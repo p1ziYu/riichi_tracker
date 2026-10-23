@@ -5,7 +5,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
@@ -88,6 +88,14 @@ private fun MainContent(model: AppViewModel, state: AppState, onPasteLink: () ->
     val entry by nav.currentBackStackEntryAsState()
     val route = entry?.destination?.route.orEmpty()
     LaunchedEffect(Unit) { model.loadList() }
+    LaunchedEffect(state.revokedTableId, route) {
+        if (state.revokedTableId != null && route.contains("Table")) {
+            nav.navigate(Lobby) {
+                popUpTo(nav.graph.findStartDestination().id) { inclusive = false }
+                launchSingleTop = true
+            }
+        }
+    }
     LaunchedEffect(state.createdMatchId) {
         state.createdMatchId?.let { id ->
             model.clearCreatedMatch()
@@ -100,7 +108,14 @@ private fun MainContent(model: AppViewModel, state: AppState, onPasteLink: () ->
             model.clearJoinedMatch()
         }
     }
-    Scaffold(bottomBar = {
+    Scaffold(topBar = {
+        state.accessNotice?.let { notice ->
+            androidx.compose.foundation.layout.Row {
+                Text(notice, Modifier.weight(1f))
+                androidx.compose.material3.TextButton(onClick = model::clearAccessNotice) { Text("知道了") }
+            }
+        }
+    }, bottomBar = {
         if (!route.contains("Table") && !route.contains("Create")) NavigationBar {
             listOf(Triple("大厅", Lobby, route.contains("Lobby")),
                 Triple("战绩", History, route.contains("History")),

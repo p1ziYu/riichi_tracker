@@ -14,8 +14,8 @@ import kotlinx.serialization.json.*
 fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
     val table = state.table ?: return
     val principal = state.profile?.principal?.id
-    val isOwner = principal != null && principal == table.match.ownerPrincipalId
-    val participant = principal != null && table.seats.any { it.principalId == principal && it.status == "checked_in" }
+    val isOwner = isTableHost(table, principal)
+    val participant = isCheckedInParticipant(table, principal)
     val preparing = table.match.status == "preparing"
     val active = table.match.status == "in_progress" || table.match.status == "active"
     val hand = table.currentHand
@@ -29,6 +29,8 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
     val clipboard = LocalClipboardManager.current
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (state.actionError != null) Text(state.actionError, color = MaterialTheme.colorScheme.error)
+        if (!participant && !isOwner) Text("未签到或旁观者仅可只读查看规则、分数、局摘要和终局；无权记分或确认。", color = Brand.muted)
+        else if (isOwner && !participant && active) Text("桌主尚未签到，当前只能查看；请由已签到参赛者录入局结果。", color = Brand.muted)
         if (preparing && isOwner) {
             Text("桌主座位与邀请", color = Brand.goldText, style = MaterialTheme.typography.titleLarge)
             Text("房主选座后分享房间码或十分钟签到链接。访客直接选座签到；座位满员且已签到即可确认座次。", color = Brand.text)
@@ -86,7 +88,7 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
             }
             Button(onClick = { showResult = true }, enabled = !state.busy && state.pendingResult == null) { Text("录入本局结果") }
         }
-        if (active && !participant) Text("仅已确认座位且签到的玩家可提交立直和结果。", color = Brand.muted)
+        if (active && !participant && !isOwner) Text("仅已签到参赛者可更改立直和提交局结果。", color = Brand.muted)
         if (between && participant) Button(onClick = { model.nextHand(id) }, enabled = !state.busy) { Text("新开一局") }
         if (between && isOwner && table.match.rulesSnapshot?.get("automaticEndPolicy")?.jsonPrimitive?.content != "ranked_sanma")
             OutlinedButton(onClick = { confirmFinish = true }, enabled = !state.busy) { Text("终局") }
@@ -98,20 +100,22 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
                 }
                 if (isOwner && !table.match.settlementConfirmed) Button(onClick = { model.confirmSettlement(id) }, enabled = !state.busy) { Text("确认终局成绩") }
             }
+            if (!isOwner && !table.match.settlementConfirmed) Text("仅桌主可确认终局；此处可只读查看成绩。", color = Brand.muted)
         }
         state.pendingResult?.takeIf { it.matchId == id }?.let {
-            Text("本局提交结果未知。请先刷新权威牌桌；仅在尚未结算时原样重试，不要编辑后提交新请求。", color = MaterialTheme.colorScheme.error)
+            Text("结果未确认：请刷新权威牌桌；未结算且立直版本未变才可原样重试，不能编辑后覆盖旧请求。", color = MaterialTheme.colorScheme.error)
             OutlinedButton(onClick = { model.refreshTable(id) }) { Text("刷新确认") }
-            OutlinedButton(onClick = model::resend, enabled = !state.busy) { Text("原请求重试（同一 clientEventId）") }
-            if (hand?.id != it.handId || hand?.status == "settled")
-                TextButton(onClick = model::resolvePendingWithoutResend) { Text("已核对服务端状态，清除本地待确认请求") }
+            OutlinedButton(onClick = model::resend, enabled = !state.busy && participant &&
+                mayResendPending(it, hand, state.pendingReviewed)) {
+                Text("原请求重试（同一 clientEventId）")
+            }
         }
     }
     if (confirmFinish) AlertDialog(onDismissRequest = { confirmFinish = false },
         title = { Text("结束本桌？") }, text = { Text("仅桌主可以结束牌局；终局条件以服务端规则为准。") },
         confirmButton = { TextButton(onClick = { confirmFinish = false; model.finish(id) }) { Text("确认终局") } },
         dismissButton = { TextButton(onClick = { confirmFinish = false }) { Text("取消") } })
-    if (showResult && hand != null && open) {
+    if (showResult && participant && hand != null && open) {
         ResultEditor(id, table, hand, state, model) { showResult = false }
     }
     movingSeat?.let { from ->
@@ -149,90 +153,131 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
 @Composable private fun ResultEditor(id: String, table: TableSnapshot, hand: CurrentHandDto,
                                       state: AppState, model: AppViewModel, onDismiss: () -> Unit) {
     val seats = table.seats.sortedBy { it.seatNo }
-    var kind by remember(hand.id) { mutableStateOf("ron") }
-    var winner by remember(hand.id) { mutableIntStateOf(seats.firstOrNull()?.seatNo ?: 0) }
-    var loser by remember(hand.id) { mutableIntStateOf(seats.getOrNull(1)?.seatNo ?: 1) }
-    var han by remember(hand.id) { mutableStateOf("2") }
-    var fu by remember(hand.id) { mutableStateOf("30") }
-    var river by remember(hand.id) { mutableStateOf("") }
-    var attested by remember(hand.id) { mutableStateOf(false) }
-    var tenpai by remember(hand.id) { mutableStateOf(emptySet<Int>()) }
-    val tiles = river.trim().split(Regex("[\\s,，]+" )).filter(String::isNotBlank)
-    val valid = seats.isNotEmpty() && (kind == "ryuukyoku" || seats.any { it.seatNo == winner } && when (kind) {
-        "nagashi_mangan" -> attested && tiles.isNotEmpty() && tiles.all { Regex("(?:[19][mps]|[1-7]z)").matches(it) }
-        "ron" -> (han.toIntOrNull()?.let { it in 1..130 } == true) &&
-            (fu.toIntOrNull()?.let { it in 20..140 } == true) &&
-            loser != winner && seats.any { it.seatNo == loser }
-        "tsumo" -> (han.toIntOrNull()?.let { it in 1..130 } == true) &&
-            (fu.toIntOrNull()?.let { it in 20..140 } == true)
-        else -> false
-    })
-    val input = remember(kind, winner, loser, han, fu, river, attested, tenpai, seats) {
-        if (!valid) null else buildJsonObject {
-            put("kind", kind)
-            if (kind == "ryuukyoku" || kind == "nagashi_mangan")
-                put("tenpai", JsonArray(seats.map { JsonPrimitive(it.seatNo in tenpai) }))
-            put("winners", JsonArray(if (kind == "ryuukyoku") emptyList() else listOf(buildJsonObject {
-                put("seatNo", winner)
-                put("han", if (kind == "nagashi_mangan") 5 else han.toInt())
-                put("fu", if (kind == "nagashi_mangan") 30 else fu.toInt())
-                if (kind == "ron") put("dealInSeatNo", loser)
-            })))
-            if (kind == "nagashi_mangan") put("nagashiEligibility", buildJsonArray { add(buildJsonObject {
-                put("seatNo", winner)
-                put("discards", buildJsonArray { tiles.forEach { tile ->
-                    add(buildJsonObject { put("tile", tile); put("called", false) })
-                } })
-            }) })
-        }
+    var draft by remember(hand.id) {
+        mutableStateOf(state.draft?.takeIf { it.matchId == id && it.handId == hand.id }?.draft
+            ?: ResultDraft(winners = seats.firstOrNull()?.let { listOf(WinnerDraft(it.seatNo)) }.orEmpty(),
+                dealInSeatNo = seats.getOrNull(1)?.seatNo))
     }
+    fun update(next: ResultDraft) {
+        draft = next
+        model.saveDraft(id, hand, next)
+    }
+    val cap = ronWinnerLimit(table.match.rulesSnapshot, table.match.playerCount)
+    val validated = validateResultDraft(draft, table, hand)
+    val input = validated.input
     val preview = state.preview?.takeIf { input != null && it.matches(hand, input) }
     AlertDialog(onDismissRequest = { if (!state.busy) onDismiss() },
         title = { Text("本局支付 · 以服务端预览为准") },
         text = {
-            Column(Modifier.heightIn(max = 550.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                val scroll = androidx.compose.foundation.rememberScrollState()
-                Column(Modifier.verticalScroll(scroll), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("ron" to "荣和", "tsumo" to "自摸", "ryuukyoku" to "荒牌流局", "nagashi_mangan" to "流局满贯")
-                        .filterNot { it.first == "nagashi_mangan" && table.match.rulesSnapshot?.get("nagashiManganEnabled")?.jsonPrimitive?.booleanOrNull != true }
-                        .forEach { (option, label) -> TextButton(onClick = { kind = option }) { Text("${if (kind == option) "●" else "○"} $label") } }
-                    if (kind != "ryuukyoku") {
-                        Text("赢家座位", color = Brand.text)
-                        seats.forEach { seat -> TextButton(onClick = { winner = seat.seatNo }) { Text("${if (winner == seat.seatNo) "●" else "○"} ${seat.seatNo + 1}号位 ${seat.displayName.orEmpty()}") } }
-                    }
-                    if (kind == "ron") {
-                        Text("放铳座位", color = Brand.text)
-                        seats.filterNot { it.seatNo == winner }.forEach { seat -> TextButton(onClick = { loser = seat.seatNo }) { Text("${if (loser == seat.seatNo) "●" else "○"} ${seat.seatNo + 1}号位") } }
-                    }
-                    if (kind == "ron" || kind == "tsumo") {
-                        OutlinedTextField(han, { han = it }, label = { Text("番（1–130）") })
-                        OutlinedTextField(fu, { fu = it }, label = { Text("符（20–140）") })
-                    }
-                    if (kind == "ryuukyoku" || kind == "nagashi_mangan") seats.forEach { seat ->
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("${seat.seatNo + 1} 号位听牌", color = Brand.text)
-                            Checkbox(seat.seatNo in tenpai, { checked -> tenpai = if (checked) tenpai + seat.seatNo else tenpai - seat.seatNo })
+            Column(Modifier.heightIn(max = 550.dp).verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("ron" to "荣和", "tsumo" to "自摸", "ryuukyoku" to "荒牌流局", "nagashi_mangan" to "流局满贯")
+                    .filterNot { it.first == "nagashi_mangan" && table.match.rulesSnapshot?.get("nagashiManganEnabled")?.jsonPrimitive?.booleanOrNull != true }
+                    .forEach { (option, label) ->
+                        TextButton(onClick = { update(draft.copy(kind = option, declarationDealIn = false)) }) {
+                            Text("${if (draft.kind == option) "●" else "○"} $label")
                         }
                     }
-                    if (kind == "nagashi_mangan") {
-                        OutlinedTextField(river, { river = it; attested = false }, label = { Text("全部幺九弃牌（如 1m 9p 1z）") }, modifier = Modifier.fillMaxWidth())
-                        Row { Checkbox(attested, { attested = it }); Text("确认记录完整，所有弃牌未被鸣走", color = Brand.text) }
+                if (draft.kind != "ryuukyoku") {
+                    Text("赢家 · ${if (draft.kind == "ron") "本规则最多 $cap 位" else "仅一位"}", color = Brand.text)
+                    seats.forEach { seat ->
+                        val selected = draft.winners.any { it.seatNo == seat.seatNo }
+                        val limit = if (draft.kind == "ron") cap else 1
+                        OutlinedButton(onClick = {
+                            val next = if (selected) draft.winners.filterNot { it.seatNo == seat.seatNo }
+                                else if (limit == 1) listOf(WinnerDraft(seat.seatNo))
+                                else draft.winners + WinnerDraft(seat.seatNo)
+                            update(draft.copy(winners = next))
+                        }, enabled = selected || draft.winners.size < limit, modifier = Modifier.fillMaxWidth()) {
+                            Text("${if (selected) "●" else "○"} ${seat.seatNo + 1}号位 ${seat.displayName.orEmpty()}")
+                        }
                     }
-                    if (!valid) Text("请填写有效座位、番符或完整流满证据", color = MaterialTheme.colorScheme.error)
-                    if (preview != null) {
-                        preview.output.perSeat.forEach { payment -> Text("${payment.seatNo + 1}号位 ${if (payment.netPoints >= 0) "+" else ""}${payment.netPoints} 点 · " +
-                            payment.breakdown.joinToString(" / ") { "${it.reason} ${it.amount}" }, color = Brand.text) }
-                        val next = preview.output.nextHand
-                        Text("下一局 ${windLabel(next.roundWind)}${next.roundNumber} · 庄 ${next.dealerSeatNo + 1} · 本场${next.honba} · 供托${next.riichiPool}点", color = Brand.goldText)
-                    }
-                    state.actionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 }
+                validated.errors["winners"]?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                if (draft.kind == "ron") {
+                    Text("所有赢家共用同一放铳座位", color = Brand.text)
+                    seats.filterNot { seat -> draft.winners.any { it.seatNo == seat.seatNo } }.forEach { seat ->
+                        TextButton(onClick = { update(draft.copy(dealInSeatNo = seat.seatNo, declarationDealIn = false)) }) {
+                            Text("${if (draft.dealInSeatNo == seat.seatNo) "●" else "○"} ${seat.seatNo + 1}号位")
+                        }
+                    }
+                    validated.errors["dealInSeatNo"]?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    val marked = hand.seats.any { it.seatNo == draft.dealInSeatNo && it.isRiichi == true }
+                    if (marked) Row {
+                        Checkbox(draft.declarationDealIn, { update(draft.copy(declarationDealIn = it)) })
+                        Text("放铳牌是该座的立直宣言牌", color = Brand.text)
+                    }
+                    validated.errors["declarationDealIn"]?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }
+                if (draft.kind == "ron" || draft.kind == "tsumo") draft.winners.forEachIndexed { index, winner ->
+                    Text("${winner.seatNo + 1}号位番符 / 役满", color = Brand.goldText)
+                    fun change(next: WinnerDraft) {
+                        update(draft.copy(winners = draft.winners.toMutableList().also { it[index] = next }))
+                    }
+                    Row {
+                        Checkbox(winner.yakuman, {
+                            change(winner.copy(yakuman = it, yakumanCount = if (it) winner.yakumanCount else "0",
+                                doubleYakumanCount = if (it) winner.doubleYakumanCount else "0"))
+                        })
+                        Text("显式役满（向服务器仍发送番 1、符 30）", color = Brand.text)
+                    }
+                    if (!winner.yakuman) {
+                        OutlinedTextField(winner.han, { change(winner.copy(han = it)) },
+                            label = { Text("番（1–130）") },
+                            isError = "winners.$index.han" in validated.errors)
+                        validated.errors["winners.$index.han"]?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                        OutlinedTextField(winner.fu, { change(winner.copy(fu = it)) },
+                            label = { Text("符（20–140）") },
+                            isError = "winners.$index.fu" in validated.errors)
+                        validated.errors["winners.$index.fu"]?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    } else {
+                        val ordinaryCap = if (table.match.rulesSnapshot?.get("compositeYakuman")?.jsonPrimitive?.booleanOrNull == true) 10 else 1
+                        OutlinedTextField(winner.yakumanCount, { change(winner.copy(yakumanCount = it)) },
+                            label = { Text("普通役满数（0–$ordinaryCap）") },
+                            isError = "winners.$index.yakumanCount" in validated.errors)
+                        validated.errors["winners.$index.yakumanCount"]?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                        if (table.match.rulesSnapshot?.get("doubleYakuman")?.jsonPrimitive?.booleanOrNull == true) {
+                            OutlinedTextField(winner.doubleYakumanCount, { change(winner.copy(doubleYakumanCount = it)) },
+                                label = { Text("特殊双倍役满数（0–10）") },
+                                isError = "winners.$index.doubleYakumanCount" in validated.errors)
+                            validated.errors["winners.$index.doubleYakumanCount"]?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                        }
+                    }
+                }
+                if (draft.kind == "ryuukyoku" || draft.kind == "nagashi_mangan") seats.forEach { seat ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("${seat.seatNo + 1} 号位听牌", color = Brand.text)
+                        Checkbox(seat.seatNo in draft.tenpai, { checked ->
+                            update(draft.copy(tenpai = if (checked) draft.tenpai + seat.seatNo else draft.tenpai - seat.seatNo))
+                        })
+                    }
+                }
+                if (draft.kind == "nagashi_mangan") {
+                    OutlinedTextField(draft.river, { update(draft.copy(river = it, attested = false)) },
+                        label = { Text("全部幺九弃牌（如 1m 9p 1z）") }, modifier = Modifier.fillMaxWidth(),
+                        isError = "river" in validated.errors)
+                    Row { Checkbox(draft.attested, { update(draft.copy(attested = it)) }); Text("确认记录完整，所有弃牌未被鸣走", color = Brand.text) }
+                    validated.errors["river"]?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }
+                validated.errors["seats"]?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                validated.errors["hand"]?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                if (state.marksChangedSincePreview)
+                    Text("立直标记已变化，请重新预览", color = MaterialTheme.colorScheme.error)
+                if (preview != null) {
+                    preview.output.perSeat.forEach { payment -> Text("${payment.seatNo + 1}号位 ${if (payment.netPoints >= 0) "+" else ""}${payment.netPoints} 点 · " +
+                        payment.breakdown.joinToString(" / ") { "${it.reason} ${it.amount}" }, color = Brand.text) }
+                    val next = preview.output.nextHand
+                    Text("下一局 ${windLabel(next.roundWind)}${next.roundNumber} · 庄 ${next.dealerSeatNo + 1} · 本场${next.honba} · 供托${next.riichiPool}点", color = Brand.goldText)
+                }
+                state.actionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
         confirmButton = {
             Column {
-                Button(onClick = { input?.let { model.preview(id, hand, it) } }, enabled = valid && !state.busy && state.pendingResult == null && hand.markRevision != null) { Text("服务端预览") }
-                Button(onClick = { input?.let { model.submit(id, hand, it) } }, enabled = preview != null && !state.busy && state.pendingResult == null) { Text("确认并结算") }
+                Button(onClick = { input?.let { model.preview(id, hand, it) } },
+                    enabled = input != null && !state.busy && state.pendingResult == null) { Text("服务端预览") }
+                Button(onClick = { input?.let { model.submit(id, hand, it) } },
+                    enabled = preview != null && !state.busy && state.pendingResult == null) { Text("确认并结算") }
             }
         }, dismissButton = { TextButton(onClick = onDismiss, enabled = !state.busy) { Text("关闭") } })
 }

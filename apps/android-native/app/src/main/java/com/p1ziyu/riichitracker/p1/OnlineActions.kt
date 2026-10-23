@@ -1,8 +1,13 @@
 package com.p1ziyu.riichitracker.p1
 
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.UUID
 
 fun finalizeBody(dealerSeatNo: Int?): String = buildJsonObject {
@@ -52,3 +57,23 @@ fun resultBody(input: JsonObject, revision: Long, eventId: String = UUID.randomU
         put("confirmedMarkRevision", revision)
         put("clientEventId", eventId)
     }.toString()
+
+fun pendingRevision(pending: PendingResult): Long? = runCatching {
+    kotlinx.serialization.json.Json.parseToJsonElement(pending.body).jsonObject
+        .getValue("confirmedMarkRevision").jsonPrimitive.long
+}.getOrNull()
+
+fun mayResendPending(pending: PendingResult, hand: CurrentHandDto?, reviewed: Boolean): Boolean =
+    reviewed && hand?.id == pending.handId && hand?.status == "open" && hand?.markRevision == pendingRevision(pending)
+
+enum class PendingResolution { UNVERIFIED, SETTLED, SAME_REVISION, CHANGED_REVISION }
+
+fun pendingResolution(pending: PendingResult, snapshot: TableSnapshot?): PendingResolution {
+    if (snapshot == null || snapshot.match.id != pending.matchId) return PendingResolution.UNVERIFIED
+    val hand = snapshot.currentHand
+    if (snapshot.match.status == "finished" || hand?.status == "settled" ||
+        (hand != null && hand.id != pending.handId)) return PendingResolution.SETTLED
+    if (hand?.id != pending.handId || hand.status != "open") return PendingResolution.UNVERIFIED
+    return if (hand.markRevision == pendingRevision(pending)) PendingResolution.SAME_REVISION
+        else PendingResolution.CHANGED_REVISION
+}

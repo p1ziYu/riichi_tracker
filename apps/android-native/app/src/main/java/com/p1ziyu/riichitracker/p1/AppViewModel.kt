@@ -26,6 +26,8 @@ private fun Throwable.chineseMessage(): String = when (this) {
     else -> message ?: "网络连接失败，请重试"
 }
 
+private val TABLE_REFRESH_EVENTS = setOf("seat_claimed", "join_approved", "check_in", "seats_finalized",
+    "hand_started", "marks_changed", "hand_settled", "match_finished", "settlement_confirmed")
 enum class SessionMode { RESTORING, SIGNED_OUT, ACCOUNT, ONLINE_GUEST, LOCAL_ONLY }
 data class PendingResult(val matchId: String, val handId: String, val body: String)
 data class BoundPreview(val handId: String, val revision: Long, val input: String, val output: PaymentPreview)
@@ -43,13 +45,17 @@ data class AppState(
     val invitation: CheckInTokenDto? = null, val joinedSeat: Int? = null, val joinedMatchId: String? = null,
     val joinSeats: CheckInSeatsDto? = null, val joinPreviewLink: CheckInLink? = null,
     val preview: BoundPreview? = null, val terminal: BoundTerminal? = null,
+    val draft: SavedResultDraft? = null, val draftEditVersion: Long = 0, val pendingReviewed: Boolean = false,
+    val marksChangedSincePreview: Boolean = false,
     val pendingResult: PendingResult? = null, val createdMatchId: String? = null,
+    val revokedTableId: String? = null, val accessNotice: String? = null,
 )
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val store = TokenStore(application)
     private val api = ApiClient(store)
     private val pendingStore = PendingResultStore(application)
+    private val draftStore = ResultDraftStore(application)
     private val joins = JoinActions(api, api.json)
     private val state = MutableStateFlow(AppState(
         session = if (store.load() != null) SessionMode.RESTORING else SessionMode.SIGNED_OUT,
@@ -58,6 +64,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val triggers = Channel<String>(Channel.CONFLATED)
     private var tableId: String? = null
     private var generation = 0
+    @Volatile private var liveSocket: WebSocket? = null
 
     init {
         viewModelScope.launch {
@@ -83,7 +90,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun retryRestore() { if (store.load() != null) restore() else state.value = AppState(authError = "登录已失效，请重新认证") }
     fun abandonRestore() {
         store.clear()
-        pendingStore.clear()
+        draftStore.clear()
         generation++
         state.value = AppState()
     }
@@ -126,7 +133,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun logout() {
         generation++
-        pendingStore.clear()
+        draftStore.clear()
         tableId = null
         state.value = AppState(authBusy = true)
         viewModelScope.launch {
@@ -175,14 +182,36 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun openTable(id: String) {
         tableId = id
         state.value = state.value.copy(table = null, hands = null, settlement = null, invitation = null,
-            tableError = null, preview = null, terminal = null, connection = "手动刷新",
+            tableError = null, preview = null, terminal = null, draft = null, pendingReviewed = false,
+            marksChangedSincePreview = false, revokedTableId = null, connection = "手动刷新",
             pendingResult = state.value.profile?.principal?.id?.let { pendingStore.read(it, id) })
         refreshTable(id)
     }
     fun closeTable() {
+        liveSocket?.cancel()
+        liveSocket = null
         tableId = null
-        state.value = state.value.copy(table = null, invitation = null, preview = null, terminal = null, connection = "手动刷新")
+        state.value = state.value.copy(table = null, hands = null, settlement = null,
+            invitation = null, preview = null, terminal = null, draft = null,
+            pendingResult = null, pendingReviewed = false, marksChangedSincePreview = false,
+            tableError = null, actionError = null, connection = "手动刷新")
     }
+    private fun revokeTable(id: String) {
+        if (tableId != id || state.value.revokedTableId == id) return
+        state.value.draft?.takeIf { it.matchId == id }?.let {
+            draftStore.clear(it.principalId, it.matchId, it.handId)
+        }
+        closeTable()
+        generation++
+        state.value = state.value.copy(matches = state.value.matches?.filterNot { it.id == id },
+            revokedTableId = id, accessNotice = "你已被房主移出牌桌")
+    }
+    fun clearAccessNotice() { state.value = state.value.copy(revokedTableId = null, accessNotice = null) }
+    private fun membershipRevoked(id: String, updated: TableSnapshot? = null,
+                                  status: Int? = null, wsCloseCode: Int? = null,
+                                  wsSignal: String? = null): Boolean =
+        tableId == id && isMembershipRevoked(state.value.table, state.value.profile?.principal?.id,
+            updated, status, wsCloseCode, wsSignal)
     fun refreshTable(id: String) { triggers.trySend(id) }
     fun reconnect(id: String) {
         if (tableId == id) {
@@ -197,27 +226,68 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         try {
             val snapshot = api.json.decodeFromString<TableSnapshot>(api.get("/api/matches/$id"))
             if (tableId != id || at != generation) return
+            if (membershipRevoked(id, updated = snapshot)) {
+                revokeTable(id)
+                return
+            }
             val preview = state.value.preview?.takeIf {
                 it.handId == snapshot.currentHand?.id && it.revision == snapshot.currentHand.markRevision &&
                     snapshot.currentHand.status == "open"
             }
+            val changedMarks = state.value.table?.currentHand?.let { previous ->
+                snapshot.currentHand?.let { hand ->
+                    previous.id == hand.id && previous.markRevision != hand.markRevision
+                }
+            } == true
+            val draft = snapshot.currentHand?.id?.let { handId ->
+                state.value.profile?.principal?.id?.let { principalId -> draftStore.read(principalId, id, handId) }
+            }
             val terminal = state.value.terminal?.takeIf { it.version == snapshot.match.version }
+            val pending = state.value.pendingResult
+            val resolution = pending?.let { pendingResolution(it, snapshot) }
+            if (pending != null && resolution in listOf(PendingResolution.SETTLED, PendingResolution.CHANGED_REVISION)) {
+                pendingStore.clear()
+                if (resolution == PendingResolution.SETTLED) {
+                    state.value.profile?.principal?.id?.let { principalId ->
+                        draftStore.clear(principalId, id, pending.handId)
+                    }
+                }
+            }
             state.value = state.value.copy(table = snapshot, tableLoading = false, tableError = null,
                 preview = preview, terminal = terminal,
+                draft = if (resolution == PendingResolution.SETTLED) null else draft,
+                marksChangedSincePreview = (state.value.marksChangedSincePreview || changedMarks) &&
+                    snapshot.currentHand?.status == "open",
+                pendingResult = if (resolution == PendingResolution.SAME_REVISION ||
+                    resolution == PendingResolution.UNVERIFIED) pending else null,
+                pendingReviewed = resolution == PendingResolution.SAME_REVISION,
+                actionError = when (resolution) {
+                    PendingResolution.SETTLED -> "本局已由服务端结算，已清除待确认请求。"
+                    PendingResolution.CHANGED_REVISION -> "立直标记已变化，请重新预览；旧请求不可重发，草稿已保留。"
+                    else -> state.value.actionError
+                },
                 invitation = state.value.invitation?.takeIf { snapshot.match.status == "preparing" &&
                     runCatching { java.time.Instant.parse(it.expiresAt).isAfter(java.time.Instant.now()) }.getOrDefault(false) })
             try {
                 val hands = api.json.decodeFromString<List<HandDto>>(api.get("/api/matches/$id/hands?limit=100"))
                 if (tableId == id && at == generation) state.value = state.value.copy(hands = hands)
-            } catch (e: Exception) { if (tableId == id && at == generation) state.value = state.value.copy(tableError = "读取局记录失败：${error(e)}") }
+            } catch (e: Exception) {
+                if (e is ApiFailure && membershipRevoked(id, status = e.status)) revokeTable(id)
+                else if (tableId == id && at == generation) state.value = state.value.copy(tableError = "读取局记录失败：${error(e)}")
+            }
+            if (tableId != id || at != generation) return
             if (snapshot.match.status == "finished") {
                 try {
                     val result = api.json.decodeFromString<SettlementPreview>(api.get("/api/matches/$id/settlement/preview"))
                     if (tableId == id && at == generation) state.value = state.value.copy(settlement = result)
-                } catch (e: Exception) { if (tableId == id && at == generation) state.value = state.value.copy(tableError = "读取终局成绩失败：${error(e)}") }
+                } catch (e: Exception) {
+                    if (e is ApiFailure && membershipRevoked(id, status = e.status)) revokeTable(id)
+                    else if (tableId == id && at == generation) state.value = state.value.copy(tableError = "读取终局成绩失败：${error(e)}")
+                }
             } else if (tableId == id && at == generation) state.value = state.value.copy(settlement = null)
         } catch (e: Exception) {
-            if (tableId == id && at == generation) state.value = state.value.copy(tableLoading = false, tableError = error(e))
+            if (e is ApiFailure && membershipRevoked(id, status = e.status)) revokeTable(id)
+            else if (tableId == id && at == generation) state.value = state.value.copy(tableLoading = false, tableError = error(e))
         }
     }
 
@@ -234,12 +304,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     if (openedAt != 0L && android.os.SystemClock.elapsedRealtime() - openedAt >= 10_000L) failures = 0
                 } catch (cancel: CancellationException) { throw cancel }
                 catch (e: Exception) {
+                    if (e is ApiFailure && membershipRevoked(id, status = e.status)) {
+                        revokeTable(id)
+                        return
+                    }
                     if (store.load() == null) {
                         state.value = AppState(authError = "登录已失效，请重新认证")
                         return
                     }
                     state.value = state.value.copy(connection = "实时连接失败：${e.chineseMessage()}，可手动刷新")
-                    if (e is ApiFailure && e.status in listOf(401, 403)) return
+                    if (e is ApiFailure && e.status == 401) return
                 }
                 failures++
                 if (failures >= 5) {
@@ -264,13 +338,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     if (continuation.isActive && tableId == id) {
                         openedAt.set(android.os.SystemClock.elapsedRealtime())
-                        viewModelScope.launch { state.value = state.value.copy(connection = "已连接"); triggers.trySend(id) }
+                        viewModelScope.launch {
+                            if (tableId == id) {
+                                state.value = state.value.copy(connection = "已连接")
+                                triggers.trySend(id)
+                            }
+                        }
                     }
                 }
                 override fun onMessage(webSocket: WebSocket, text: String) {
-                    if (tableId == id && runCatching {
+                    if (tableId != id) return
+                    val type = runCatching {
                         api.json.parseToJsonElement(text).jsonObject["type"]?.jsonPrimitive?.content
-                    }.getOrNull() != null) triggers.trySend(id)
+                    }.getOrNull()
+                    if (membershipRevoked(id, wsSignal = type)) {
+                        viewModelScope.launch { revokeTable(id) }
+                    } else if (type != null && type in TABLE_REFRESH_EVENTS) {
+                        triggers.trySend(id)
+                    }
                 }
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                     if (completed.compareAndSet(false, true)) {
@@ -280,11 +365,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    if (completed.compareAndSet(false, true)) continuation.resume(Unit)
+                    if (completed.compareAndSet(false, true)) {
+                        if (membershipRevoked(id, wsCloseCode = code))
+                            continuation.resumeWithException(ApiFailure(403, "ws_revoked", null, "实时访问权限已撤销"))
+                        else continuation.resume(Unit)
+                    }
                 }
             })
-            continuation.invokeOnCancellation { socket.cancel() }
+            liveSocket = socket
+            continuation.invokeOnCancellation { socket.cancel(); if (liveSocket === socket) liveSocket = null }
         }
+        liveSocket = null
         return openedAt.get()
     }
     private fun operation(id: String?, command: suspend () -> Unit) {
@@ -298,11 +389,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: CancellationException) { throw e
             } catch (e: Exception) {
                 if (at == generation) {
-                    if (e is ApiFailure && e.status == 409 && id != null) {
-                        state.value = state.value.copy(preview = null, terminal = null)
-                        refreshTable(id)
+                    if (e is ApiFailure && id != null && membershipRevoked(id, status = e.status)) {
+                        revokeTable(id)
+                    } else {
+                        if (e is ApiFailure && e.status == 409 && id != null) {
+                            state.value = state.value.copy(preview = null, terminal = null)
+                            refreshTable(id)
+                        }
+                        state.value = state.value.copy(actionError = error(e))
                     }
-                    state.value = state.value.copy(actionError = error(e))
                 }
             } finally { if (at == generation) state.value = state.value.copy(busy = false) }
         }
@@ -314,14 +409,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         loadList()
     }
     fun clearCreatedMatch() { state.value = state.value.copy(createdMatchId = null) }
+    private fun requireHost(id: String): TableSnapshot {
+        val table = requireNotNull(state.value.table?.takeIf { it.match.id == id && tableId == id }) { "请先刷新牌桌" }
+        check(isTableHost(table, state.value.profile?.principal?.id)) { "只有桌主可以操作" }
+        return table
+    }
+    private fun requireParticipant(id: String): TableSnapshot {
+        val table = requireNotNull(state.value.table?.takeIf { it.match.id == id && tableId == id }) { "请先刷新牌桌" }
+        check(isCheckedInParticipant(table, state.value.profile?.principal?.id)) { "只有已签到参赛者可以操作" }
+        return table
+    }
     fun claim(id: String, seatNo: Int) = operation(id) {
+        check(requireHost(id).match.status == "preparing") { "座位已确认" }
         api.post("/api/matches/$id/seats/claim", """{"seatNo":$seatNo}""")
     }
     fun invite(id: String) = operation(id) {
+        check(requireHost(id).match.status == "preparing") { "座位已确认" }
         val token = api.json.decodeFromString<CheckInTokenDto>(api.post("/api/matches/$id/check-in-tokens"))
         if (tableId == id) state.value = state.value.copy(invitation = token)
     }
     fun finalizeSeats(id: String, dealer: Int?) = operation(id) {
+        check(requireHost(id).match.status == "preparing") { "座位已确认" }
         api.post("/api/matches/$id/seats/finalize", finalizeBody(dealer))
     }
     fun beginCheckIn() {
@@ -349,71 +457,101 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             "https://riichi.p1ziyu.com/checkin/${result.matchId}?token=${java.net.URLEncoder.encode(result.token, "UTF-8")}"))
     }
     fun reassignSeat(id: String, fromSeatNo: Int, toSeatNo: Int) = operation(id) {
-        val table = requireNotNull(state.value.table) { "请先刷新牌桌" }
-        check(table.match.id == id && table.match.status == "preparing" &&
+        val table = requireHost(id)
+        check(table.match.status == "preparing" &&
             table.match.ownerPrincipalId == state.value.profile?.principal?.id &&
             fromSeatNo != toSeatNo && table.seats.any { it.seatNo == fromSeatNo && it.principalId != null } &&
             table.seats.any { it.seatNo == toSeatNo }) { "座位已变化，请刷新牌桌" }
         joins.reassign(id, fromSeatNo, toSeatNo)
     }
     fun removeMember(id: String, principalId: String) = operation(id) {
-        val table = requireNotNull(state.value.table) { "请先刷新牌桌" }
-        check(table.match.id == id && table.match.status == "preparing" &&
-            table.match.ownerPrincipalId == state.value.profile?.principal?.id &&
+        val table = requireHost(id)
+        check(table.match.status == "preparing" &&
             principalId != table.match.ownerPrincipalId &&
             table.seats.any { it.principalId == principalId }) { "成员已变化，请刷新牌桌" }
         joins.remove(id, principalId)
     }
     fun mark(id: String, hand: CurrentHandDto, seat: HandSeatDto, riichi: Boolean) = operation(id) {
+        requireParticipant(id)
         val rules = state.value.table?.match?.rulesSnapshot
         changeMark(api, id, hand, state.value.table?.currentHand, seat,
             rules?.get("allowLowPointRiichi")?.jsonPrimitive?.booleanOrNull == true, riichi) { refreshTable(id) }
         state.value = state.value.copy(preview = null)
     }
     fun preview(id: String, hand: CurrentHandDto, input: JsonObject) = operation(id) {
+        requireParticipant(id)
         val handId = requireNotNull(hand.id)
         val revision = requireNotNull(hand.markRevision)
+        val editVersion = state.value.draftEditVersion
         val output = api.json.decodeFromString<PaymentPreview>(api.post("/api/matches/$id/hands/$handId/preview",
             buildJsonObject { put("resultInput", input) }.toString()))
         val seatNos = state.value.table?.seats?.map { it.seatNo }?.toSet().orEmpty()
         check(output.perSeat.map { it.seatNo }.toSet() == seatNos && output.perSeat.size == seatNos.size) { "服务端未提供完整支付预览" }
-        if (tableId == id && state.value.table?.currentHand?.id == handId &&
+        if (tableId == id && state.value.draftEditVersion == editVersion &&
+            state.value.table?.currentHand?.id == handId &&
             state.value.table?.currentHand?.markRevision == revision)
-            state.value = state.value.copy(preview = BoundPreview(handId, revision, input.toString(), output))
+            state.value = state.value.copy(preview = BoundPreview(handId, revision, input.toString(), output),
+                marksChangedSincePreview = false)
+    }
+    fun saveDraft(id: String, hand: CurrentHandDto, draft: ResultDraft) {
+        val principalId = state.value.profile?.principal?.id ?: return
+        val handId = hand.id ?: return
+        if (tableId != id || state.value.table?.currentHand?.id != handId || !isCheckedInParticipant(state.value.table, principalId)) return
+        val record = SavedResultDraft(principalId, id, handId, hand.markRevision, draft)
+        state.value = state.value.copy(preview = null, draftEditVersion = state.value.draftEditVersion + 1)
+        try {
+            draftStore.save(record)
+            state.value = state.value.copy(draft = record)
+        } catch (e: Exception) {
+            state.value = state.value.copy(actionError = "草稿保存失败：${e.message}")
+        }
     }
     fun submit(id: String, hand: CurrentHandDto, input: JsonObject) {
         val preview = state.value.preview ?: return
-        if (!preview.matches(hand, input)) return
-        if (state.value.pendingResult != null) return
-        val body = resultBody(input, preview.revision)
-        val pending = PendingResult(id, preview.handId, body)
+        if (!preview.matches(hand, input) || state.value.busy || tableId != id ||
+            !isCheckedInParticipant(state.value.table, state.value.profile?.principal?.id) ||
+            state.value.table?.currentHand?.id != hand.id ||
+            state.value.table?.currentHand?.markRevision != hand.markRevision) return
         val principalId = state.value.profile?.principal?.id ?: return
+        val pending = PendingResult(id, preview.handId, resultBody(input, preview.revision))
         try { pendingStore.save(principalId, pending) }
         catch (e: Exception) { state.value = state.value.copy(actionError = "无法保存待提交请求：${e.message}"); return }
-        state.value = state.value.copy(pendingResult = pending)
-        resend()
+        state.value = state.value.copy(pendingResult = pending, pendingReviewed = false)
+        sendPending(pending)
+    }
+    private fun sendPending(pending: PendingResult) = operation(pending.matchId) {
+        requireParticipant(pending.matchId)
+        val principalId = requireNotNull(state.value.profile?.principal?.id)
+        check(state.value.pendingResult == pending &&
+            pendingStore.read(principalId, pending.matchId) == pending) { "待确认原请求已变化" }
+        api.post("/api/matches/${pending.matchId}/hands/${pending.handId}/results", pending.body)
+        pendingStore.clear()
+        draftStore.clear(principalId, pending.matchId, pending.handId)
+        state.value = state.value.copy(pendingResult = null, pendingReviewed = false, draft = null, preview = null)
     }
     fun resend() {
         val pending = state.value.pendingResult ?: return
-        operation(pending.matchId) {
-            api.post("/api/matches/${pending.matchId}/hands/${pending.handId}/results", pending.body)
-            pendingStore.clear()
-            state.value = state.value.copy(pendingResult = null, preview = null)
+        if (!mayResendPending(pending, state.value.table?.currentHand, state.value.pendingReviewed)) {
+            state.value = state.value.copy(actionError = "请先刷新核对本局仍未结算且立直版本未变；不能自动改写请求")
+            return
         }
+        sendPending(pending)
     }
-    fun resolvePendingWithoutResend() {
-        // Only the user may discard an uncertain request after checking the authoritative table.
-        pendingStore.clear()
-        state.value = state.value.copy(pendingResult = null)
+    fun nextHand(id: String) = operation(id) {
+        check(requireParticipant(id).match.status == "in_progress") { "牌局已结束" }
+        api.post("/api/matches/$id/hands")
     }
-    fun nextHand(id: String) = operation(id) { api.post("/api/matches/$id/hands") }
-    fun finish(id: String) = operation(id) { api.post("/api/matches/$id/finish") }
+    fun finish(id: String) = operation(id) {
+        check(requireHost(id).match.status == "in_progress") { "牌局已结束" }
+        api.post("/api/matches/$id/finish")
+    }
     fun terminalPreview(id: String) = operation(id) {
         val version = state.value.table?.match?.version ?: throw IllegalStateException("缺少牌桌版本")
         val output = api.json.decodeFromString<SettlementPreview>(api.get("/api/matches/$id/settlement/preview"))
         if (tableId == id && state.value.table?.match?.version == version) state.value = state.value.copy(terminal = BoundTerminal(version, output))
     }
     fun confirmSettlement(id: String) = operation(id) {
+        requireHost(id)
         check(state.value.terminal?.version == state.value.table?.match?.version) { "请先预览当前终局成绩" }
         api.post("/api/matches/$id/settlement/confirm")
         state.value = state.value.copy(terminal = null)

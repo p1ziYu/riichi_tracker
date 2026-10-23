@@ -340,7 +340,8 @@ fun TableScreen(
                     }
                 }
             }
-            item { SectionTitle(if (hands == null) "局记录 · 读取中" else "局记录 · 最早的 ${hands.size} 局（按对局顺序）") }
+            item { SectionTitle(if (hands == null) "局历史 · 读取中" else "局历史 · 最早的 ${hands.size} 局") }
+            item { Caption("显示最早的已结算局摘要（最多 100 局），非完整牌谱回放；无后续分页或原始输入。") }
             if (hands == null && !loading) item { Caption("牌局记录暂未提供") }
             if (hands != null && hands.isEmpty()) item { Caption("暂无牌局记录") }
             itemsIndexed(hands.orEmpty().sortedBy { it.handNo }) { _, hand ->
