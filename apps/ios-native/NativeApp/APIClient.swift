@@ -4,7 +4,16 @@ import Combine
 
 struct APIError: LocalizedError {
     let status: Int?
+    let code: String?
+    let retryAfter: TimeInterval?
     let message: String
+
+    init(status: Int?, code: String? = nil, retryAfter: TimeInterval? = nil, message: String) {
+        self.status = status
+        self.code = code
+        self.retryAfter = retryAfter
+        self.message = message
+    }
 
     var errorDescription: String? { message }
 }
@@ -84,11 +93,27 @@ private final class TokenStore {
         _ = SecItemDelete(query as CFDictionary)
     }
 }
+private final class SameOriginRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        guard let original = task.originalRequest?.url, let next = request.url,
+              original.scheme == next.scheme, original.host == next.host,
+              original.port == next.port else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+}
+
 
 @MainActor
 final class APIClient {
     private let store = TokenStore()
     private let origin: URLComponents?
+    private let transport = URLSession(configuration: .default, delegate: SameOriginRedirects(), delegateQueue: nil)
     var onSessionExpired: (() -> Void)?
 
     init() {
@@ -109,9 +134,10 @@ final class APIClient {
     }
 
     var hasStoredToken: Bool {
-        do { return try store.load() != nil }
-        catch { return false }
+        (try? store.load()) != nil
     }
+
+    func storedToken() throws -> String? { try store.load() }
 
     func get<T: Decodable>(_ path: String) async throws -> T {
         let (data, _) = try await request(path, method: "GET")
@@ -122,16 +148,36 @@ final class APIClient {
         let (data, _) = try await request(path, method: "POST", body: body ?? EmptyBody())
         return try JSONDecoder().decode(T.self, from: data)
     }
+    func postRaw<T: Decodable>(_ path: String, data: Data) async throws -> T {
+        let (response, _) = try await request(path, method: "POST", encodedBody: data)
+        return try JSONDecoder().decode(T.self, from: response)
+    }
 
     func signIn(email: String, password: String, name: String?) async throws {
         let path = name == nil ? "/api/auth/sign-in/email" : "/api/auth/sign-up/email"
         _ = try await request(path, method: "POST", body: AuthPayload(email: email, password: password, name: name))
     }
 
-    func signOut() async {
-        // The remote request is best-effort; the local credential is always discarded.
-        defer { store.clear() }
-        _ = try? await request("/api/auth/sign-out", method: "POST", body: EmptyBody())
+    func signInGuest() async throws {
+        _ = try await request("/api/auth/sign-in/anonymous", method: "POST", body: EmptyBody())
+    }
+
+    func signOut() async -> Bool {
+        let oldToken = try? store.load()
+        // Forget locally BEFORE any network suspension, including offline sign-out.
+        store.clear()
+        guard let oldToken else { return true }
+        guard let baseURL = origin?.url,
+              let url = URL(string: "/api/auth/sign-out", relativeTo: baseURL)?.absoluteURL else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(oldToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data("{}".utf8)
+        do {
+            let (_, response) = try await transport.data(for: request)
+            return (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
+        } catch { return false }
     }
 
     func webSocketURL(matchID: String, ticket: String) throws -> URL {
@@ -147,7 +193,7 @@ final class APIClient {
         return url
     }
 
-    private func request(_ path: String, method: String, body: (any Encodable)? = nil) async throws -> (Data, HTTPURLResponse) {
+    private func request(_ path: String, method: String, body: (any Encodable)? = nil, encodedBody: Data? = nil) async throws -> (Data, HTTPURLResponse) {
         guard path.hasPrefix("/"), !path.hasPrefix("//"),
               let base = origin, let baseURL = base.url,
               let url = URL(string: path, relativeTo: baseURL)?.absoluteURL,
@@ -155,8 +201,9 @@ final class APIClient {
             throw APIError(status: nil, message: "请求地址配置无效")
         }
         let isEmailAuth = path == "/api/auth/sign-in/email" || path == "/api/auth/sign-up/email"
+        let isAuth = isEmailAuth || path == "/api/auth/sign-in/anonymous"
         let token: String?
-        if isEmailAuth {
+        if isAuth {
             // A damaged saved credential must not prevent an explicit fresh login.
             token = nil
         } else {
@@ -169,11 +216,14 @@ final class APIClient {
         var request = URLRequest(url: url)
         request.httpMethod = method
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        if let body {
+        if let encodedBody {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = encodedBody
+        } else if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONEncoder().encode(EncodableBody(value: body))
         }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await transport.data(for: request)
         guard let response = response as? HTTPURLResponse else {
             throw APIError(status: nil, message: "服务器响应无效")
         }
@@ -184,10 +234,11 @@ final class APIClient {
             }
             let detail = try? JSONDecoder().decode(ErrorResponse.self, from: data)
             let text = String(data: data, encoding: .utf8)
-            throw APIError(status: response.statusCode,
+            throw APIError(status: response.statusCode, code: detail?.error,
+                           retryAfter: response.value(forHTTPHeaderField: "Retry-After").flatMap { TimeInterval($0) },
                            message: detail?.message ?? detail?.error ?? (text?.isEmpty == false ? text! : "请求失败 (\(response.statusCode))"))
         }
-        if isEmailAuth {
+        if isAuth {
             let fallback = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["token"] as? String
             let bearer = response.value(forHTTPHeaderField: "set-auth-token") ?? fallback
             guard let bearer, !bearer.isEmpty else {
@@ -205,35 +256,74 @@ final class APIClient {
 
 @MainActor
 final class AppSession: ObservableObject {
-    @Published private(set) var authenticated: Bool
+    enum Identity { case restoring, account, onlineGuest, localOnly }
+    @Published private(set) var identity: Identity = .restoring
     @Published private(set) var profile: MeResponse?
+    @Published private(set) var sessionError: String?
     let api: APIClient
+    private var generation = 0
 
     init() {
-        let api = APIClient()
-        self.api = api
-        authenticated = api.hasStoredToken
-        profile = nil
+        api = APIClient()
         api.onSessionExpired = { [weak self] in
-            self?.authenticated = false
+            self?.generation += 1
+            self?.identity = .localOnly
             self?.profile = nil
+            self?.sessionError = "会话已失效，请重新认证"
+        }
+        Task { await restore() }
+    }
+
+    var authenticated: Bool { identity == .account || identity == .onlineGuest }
+    var canHost: Bool { identity == .account }
+    var principalID: String? { profile?.principal.id }
+    var generationID: Int { generation }
+
+    func restore() async {
+        do {
+            guard try api.storedToken() != nil else { identity = .localOnly; return }
+            try await refreshProfile()
+        } catch let error as APIError where error.status == nil {
+            // Keychain access failures must not silently become a fresh local identity.
+            identity = .localOnly
+            sessionError = error.localizedDescription
+        } catch {
+            identity = .localOnly
+            sessionError = error.localizedDescription
         }
     }
 
     func signIn(email: String, password: String, name: String? = nil) async throws {
         try await api.signIn(email: email.trimmingCharacters(in: .whitespacesAndNewlines),
                              password: password, name: name?.trimmingCharacters(in: .whitespacesAndNewlines))
+        generation += 1
         try await refreshProfile()
-        authenticated = true
+    }
+
+    func signInGuest() async throws {
+        try await api.signInGuest()
+        generation += 1
+        try await refreshProfile()
     }
 
     func signOut() async {
-        await api.signOut()
-        authenticated = false
+        generation += 1
+        let current = generation
+        identity = .localOnly
         profile = nil
+        PendingResultStore.clearAll()
+        let revoked = await api.signOut()
+        if !revoked, generation == current {
+            sessionError = "本机凭据已清除；网络请求失败，服务器会话尚未确认撤销。"
+        }
     }
 
     func refreshProfile() async throws {
-        profile = try await api.get("/api/me")
+        let current = generation
+        let response: MeResponse = try await api.get("/api/me")
+        guard current == generation else { return }
+        profile = response
+        identity = response.principal.type == "anonymous" || response.principal.type == "guest" ? .onlineGuest : .account
+        sessionError = nil
     }
 }

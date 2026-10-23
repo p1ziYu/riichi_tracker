@@ -6,6 +6,27 @@ import MobileEngine
 /// No fixture result is synthesized from its expected value.
 enum EngineBridgeCheck {
     static let version = CoreKt.ENGINE_VERSION
+    static func normalizedRules(_ config: [String: Any]) throws -> [String: Any] {
+        try normalize(CoreKt.normalizeRulesConfig(rawConfig: bridgedObject(config), inferredPlayerCount: nil))
+    }
+
+    static func samplePayment(config: [String: Any], input: [String: Any]) throws -> [String: Any] {
+        guard let count = config["playerCount"] as? Int, (3...4).contains(count),
+              let start = config["startingPoints"] as? Int, start > 0 else {
+            throw APIError(status: nil, message: "引擎预览缺少合法人数或起始点")
+        }
+        let hand: [String: Any] = [
+            "handId": "preview", "roundWind": "E", "roundNumber": 1,
+            "dealerSeatNo": 0, "honba": 0, "riichiPool": 0,
+            "markRevision": 0, "resultRevision": 0,
+            "seats": (0..<count).map { ["seatNo": $0, "points": start, "isRiichi": false] as [String: Any] }
+        ]
+        guard let payment = try invoke(["operation": "calculateSettlement",
+                                        "args": [["rulesHash": "local-preview", "config": config],
+                                                 hand, input, version]]) as? [String: Any] else {
+            throw APIError(status: nil, message: "引擎预览输出格式无效")
+        }
+        return payment
 
     static func runSample() async -> String {
         do {

@@ -64,6 +64,10 @@ struct TemplateDTO: Codable, Identifiable {
 struct MatchDTO: Codable {
     let id: String
     let status: String
+    let ownerPrincipalId: String?
+    let joinCode: String?
+    let settlementConfirmed: Bool?
+    let version: Int?
     let playerCount: Int
     let rulesSnapshot: [String: JSONValue]?
     let rulesetVersionId: String?
@@ -71,6 +75,7 @@ struct MatchDTO: Codable {
 }
 
 struct SeatDTO: Codable, Identifiable {
+    let principalId: String?
     let seatNo: Int
     let displayName: String?
     let points: Int?
@@ -79,42 +84,27 @@ struct SeatDTO: Codable, Identifiable {
     var id: Int { seatNo }
 }
 
+struct RiichiUsageDTO: Codable {
+    let declares: Int
+    let cancels: Int
+}
+
 struct HandSeatDTO: Codable {
     let seatNo: Int
-    let isRiichi: Bool?
+    let isRiichi: Bool
+    let riichiChangeUsage: RiichiUsageDTO
 }
 
 struct CurrentHandDTO: Codable {
+    let id: String
+    let state: String
+    let markRevision: Int64
     let roundWind: String?
     let roundNumber: Int?
     let dealerSeatNo: Int?
     let honba: Int?
     let riichiPool: Int?
     let seats: [HandSeatDTO]
-
-    private enum CodingKeys: String, CodingKey {
-        case roundWind, roundNumber, dealerSeatNo, honba, riichiPool, seats
-    }
-
-    init(from decoder: Decoder) throws {
-        let fields = try decoder.container(keyedBy: CodingKeys.self)
-        roundWind = try fields.decodeIfPresent(String.self, forKey: .roundWind)
-        roundNumber = try fields.decodeIfPresent(Int.self, forKey: .roundNumber)
-        dealerSeatNo = try fields.decodeIfPresent(Int.self, forKey: .dealerSeatNo)
-        honba = try fields.decodeIfPresent(Int.self, forKey: .honba)
-        riichiPool = try fields.decodeIfPresent(Int.self, forKey: .riichiPool)
-        seats = try fields.decodeIfPresent([HandSeatDTO].self, forKey: .seats) ?? []
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var fields = encoder.container(keyedBy: CodingKeys.self)
-        try fields.encodeIfPresent(roundWind, forKey: .roundWind)
-        try fields.encodeIfPresent(roundNumber, forKey: .roundNumber)
-        try fields.encodeIfPresent(dealerSeatNo, forKey: .dealerSeatNo)
-        try fields.encodeIfPresent(honba, forKey: .honba)
-        try fields.encodeIfPresent(riichiPool, forKey: .riichiPool)
-        try fields.encode(seats, forKey: .seats)
-    }
 }
 
 struct TableSnapshot: Codable {
@@ -167,6 +157,7 @@ struct SettlementPreview: Codable {
 }
 
 struct PrincipalDTO: Codable {
+    let id: String
     let displayName: String
     let type: String
     let createdAt: String?
@@ -179,6 +170,52 @@ struct MeResponse: Codable {
 struct TicketDTO: Codable {
     let ticket: String
 }
+struct CreatedMatchDTO: Decodable {
+    struct Match: Decodable { let id: String }
+    let match: Match
+}
+
+struct CheckInTokenDTO: Decodable {
+    let token: String
+    let expiresAt: String
+}
+
+struct JoinCodeDTO: Decodable {
+    let matchId: String
+    let token: String
+    let expiresAt: String
+}
+
+struct CheckInResultDTO: Decodable {
+    struct Seat: Decodable { let seatNo: Int }
+    let seat: Seat
+}
+
+struct CommandReceiptDTO: Decodable {
+    let markRevision: Int64?
+    let settlementId: String?
+}
+
+struct PaymentDTO: Decodable {
+    struct Part: Decodable { let reason: String; let amount: Int }
+    let seatNo: Int
+    let netPoints: Int
+    let breakdown: [Part]
+}
+
+struct NextHandDTO: Decodable {
+    let roundWind: String
+    let roundNumber: Int
+    let dealerSeatNo: Int
+    let honba: Int
+    let riichiPool: Int
+}
+
+struct PaymentPreviewDTO: Decodable {
+    let perSeat: [PaymentDTO]
+    let nextHand: NextHandDTO
+}
+
 
 struct RuleDetails {
     let title: String

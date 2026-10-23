@@ -8,11 +8,12 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>一姬</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>0.2.0</string>
+    <key>CFBundleVersion</key><string>2</string>
     <key>LSRequiresIPhoneOS</key><true/>
     <key>MinimumOSVersion</key><string>17.0</string>
     <key>APIBaseURL</key><string>$(API_BASE_URL)</string>
+    <key>NSCameraUsageDescription</key><string>扫描同桌出示的一姬签到二维码；也可直接粘贴签到链接。</string>
     <key>UIAppFonts</key><array><string>LXGWWenKaiScreen-Display.ttf</string></array>
     <key>NSAppTransportSecurity</key><dict>
         <key>NSExceptionDomains</key><dict>

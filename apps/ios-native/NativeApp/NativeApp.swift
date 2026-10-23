@@ -26,7 +26,9 @@ struct IchihimeNativeApp: App {
     var body: some Scene {
         WindowGroup {
             Group {
-                if session.authenticated {
+                if session.identity == .restoring {
+                    ProgressView("恢复安全会话中…")
+                } else if session.authenticated {
                     TabView {
                         NavigationStack {
                             MatchListScreen(session: session, lobby: true)
@@ -68,15 +70,35 @@ struct IchihimeNativeApp: App {
             }
             .sheet(isPresented: $showingCheckIn) {
                 NavigationStack {
-                    CheckInScreen(link: checkInLink)
-                        .toolbar { ToolbarItem(placement: .confirmationAction) {
-                            Button("关闭") { showingCheckIn = false }
-                        } }
+                    Group {
+                        if session.authenticated {
+                            CheckInScreen(session: session, link: checkInLink) {
+                                checkInLink = nil
+                            }
+                        } else {
+                            AuthScreen(session: session)
+                                .safeAreaInset(edge: .bottom) {
+                                    Button("关闭签到") { showingCheckIn = false; checkInLink = nil }
+                                        .frame(maxWidth: .infinity).padding()
+                                }
+                        }
+                    }
+                    .toolbar { ToolbarItem(placement: .confirmationAction) {
+                        Button("关闭") { showingCheckIn = false; checkInLink = nil }
+                    } }
                 }
             }
+            .onChange(of: showingCheckIn) { _, shown in
+                if !shown { checkInLink = nil }
+            }
             .onOpenURL { url in
-                guard url.scheme?.lowercased() == "ichihime-native",
-                      url.host?.lowercased() == "checkin" else { return }
+                if CheckInDestination(url.absoluteString) != nil {
+                    checkInLink = url.absoluteString
+                    showingCheckIn = true
+                }
+            }
+            .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+                guard let url = activity.webpageURL, CheckInDestination(url.absoluteString) != nil else { return }
                 checkInLink = url.absoluteString
                 showingCheckIn = true
             }

@@ -13,6 +13,7 @@ private final class SocketOpenDelegate: NSObject, URLSessionWebSocketDelegate {
         onOpen()
     }
 }
+private struct SocketEvent: Decodable { let type: String }
 
 /// The visible, foreground table owns this object and must stop it on disappearance/backgrounding.
 @MainActor
@@ -76,12 +77,24 @@ final class LiveUpdates: ObservableObject {
                 }
                 activeSocket.resume()
                 while !Task.isCancelled && generation == current {
-                    // Events are invalidation signals; the HTTP snapshot is authoritative.
-                    _ = try await activeSocket.receive()
-                    if generation == current { await onRefresh() }
+                    // WS is an invalidation signal only. Parse the envelope so malformed
+                    // traffic cannot masquerade as a state update.
+                    let message = try await activeSocket.receive()
+                    let payload: Data
+                    switch message {
+                    case .string(let text): payload = Data(text.utf8)
+                    case .data(let data): payload = data
+                    @unknown default: continue
+                    }
+                    if let event = try? JSONDecoder().decode(SocketEvent.self, from: payload),
+                       !event.type.isEmpty, generation == current { await onRefresh() }
                 }
             } catch {
                 if Task.isCancelled || generation != current { break }
+                if let failure = error as? APIError, failure.status == 401 || failure.status == 403 {
+                    connection = "无实时权限，请刷新"
+                    break
+                }
                 if !api.hasStoredToken { break }
             }
             if Task.isCancelled || generation != current { break }

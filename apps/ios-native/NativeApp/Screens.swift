@@ -1,7 +1,6 @@
-import SafariServices
 import SwiftUI
 
-private enum Brand {
+enum Brand {
     static let background = Color(red: 16 / 255, green: 28 / 255, blue: 40 / 255)
     static let panel = Color(red: 28 / 255, green: 41 / 255, blue: 66 / 255)
     static let deep = Color(red: 21 / 255, green: 43 / 255, blue: 59 / 255)
@@ -229,6 +228,23 @@ struct AuthScreen: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(busy || email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || password.isEmpty || (registering && name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                Button("以在线临时访客进入") {
+                    Task {
+                        guard !busy else { return }
+                        busy = true; error = nil
+                        defer { busy = false }
+                        do { try await session.signInGuest() }
+                        catch { self.error = error.localizedDescription }
+                    }
+                }
+                .disabled(busy)
+                Text("访客仅能参与已批准的在线牌桌，不能开桌；本地模式不使用此身份。")
+                    .font(.footnote).foregroundStyle(Brand.muted)
+                Text("本地无身份模式不创建服务端访客；离线牌桌将在本地阶段提供。")
+                    .font(.footnote).foregroundStyle(Brand.muted)
+                if let warning = session.sessionError {
+                    Text(warning).font(.footnote).foregroundStyle(.red)
+                }
             }
             .textFieldStyle(.plain)
             .foregroundStyle(Brand.cream)
@@ -276,7 +292,8 @@ struct MatchListScreen: View {
     @State private var templates: [TemplateDTO] = []
     @State private var loading = false
     @State private var error: String?
-    @State private var showCreateNotice = false
+    @State private var showCreate = false
+    @State private var createdMatchID: String?
 
     private var ordered: [MatchSummary] {
         (matches ?? []).sorted { lhs, rhs in
@@ -329,14 +346,15 @@ struct MatchListScreen: View {
                         Text("从规则到结算，给同桌每一分一个清楚的去处。")
                             .font(.subheadline).foregroundStyle(Brand.muted)
                         Button {
-                            showCreateNotice = true
+                            showCreate = true
                         } label: {
                             Text("开桌 ↗").frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(Brand.gold)
                         .foregroundStyle(Brand.background)
-                        Text("只读体验版暂不支持创建对局")
+                        .disabled(!session.canHost)
+                        Text(session.canHost ? "选择模板、调整规则、预览支付后创建" : "访客不能创建牌桌，请使用注册账户")
                             .font(.footnote).foregroundStyle(Brand.muted)
                     }
                     .padding(20)
@@ -392,10 +410,17 @@ struct MatchListScreen: View {
         .navigationTitle(lobby ? "大厅" : "战绩")
         .refreshable { await refresh() }
         .task { await refresh() }
-        .alert("只读体验", isPresented: $showCreateNotice) {
-            Button("知道了", role: .cancel) {}
-        } message: {
-            Text("当前试用版仅供查看；完整版本将提供创建牌桌功能。")
+        .sheet(isPresented: $showCreate) {
+            NavigationStack {
+                RulesWizard(api: session.api) { id in
+                    createdMatchID = id
+                    showCreate = false
+                    Task { await refresh() }
+                }
+            }
+        }
+        .navigationDestination(isPresented: Binding(get: { createdMatchID != nil }, set: { if !$0 { createdMatchID = nil } })) {
+            if let createdMatchID { TableScreen(session: session, matchId: createdMatchID) }
         }
     }
 
@@ -430,6 +455,7 @@ struct MatchListScreen: View {
     @State private var pendingRefresh = false
     @State private var error: String?
     @State private var visible = false
+    @State private var requestGeneration = 0
 
     init(session: AppSession, matchId: String) {
         self.session = session
@@ -510,7 +536,7 @@ struct MatchListScreen: View {
                         Text("立直供托：\(hand.riichiPool.map { "\($0) 点 / \($0 / 1000) 根" } ?? "未提供")")
                             .monospacedDigit()
                         ForEach(hand.seats.sorted { $0.seatNo < $1.seatNo }, id: \.seatNo) { seat in
-                            Text("\(seat.seatNo + 1) 号位 · \(seat.isRiichi.map { $0 ? "已立直" : "未立直" } ?? "立直状态未知")")
+                            Text("\(seat.seatNo + 1) 号位 · \(seat.isRiichi ? "已立直" : "未立直") · 宣言 \(seat.riichiChangeUsage.declares)/2 取消 \(seat.riichiChangeUsage.cancels)/1")
                                 .monospacedDigit()
                         }
                     } else {
@@ -531,6 +557,7 @@ struct MatchListScreen: View {
                     }
                     .listRowBackground(Brand.panel)
                 }
+                OnlineTableActions(session: session, snapshot: snapshot) { await refresh() }
             }
             Section(hands.map { "局记录 · 最早的 \($0.count) 局（按对局顺序）" } ?? "局记录 · 读取中") {
                 if let hands {
@@ -566,6 +593,7 @@ struct MatchListScreen: View {
             if scenePhase == .active { connect() }
         }
         .onDisappear {
+            requestGeneration += 1
             visible = false
             live.stop()
         }
@@ -577,6 +605,18 @@ struct MatchListScreen: View {
                 live.stop()
             }
         }
+        .onChange(of: session.identity) { _, identity in
+            if identity == .localOnly { clearPrivateState() }
+        }
+    }
+
+    private func clearPrivateState() {
+        requestGeneration += 1
+        snapshot = nil
+        hands = nil
+        settlement = nil
+        templates = []
+        live.stop()
     }
 
     private func connect() {
@@ -599,29 +639,36 @@ struct MatchListScreen: View {
             }
         }
         let path = "/api/matches/\(matchId)"
+        let current = requestGeneration
+        let principalGeneration = session.generationID
         do {
             let updated: TableSnapshot = try await session.api.get(path)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, current == requestGeneration, principalGeneration == session.generationID else { return }
             snapshot = updated
             settlement = nil
             do {
                 let updatedHands: [HandDTO] = try await session.api.get("\(path)/hands?limit=100")
-                if !Task.isCancelled { hands = updatedHands }
+                if current == requestGeneration, principalGeneration == session.generationID { hands = updatedHands }
             } catch {
-                self.error = "读取局记录失败：\(error.localizedDescription)"
+                if current == requestGeneration { self.error = "读取局记录失败：\(error.localizedDescription)" }
             }
             if isFinished(updated.match.status) {
                 do {
                     let updatedSettlement: SettlementPreview = try await session.api.get("\(path)/settlement/preview")
-                    if !Task.isCancelled { settlement = updatedSettlement }
+                    if current == requestGeneration, principalGeneration == session.generationID { settlement = updatedSettlement }
                 } catch {
-                    self.error = "读取终局成绩失败：\(error.localizedDescription)"
+                    if current == requestGeneration { self.error = "读取终局成绩失败：\(error.localizedDescription)" }
                 }
             }
-            if let updatedTemplates: [TemplateDTO] = try? await session.api.get("/api/rulesets/templates"), !Task.isCancelled {
+            if let updatedTemplates: [TemplateDTO] = try? await session.api.get("/api/rulesets/templates"),
+               current == requestGeneration, principalGeneration == session.generationID {
                 templates = updatedTemplates
             }
         } catch {
+            guard current == requestGeneration else { return }
+            if let failure = error as? APIError, failure.status == 401 || failure.status == 403 {
+                clearPrivateState()
+            }
             self.error = error.localizedDescription
         }
     }
@@ -668,6 +715,10 @@ struct ProfileScreen: View {
                     LabeledContent("昵称", value: principal.displayName)
                     LabeledContent("账号类型", value: accountLabel(principal.type))
                     LabeledContent("创建时间", value: localDate(principal.createdAt))
+                    if session.identity == .onlineGuest {
+                        Text("临时访客会话已安全保存；不能开桌，也不承诺升级账户后自动继承战绩。")
+                            .font(.footnote).foregroundStyle(Brand.muted)
+                    }
                 }
             }
             .listRowBackground(Brand.panel)
@@ -684,7 +735,7 @@ struct ProfileScreen: View {
             }
             .listRowBackground(Brand.panel)
             Section {
-                Button("粘贴签到链接", action: onCheckIn)
+                Button("扫描二维码 / 粘贴签到链接 / 房间码", action: onCheckIn)
                 Button("退出登录", role: .destructive) {
                     Task {
                         signingOut = true
@@ -717,122 +768,4 @@ struct ProfileScreen: View {
     }
 }
 
-private struct CheckInDestination {
-    let url: URL
-    let matchID: String
-    let hasToken: Bool
-
-    init?(_ input: String) {
-        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let components = URLComponents(string: value),
-              components.port == nil,
-              components.user == nil,
-              components.password == nil,
-              components.fragment == nil else { return nil }
-        let query = components.queryItems ?? []
-        let tokens = query.filter { $0.name == "token" }
-        guard tokens.count <= 1 else { return nil }
-        if let token = tokens.first {
-            guard let value = token.value,
-                  !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return nil }
-        }
-        hasToken = !tokens.isEmpty
-
-        if components.scheme?.lowercased() == "https",
-           components.host?.lowercased() == "riichi.p1ziyu.com" {
-            let path = components.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false)
-            guard path.count == 3, path[0].isEmpty, path[1] == "checkin",
-                  path[2].count == 36, UUID(uuidString: String(path[2])) != nil,
-                  let url = components.url else { return nil }
-            self.url = url
-            matchID = String(path[2])
-        } else if components.scheme?.lowercased() == "ichihime-native",
-                  components.host?.lowercased() == "checkin" || components.host == nil {
-            let matches = query.filter { $0.name == "matchId" }
-            let path = components.percentEncodedPath
-            let id: String
-            if matches.count == 1,
-               (components.host == nil ? path == "/checkin" : path.isEmpty || path == "/"),
-               let requestedID = matches[0].value {
-                id = requestedID
-            } else if matches.isEmpty {
-                let segments = path.split(separator: "/", omittingEmptySubsequences: false)
-                if segments.count == 2, segments[0].isEmpty, components.host?.lowercased() == "checkin" {
-                    id = String(segments[1])
-                } else if segments.count == 3, segments[0].isEmpty, segments[1] == "checkin" {
-                    id = String(segments[2])
-                } else {
-                    return nil
-                }
-            } else {
-                return nil
-            }
-            guard id.count == 36, UUID(uuidString: id) != nil else { return nil }
-            var website = URLComponents()
-            website.scheme = "https"
-            website.host = "riichi.p1ziyu.com"
-            website.path = "/checkin/\(id)"
-            website.queryItems = tokens.isEmpty ? nil : tokens
-            guard let url = website.url else { return nil }
-            self.url = url
-            matchID = id
-        } else {
-            return nil
-        }
-    }
-}
-
-private struct CheckInBrowser: UIViewControllerRepresentable {
-    let url: URL
-
-    func makeUIViewController(context: Context) -> SFSafariViewController {
-        SFSafariViewController(url: url)
-    }
-
-    func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
-}
-
-struct CheckInScreen: View {
-    @State private var input: String
-    @State private var showBrowser = false
-
-    init(link: String?) {
-        _input = State(initialValue: link ?? "")
-    }
-
-    private var destination: CheckInDestination? { CheckInDestination(input) }
-
-    var body: some View {
-        Form {
-            Section("签到链接") {
-                Text("当前只读体验版暂不支持签到；可打开网页版签到。")
-                Text("粘贴或通过链接打开后，确认对局编号与签到凭证是否存在。")
-                    .foregroundStyle(.secondary)
-                SecureField("粘贴签到链接（内容隐藏）", text: $input)
-                    .textContentType(.URL)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                if !input.isEmpty {
-                    if let destination {
-                        Text("对局：\(destination.matchID)")
-                        Text(destination.hasToken ? "链接含签到凭证；不会在页面展示" : "链接不含签到凭证")
-                    } else {
-                        Text("链接无效，请检查后重试").foregroundStyle(.red)
-                    }
-                }
-                Button("打开网页版签到") { showBrowser = true }
-                    .disabled(destination == nil)
-            }
-            .listRowBackground(Brand.panel)
-        }
-        .scrollContentBackground(.hidden)
-        .background(Brand.background)
-        .foregroundStyle(Brand.text)
-        .navigationTitle("签到")
-        .sheet(isPresented: $showBrowser) {
-            if let destination { CheckInBrowser(url: destination.url) }
-        }
-    }
-}
 
