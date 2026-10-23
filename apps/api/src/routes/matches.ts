@@ -57,7 +57,7 @@ export async function checkMatchAccess(
   db: { query: typeof pool.query } = pool,
 ): Promise<'allowed' | 'not_found' | 'forbidden'> {
   const mRes = await db.query<{ id: string }>(
-    `SELECT id FROM app.matches WHERE id = $1`,
+    `SELECT id FROM app.matches WHERE id = $1 AND deleted_at IS NULL`,
     [matchId],
   );
   if (mRes.rowCount === 0) {
@@ -110,7 +110,7 @@ export async function checkConfirmedParticipantWriteAccess(
   db: { query: typeof pool.query } = pool,
 ): Promise<'allowed' | 'not_found' | 'forbidden'> {
   const mRes = await db.query<{ id: string; rules_hash: string }>(
-    `SELECT id, rules_hash FROM app.matches WHERE id = $1`,
+    `SELECT id, rules_hash FROM app.matches WHERE id = $1 AND deleted_at IS NULL`,
     [matchId],
   );
   const match = mRes.rows[0];
@@ -541,10 +541,12 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     }
   });
 
-  // GET /api/matches?mine=1 -> [{ id, status, playerCount, rulesetVersionId, rulesSnapshot, createdAt }]
-  app.get<{ Querystring: { mine?: string } }>('/api/matches', async (req, reply) => {
+  // GET /api/matches?mine=1 -> [{ id, status, playerCount, rulesetVersionId, rulesSnapshot, createdAt, hidden, isOwner }]
+  app.get<{ Querystring: { mine?: string; includeHidden?: string } }>('/api/matches', async (req, reply) => {
     const principal = await requirePrincipal(req, reply);
     if (!principal) return;
+
+    const includeHidden = req.query.includeHidden === '1' || req.query.includeHidden === 'true';
 
     const res = await pool.query<{
       id: string;
@@ -553,12 +555,18 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
       rules_snapshot: Record<string, unknown>;
       ruleset_version_id: string | null;
       created_at: Date;
+      owner_principal_id: string;
+      hidden: boolean;
     }>(
-      `SELECT DISTINCT m.id, m.state, m.player_count, m.created_at, m.rules_snapshot, m.ruleset_version_id
+      `SELECT DISTINCT m.id, m.state, m.player_count, m.created_at, m.rules_snapshot, m.ruleset_version_id,
+              m.owner_principal_id,
+              (mm.hidden_at IS NOT NULL) AS hidden
        FROM app.matches m
        JOIN app.match_members mm ON mm.match_id = m.id AND mm.status = 'active'
        LEFT JOIN app.member_access_grants mag ON mag.member_id = mm.id AND mag.revoked_at IS NULL
        WHERE (mm.principal_id = $1 OR mag.principal_id = $1)
+         AND m.deleted_at IS NULL
+         AND ($3::boolean = true OR mm.hidden_at IS NULL)
          AND (
            $2::text <> 'guest'
            OR EXISTS (
@@ -571,7 +579,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
            )
          )
        ORDER BY m.created_at DESC`,
-      [principal.id, principal.kind],
+      [principal.id, principal.kind, includeHidden],
     );
 
     return res.rows.map((row) => ({
@@ -581,6 +589,8 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
       rulesetVersionId: row.ruleset_version_id,
       createdAt: row.created_at.toISOString(),
       rulesSnapshot: row.rules_snapshot,
+      hidden: Boolean(row.hidden),
+      isOwner: row.owner_principal_id === principal.id,
     }));
   });
 
@@ -612,7 +622,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
       created_at: Date;
       started_at: Date | null;
       ended_at: Date | null;
-    }>(`SELECT * FROM app.matches WHERE id = $1`, [matchId]);
+    }>(`SELECT * FROM app.matches WHERE id = $1 AND deleted_at IS NULL`, [matchId]);
     const m = mRes.rows[0];
 
     const norm = normalizeRulesConfig(m.rules_snapshot, m.player_count);
@@ -643,7 +653,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
        LEFT JOIN app.seat_assignments sa
          ON sa.match_id = ms.match_id AND sa.seat_no = ms.seat_no AND sa.end_hand_no IS NULL
        LEFT JOIN app.match_members mm
-         ON mm.match_id = sa.match_id AND mm.id = sa.member_id
+         ON mm.match_id = sa.match_id AND mm.id = sa.member_id AND mm.status = 'active'
        LEFT JOIN app.principals p
          ON p.id = mm.principal_id
        WHERE ms.match_id = $1
@@ -763,7 +773,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         await client.query('BEGIN');
         const mRes = await client.query<{
           owner_principal_id: string; player_count: number; rules_hash: string; state: string;
-        }>('SELECT owner_principal_id, player_count, rules_hash, state FROM app.matches WHERE id = $1 FOR UPDATE', [matchId]);
+        }>('SELECT owner_principal_id, player_count, rules_hash, state FROM app.matches WHERE id = $1 AND deleted_at IS NULL FOR UPDATE', [matchId]);
         const match = mRes.rows[0];
         if (!match) {
           await client.query('ROLLBACK');
@@ -888,7 +898,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         }
 
         const mRes = await client.query<{ id: string; owner_principal_id: string; player_count: number; state: string }>(
-          `SELECT id, owner_principal_id, player_count, state FROM app.matches WHERE id = $1 FOR UPDATE`,
+          `SELECT id, owner_principal_id, player_count, state FROM app.matches WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`,
           [matchId],
         );
         const match = mRes.rows[0];
@@ -993,7 +1003,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         owner_principal_id: string;
         player_count: number;
         state: string;
-      }>(`SELECT id, owner_principal_id, player_count, state FROM app.matches WHERE id = $1 FOR UPDATE`, [matchId]);
+      }>(`SELECT id, owner_principal_id, player_count, state FROM app.matches WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`, [matchId]);
       const match = mRes.rows[0];
       if (!match) {
         await client.query('ROLLBACK');
@@ -1151,7 +1161,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
 
     const matchId = req.params.id;
     const mRes = await pool.query<{ owner_principal_id: string; state: string }>(
-      `SELECT owner_principal_id, state FROM app.matches WHERE id = $1`,
+      `SELECT owner_principal_id, state FROM app.matches WHERE id = $1 AND deleted_at IS NULL`,
       [matchId],
     );
     const match = mRes.rows[0];
@@ -1227,7 +1237,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
       }>(
         `SELECT id, owner_principal_id, player_count, rules_hash, state
          FROM app.matches
-         WHERE id = $1
+         WHERE id = $1 AND deleted_at IS NULL
          FOR UPDATE`,
         [matchId],
       );
@@ -1402,7 +1412,7 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         rules_hash: string;
         state: string;
         version: string;
-      }>(`SELECT * FROM app.matches WHERE id = $1 FOR UPDATE`, [matchId]);
+      }>(`SELECT * FROM app.matches WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`, [matchId]);
       const match = mRes.rows[0];
       if (!match) {
         await client.query('ROLLBACK');
@@ -1558,5 +1568,243 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     } finally {
       client.release();
     }
+  });
+
+  // DELETE /api/matches/:id -> { deleted: true }
+  app.delete<{ Params: { id: string } }>('/api/matches/:id', async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+
+    const matchId = req.params.id;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const mRes = await client.query<{
+        id: string;
+        owner_principal_id: string;
+        state: string;
+        version: string;
+      }>(
+        `SELECT id, owner_principal_id, state, version
+         FROM app.matches
+         WHERE id = $1 AND deleted_at IS NULL
+         FOR UPDATE`,
+        [matchId],
+      );
+      const match = mRes.rows[0];
+      if (!match) {
+        await client.query('ROLLBACK');
+        return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
+      }
+
+      if (match.owner_principal_id !== principal.id) {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'forbidden', message: 'Only the match owner can delete the match' });
+      }
+
+      const evFinalized = await client.query(
+        `SELECT 1 FROM app.match_events WHERE match_id = $1 AND type = 'seats_finalized' LIMIT 1`,
+        [matchId],
+      );
+      if (match.state !== 'preparing' || (evFinalized.rowCount ?? 0) > 0) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({
+          error: 'match_not_deletable',
+          message: 'Match cannot be deleted after seats are finalized or started',
+        });
+      }
+
+      const newSeq = Number(match.version) + 1;
+      const reqHash = createHash('sha256').update(`room_deleted:${matchId}`).digest('hex');
+      const evRes = await client.query<{ id: string }>(
+        `INSERT INTO app.match_events (
+           match_id, seq, hand_id, actor_principal_id, client_event_id, request_hash, type, payload
+         )
+         VALUES ($1, $2, NULL, $3, $4, $5, 'room_deleted', $6::jsonb)
+         RETURNING id`,
+        [matchId, newSeq, principal.id, randomUUID(), reqHash, JSON.stringify({ matchId, deletedBy: principal.id })],
+      );
+
+      await client.query(
+        `INSERT INTO app.outbox_messages (event_id, topic, payload, published_at)
+         VALUES ($1, 'match_events', $2::jsonb, now())`,
+        [evRes.rows[0].id, JSON.stringify({ type: 'room_deleted', matchId, deletedBy: principal.id })],
+      );
+
+      await client.query(
+        `UPDATE app.matches
+         SET deleted_at = now(),
+             version = $1
+         WHERE id = $2`,
+        [newSeq, matchId],
+      );
+
+      await client.query('COMMIT');
+
+      broadcastMatchEvent(matchId, 'room_deleted', { matchId });
+
+      return { deleted: true };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  });
+
+  // POST /api/matches/:id/leave -> { left: true }
+  app.post<{ Params: { id: string } }>('/api/matches/:id/leave', async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+
+    const matchId = req.params.id;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const mRes = await client.query<{
+        id: string;
+        owner_principal_id: string;
+        state: string;
+      }>(
+        `SELECT id, owner_principal_id, state
+         FROM app.matches
+         WHERE id = $1 AND deleted_at IS NULL
+         FOR UPDATE`,
+        [matchId],
+      );
+      const match = mRes.rows[0];
+      if (!match) {
+        await client.query('ROLLBACK');
+        return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
+      }
+
+      const memRes = await client.query<{ id: string; status: string }>(
+        `SELECT id, status
+         FROM app.match_members
+         WHERE match_id = $1 AND principal_id = $2
+         FOR UPDATE`,
+        [matchId, principal.id],
+      );
+      const member = memRes.rows[0];
+      if (!member || member.status !== 'active') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'forbidden', message: 'Caller is not an active participant of this match' });
+      }
+
+      if (match.owner_principal_id === principal.id) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({ error: 'owner_must_delete', message: 'Match owner cannot leave; use delete instead' });
+      }
+
+      const evFinalized = await client.query(
+        `SELECT 1 FROM app.match_events WHERE match_id = $1 AND type = 'seats_finalized' LIMIT 1`,
+        [matchId],
+      );
+      if (match.state !== 'preparing' || (evFinalized.rowCount ?? 0) > 0) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({
+          error: 'match_already_started',
+          message: 'Cannot leave after seats are finalized or match started',
+        });
+      }
+
+      await client.query(
+        `UPDATE app.match_members
+         SET status = 'left',
+             removed_at = now(),
+             hidden_at = now()
+         WHERE id = $1`,
+        [member.id],
+      );
+
+      await client.query(
+        `UPDATE app.check_ins
+         SET invalidated_at = now()
+         WHERE match_id = $1
+           AND member_id = $2
+           AND invalidated_at IS NULL`,
+        [matchId, member.id],
+      );
+
+      await client.query(
+        `UPDATE app.seat_assignments
+         SET end_hand_no = start_hand_no
+         WHERE match_id = $1
+           AND member_id = $2
+           AND end_hand_no IS NULL`,
+        [matchId, member.id],
+      );
+
+      await client.query('COMMIT');
+
+      return { left: true };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  });
+
+  // POST /api/matches/:id/hide -> { hidden: true }
+  app.post<{ Params: { id: string } }>('/api/matches/:id/hide', async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+
+    const matchId = req.params.id;
+    const mRes = await pool.query<{ id: string; deleted_at: Date | null }>(
+      `SELECT id, deleted_at FROM app.matches WHERE id = $1`,
+      [matchId],
+    );
+    const match = mRes.rows[0];
+    if (!match || match.deleted_at !== null) {
+      return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
+    }
+
+    const memRes = await pool.query<{ id: string; status: string }>(
+      `SELECT id, status FROM app.match_members WHERE match_id = $1 AND principal_id = $2 AND status = 'active'`,
+      [matchId, principal.id],
+    );
+    if ((memRes.rowCount ?? 0) === 0) {
+      return reply.code(403).send({ error: 'forbidden', message: 'Only active match participants can hide history' });
+    }
+
+    await pool.query(
+      `UPDATE app.match_members SET hidden_at = now() WHERE match_id = $1 AND principal_id = $2 AND status = 'active'`,
+      [matchId, principal.id],
+    );
+
+    return { hidden: true };
+  });
+
+  // POST /api/matches/:id/unhide -> { hidden: false }
+  app.post<{ Params: { id: string } }>('/api/matches/:id/unhide', async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+
+    const matchId = req.params.id;
+    const mRes = await pool.query<{ id: string; deleted_at: Date | null }>(
+      `SELECT id, deleted_at FROM app.matches WHERE id = $1`,
+      [matchId],
+    );
+    const match = mRes.rows[0];
+    if (!match || match.deleted_at !== null) {
+      return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
+    }
+
+    const memRes = await pool.query<{ id: string; status: string }>(
+      `SELECT id, status FROM app.match_members WHERE match_id = $1 AND principal_id = $2 AND status = 'active'`,
+      [matchId, principal.id],
+    );
+    if ((memRes.rowCount ?? 0) === 0) {
+      return reply.code(403).send({ error: 'forbidden', message: 'Only active match participants can unhide history' });
+    }
+
+    await pool.query(
+      `UPDATE app.match_members SET hidden_at = NULL WHERE match_id = $1 AND principal_id = $2 AND status = 'active'`,
+      [matchId, principal.id],
+    );
+
+    return { hidden: false };
   });
 }

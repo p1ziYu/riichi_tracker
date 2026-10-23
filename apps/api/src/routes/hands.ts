@@ -631,7 +631,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         current_hand_id: string | null;
         player_count: number;
         rules_snapshot: Record<string, unknown>;
-      }>(`SELECT id, state, version, current_hand_id, player_count, rules_snapshot FROM app.matches WHERE id = $1 FOR UPDATE`, [matchId]);
+      }>(`SELECT id, state, version, current_hand_id, player_count, rules_snapshot FROM app.matches WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`, [matchId]);
       const match = mRes.rows[0];
       if (!match) {
         await client.query('ROLLBACK');
@@ -891,7 +891,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         rules_snapshot: Record<string, unknown>;
         state: string;
         version: string;
-      }>(`SELECT id, player_count, rules_snapshot, state, version FROM app.matches WHERE id = $1 FOR UPDATE`, [matchId]);
+      }>(`SELECT id, player_count, rules_snapshot, state, version FROM app.matches WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`, [matchId]);
       const match = mRes.rows[0];
       if (!match) {
         await client.query('ROLLBACK');
@@ -1089,7 +1089,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
       rules_snapshot: Record<string, unknown>;
       rules_hash: string;
       engine_version: string;
-    }>(`SELECT id, player_count, rules_snapshot, rules_hash, engine_version FROM app.matches WHERE id = $1`, [matchId]);
+    }>(`SELECT id, player_count, rules_snapshot, rules_hash, engine_version FROM app.matches WHERE id = $1 AND deleted_at IS NULL`, [matchId]);
     const match = mRes.rows[0];
     if (!match) {
       return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
@@ -1257,7 +1257,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         engine_version: string;
         state: string;
         version: string;
-      }>(`SELECT * FROM app.matches WHERE id = $1 FOR UPDATE`, [matchId]);
+      }>(`SELECT * FROM app.matches WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`, [matchId]);
       const match = mRes.rows[0];
       if (!match) {
         await client.query('ROLLBACK');
@@ -1814,7 +1814,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         rules_hash: string;
         state: string;
         version: string;
-      }>(`SELECT * FROM app.matches WHERE id = $1 FOR UPDATE`, [matchId]);
+      }>(`SELECT * FROM app.matches WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`, [matchId]);
       const match = mRes.rows[0];
       if (!match) {
         await client.query('ROLLBACK');
@@ -1923,7 +1923,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
       player_count: number;
       rules_snapshot: Record<string, unknown>;
       rules_hash: string;
-    }>(`SELECT id, player_count, rules_snapshot, rules_hash FROM app.matches WHERE id = $1`, [matchId]);
+    }>(`SELECT id, player_count, rules_snapshot, rules_hash FROM app.matches WHERE id = $1 AND deleted_at IS NULL`, [matchId]);
     const match = mRes.rows[0];
     if (!match) {
       return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
@@ -2002,7 +2002,7 @@ export function registerHandsRoutes(app: FastifyInstance): void {
         rules_hash: string;
         state: string;
         version: string;
-      }>(`SELECT * FROM app.matches WHERE id = $1 FOR UPDATE`, [matchId]);
+      }>(`SELECT * FROM app.matches WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`, [matchId]);
       const match = mRes.rows[0];
       if (!match) {
         await client.query('ROLLBACK');

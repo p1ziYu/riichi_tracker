@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { calculateSettlement, ENGINE_VERSION } from '@riichi/engine';
 import type { SettlementOutput } from '@riichi/engine';
@@ -16,7 +16,17 @@ import Segmented from './Segmented';
 import './style.css';
 
 type Principal = { id: string; type: 'account' | 'guest'; displayName: string };
-type MatchSummary = { id: string; status: string; playerCount: number; createdAt: string; name?: string; rulesSnapshot?: Record<string, unknown>; rulesetVersionId?: string };
+type MatchSummary = {
+  id: string;
+  status: string;
+  playerCount: number;
+  createdAt: string;
+  name?: string;
+  rulesSnapshot?: Record<string, unknown>;
+  rulesetVersionId?: string;
+  hidden?: boolean;
+  isOwner?: boolean;
+};
 const kindLabels: Record<string, string> = { '4p': '四麻', '3p': '三麻' };
 type ServerTemplate = { templateId: string; templateKey: string; kind: string; scope: string; versionId: string; name: string; reviewStatus: string; config: TableRules };
 const reviewLabels: Record<string, string> = {
@@ -40,22 +50,143 @@ function Shell({ children, principal }: { children: React.ReactNode; principal: 
   </div>;
 }
 
-function MatchList() {
-  const [matches, setMatches] = useState<MatchSummary[] | null>(null);
+export function MatchList({
+  initialMatches = null,
+  initialShowHidden = false,
+}: {
+  initialMatches?: MatchSummary[] | null;
+  initialShowHidden?: boolean;
+} = {}) {
+  const [matches, setMatches] = useState<MatchSummary[] | null>(initialMatches);
   const [error, setError] = useState('');
   const [templateNames, setTemplateNames] = useState<Record<string, string>>({});
+  const [showHidden, setShowHidden] = useState(initialShowHidden);
+  const [undoToast, setUndoToast] = useState<{ id: string } | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const fetchMatches = useCallback(async () => {
+    if (initialMatches !== null) return;
+    try {
+      const url = showHidden ? '/api/matches?mine=1&includeHidden=1' : '/api/matches?mine=1';
+      const data = await api<MatchSummary[]>(url);
+      setMatches(data);
+      setError('');
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+  }, [showHidden, initialMatches]);
+
+  useEffect(() => {
+    if (initialMatches !== null) return;
+    void fetchMatches();
+  }, [fetchMatches, initialMatches]);
+
   useEffect(() => {
     let alive = true;
-    api<MatchSummary[]>('/api/matches?mine=1').then((data) => { if (alive) setMatches(data); }).catch((cause: unknown) => { if (alive) setError(errorText(cause)); });
     api<ServerTemplate[]>('/api/rulesets/templates').then((data) => {
       if (alive) setTemplateNames(Object.fromEntries(data.map((template) => [template.versionId, template.name])));
     }).catch(() => {});
     return () => { alive = false; };
   }, []);
-  return <>{error && <div className="notice invalid" role="alert">读取战绩失败：{error}</div>}{!error && !matches && <p className="muted">正在读取战绩…</p>}{matches && (matches.length ? <div className="history-list">{matches.map((match) => {
-    const summary = snapshotRuleSummary(match.rulesSnapshot, templateNames[match.rulesetVersionId ?? ''] ?? match.name ?? '规则模板');
-    return <Link className="history-row" to={`/table/${match.id}`} key={match.id}><span className="tile-mini">中</span><div><strong>牌桌 {match.id}</strong><small>{match.playerCount} 麻 · {new Date(match.createdAt).toLocaleString('zh-CN')}</small><small>{summary.title}{summary.changes.length ? ` · ${summary.changes.join('、')}` : ''}</small></div><b>{matchLabels[match.status] ?? match.status}</b><em>查看牌桌 →</em></Link>;
-  })}</div> : <div className="empty">暂无对局记录。</div>)}</>;
+
+  useEffect(() => {
+    if (!undoToast) return;
+    const timer = window.setTimeout(() => setUndoToast(null), 6000);
+    return () => window.clearTimeout(timer);
+  }, [undoToast]);
+
+  const handleDelete = async (matchId: string) => {
+    if (!window.confirm('确定删除此牌桌？此操作无法撤销。')) return;
+    setBusyId(matchId);
+    try {
+      await api(`/api/matches/${encodeURIComponent(matchId)}`, { method: 'DELETE' });
+      await fetchMatches();
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleLeave = async (matchId: string) => {
+    if (!window.confirm('确定退出此牌桌？')) return;
+    setBusyId(matchId);
+    try {
+      await post(`/api/matches/${encodeURIComponent(matchId)}/leave`, {});
+      await fetchMatches();
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleHide = async (matchId: string) => {
+    setBusyId(matchId);
+    try {
+      await post(`/api/matches/${encodeURIComponent(matchId)}/hide`, {});
+      setUndoToast({ id: matchId });
+      await fetchMatches();
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleUnhide = async (matchId: string) => {
+    setBusyId(matchId);
+    try {
+      await post(`/api/matches/${encodeURIComponent(matchId)}/unhide`, {});
+      if (undoToast?.id === matchId) setUndoToast(null);
+      await fetchMatches();
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return <>
+    <div className="history-toolbar">
+      <button
+        type="button"
+        className="text-button"
+        aria-pressed={showHidden}
+        onClick={() => setShowHidden((v) => !v)}
+      >
+        显示已隐藏
+      </button>
+    </div>
+    {error && <div className="notice invalid" role="alert">读取战绩失败：{error}</div>}
+    {!error && !matches && <p className="muted">正在读取战绩…</p>}
+    {matches && (matches.length ? <div className="history-list">{matches.map((match) => {
+      const summary = snapshotRuleSummary(match.rulesSnapshot, templateNames[match.rulesetVersionId ?? ''] ?? match.name ?? '规则模板');
+      const isUnfinalized = ['preparing', 'lobby'].includes(match.status);
+      const isFinished = ['finished', 'completed'].includes(match.status);
+      return <div className="history-row" key={match.id}>
+        <span className="tile-mini">中</span>
+        <div>
+          <strong>牌桌 {match.id}</strong>
+          <small>{match.playerCount} 麻 · {new Date(match.createdAt).toLocaleString('zh-CN')}</small>
+          <small>{summary.title}{summary.changes.length ? ` · ${summary.changes.join('、')}` : ''}</small>
+        </div>
+        {match.hidden && <span className="tag">已隐藏</span>}
+        <b>{matchLabels[match.status] ?? match.status}</b>
+        <Link to={`/table/${match.id}`}>查看牌桌 →</Link>
+        {match.hidden ? (
+          <button type="button" className="text-button" disabled={busyId === match.id} onClick={() => void handleUnhide(match.id)}>取消隐藏</button>
+        ) : isUnfinalized && match.isOwner ? (
+          <button type="button" className="text-button danger" disabled={busyId === match.id} onClick={() => void handleDelete(match.id)}>删除</button>
+        ) : isUnfinalized && !match.isOwner ? (
+          <button type="button" className="text-button" disabled={busyId === match.id} onClick={() => void handleLeave(match.id)}>移除</button>
+        ) : isFinished ? (
+          <button type="button" className="text-button" disabled={busyId === match.id} onClick={() => void handleHide(match.id)}>隐藏</button>
+        ) : null}
+      </div>;
+    })}</div> : <div className="empty">暂无对局记录。</div>)}
+    {undoToast && <div className="undo-toast" role="status"><span>已隐藏对局记录</span><button type="button" className="text-button" onClick={() => void handleUnhide(undoToast.id)}>撤销</button></div>}
+  </>;
 }
 
 function LocalMatchList({ lobby = false }: { lobby?: boolean }) {

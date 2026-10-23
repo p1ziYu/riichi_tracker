@@ -420,11 +420,11 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       'Ticket POST size denial does not leak parser details');
     const anonymousHead = await fetch(`${baseUrl}/api/matches/${matchId}`, { method: 'HEAD' });
     checkEq(anonymousHead.status, 401, 'Implicit HEAD route preserves GET match authentication');
-    const unsupportedDelete = await fetch(`${baseUrl}/api/matches/${matchId}`, {
-      method: 'DELETE',
+    const unsupportedPatch = await fetch(`${baseUrl}/api/matches/${matchId}`, {
+      method: 'PATCH',
       headers: { authorization: `Bearer ${acct1.token}` },
     });
-    checkEq(unsupportedDelete.status, 404, 'Unsupported write method does not reach match handlers');
+    checkEq(unsupportedPatch.status, 404, 'Unsupported write method does not reach match handlers');
 
     // M8: ad-hoc configs retain only canonical honba/ryuukyoku fields;
     // stale aliases from the enriched template must not override edits.
@@ -2055,6 +2055,333 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       blockedWs.addEventListener('close', (event) => resolve(event.code));
     });
     checkEq(closeCode, 1008, 'Signed-out WS ticket closes with policy violation 1008');
+
+    // --- Stage B Part 1: History Delete, Hide, Leave, and WebSocket room_deleted ---
+    const strangerAcct = await registerEmailAccount(`stranger_${runId}@example.com`, '局外人');
+
+    // 1. DELETE finished match -> 409 match_not_deletable
+    const delFinished = await requestJson<{ error: string }>(`/api/matches/${matchId}`, {
+      method: 'DELETE',
+      cookie: acct1.cookie,
+    });
+    checkEq([delFinished.status, delFinished.data.error], [409, 'match_not_deletable'],
+      'Host cannot delete a finished match');
+
+    // 2. Hide / unhide on finished match
+    const strangerHide = await requestJson<{ error: string }>(`/api/matches/${matchId}/hide`, {
+      method: 'POST',
+      cookie: strangerAcct.cookie,
+    });
+    checkEq(strangerHide.status, 403, 'Non-participant cannot hide match');
+
+    const hideRes = await requestJson<{ hidden: boolean }>(`/api/matches/${matchId}/hide`, {
+      method: 'POST',
+      cookie: acct1.cookie,
+    });
+    checkEq([hideRes.status, hideRes.data.hidden], [200, true], 'Participant hides finished match');
+    const hideAgain = await requestJson<{ hidden: boolean }>(`/api/matches/${matchId}/hide`, {
+      method: 'POST',
+      cookie: acct1.cookie,
+    });
+    checkEq([hideAgain.status, hideAgain.data.hidden], [200, true], 'Hide is idempotent');
+
+    const acct1List = await requestJson<{ id: string }[]>('/api/matches?mine=1', {
+      cookie: acct1.cookie,
+    });
+    check(!acct1List.data.some((m) => m.id === matchId), 'Hider default list excludes hidden match');
+
+    const guest1List = await requestJson<{ id: string }[]>('/api/matches?mine=1', {
+      cookie: guest1.cookie,
+    });
+    check(guest1List.data.some((m) => m.id === matchId), 'Other participant list still includes the match');
+
+    const withHidden = await requestJson<{ id: string; hidden: boolean; isOwner: boolean }[]>(
+      '/api/matches?mine=1&includeHidden=1',
+      { cookie: acct1.cookie },
+    );
+    const foundHidden = withHidden.data.find((m) => m.id === matchId);
+    check(Boolean(foundHidden), 'includeHidden=1 includes hidden match');
+    checkEq(foundHidden?.hidden, true, 'Hidden match has hidden: true');
+    checkEq(foundHidden?.isOwner, true, 'isOwner is true for host in list');
+
+    const unhideRes = await requestJson<{ hidden: boolean }>(`/api/matches/${matchId}/unhide`, {
+      method: 'POST',
+      cookie: acct1.cookie,
+    });
+    checkEq([unhideRes.status, unhideRes.data.hidden], [200, false], 'Participant unhides match');
+    const restoredList = await requestJson<{ id: string }[]>('/api/matches?mine=1', {
+      cookie: acct1.cookie,
+    });
+    check(restoredList.data.some((m) => m.id === matchId), 'Unhide restores match in default list');
+
+    // 3. Host deletes preparing match with WebSocket notification
+    const delMatchCreate = await requestJson<{ match: { id: string } }>('/api/matches', {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: { rulesetVersionId: house4p!.versionId },
+    });
+    checkEq(delMatchCreate.status, 200, 'Create match for delete test');
+    const delMatchId = delMatchCreate.data.match.id;
+
+    const delViewer = await registerEmailAccount(`delviewer_${runId}@example.com`, '删除观察者');
+    const delJoin = await requestJson<{ joinRequestId: string }>(`/api/matches/${delMatchId}/join-requests`, {
+      method: 'POST',
+      cookie: delViewer.cookie,
+      body: { requestedSeatNo: 1 },
+    });
+    await requestJson(`/api/matches/${delMatchId}/join-requests/${delJoin.data.joinRequestId}/approve`, {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: { seatNo: 1 },
+    });
+
+    const delSubTicket = await requestJson<{ ticket: string }>(`/api/matches/${delMatchId}/ws-tickets`, {
+      method: 'POST',
+      cookie: delViewer.cookie,
+      body: {},
+    });
+    checkEq(delSubTicket.status, 200, 'Participant mints WS ticket on deletable match');
+    const delWs = new WebSocket(`${wsBaseUrl}/ws/matches/${delMatchId}?ticket=${encodeURIComponent(delSubTicket.data.ticket)}`);
+    const delWsOpen = Promise.withResolvers<void>();
+    const roomDeletedReceived = Promise.withResolvers<{ matchId: string }>();
+    delWs.addEventListener('open', () => delWsOpen.resolve());
+    delWs.addEventListener('message', (ev) => {
+      try {
+        const msg = JSON.parse(String(ev.data));
+        if (msg.type === 'room_deleted') {
+          roomDeletedReceived.resolve(msg.payload);
+        }
+      } catch {}
+    });
+    await delWsOpen.promise;
+
+    const nonOwnerDel = await requestJson(`/api/matches/${delMatchId}`, {
+      method: 'DELETE',
+      cookie: delViewer.cookie,
+    });
+    checkEq(nonOwnerDel.status, 403, 'Non-owner participant DELETE returns 403');
+
+    const strangerDel = await requestJson(`/api/matches/${delMatchId}`, {
+      method: 'DELETE',
+      cookie: strangerAcct.cookie,
+    });
+    check(strangerDel.status === 403 || strangerDel.status === 404, 'Stranger DELETE returns 403 or 404');
+
+    const hostDel = await requestJson<{ deleted: boolean }>(`/api/matches/${delMatchId}`, {
+      method: 'DELETE',
+      cookie: acct1.cookie,
+    });
+    checkEq([hostDel.status, hostDel.data.deleted], [200, true], 'Host DELETE returns 200 { deleted: true }');
+
+    const delWsPayload = await roomDeletedReceived.promise;
+    checkEq(delWsPayload.matchId, delMatchId, 'Connected viewer receives room_deleted WS event with matchId');
+    delWs.close();
+
+    const postDelGet = await requestJson(`/api/matches/${delMatchId}`, { cookie: acct1.cookie });
+    checkEq(postDelGet.status, 404, 'Subsequent GET on deleted match returns 404');
+
+    const postDelList = await requestJson<{ id: string }[]>('/api/matches?mine=1&includeHidden=1', {
+      cookie: acct1.cookie,
+    });
+    check(!postDelList.data.some((m) => m.id === delMatchId), 'Deleted match excluded from list even with includeHidden=1');
+
+    const delEv = await pool.query<{ type: string }>(
+      `SELECT type FROM app.match_events WHERE match_id = $1 AND type = 'room_deleted'`,
+      [delMatchId],
+    );
+    checkEq(delEv.rows.length, 1, 'room_deleted event appended in match_events');
+
+    const delAgain = await requestJson(`/api/matches/${delMatchId}`, {
+      method: 'DELETE',
+      cookie: acct1.cookie,
+    });
+    checkEq(delAgain.status, 404, 'Deleting twice returns 404 (already tombstoned)');
+
+    const rejectedJoin = await requestJson(`/api/matches/${delMatchId}/join-requests`, {
+      method: 'POST',
+      cookie: delViewer.cookie,
+      body: { requestedSeatNo: 2 },
+    });
+    checkEq(rejectedJoin.status, 404, 'Join request on deleted match is rejected with 404');
+
+    const rejectedFinalize = await requestJson(`/api/matches/${delMatchId}/seats/finalize`, {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: {},
+    });
+    checkEq(rejectedFinalize.status, 404, 'Seats finalize on deleted match is rejected with 404');
+
+    // 4. Finalized match DELETE rejection and leave-after-finalize rejection
+    const playerB = await registerEmailAccount(`playerB_${runId}@example.com`, '会员B');
+    const playerC = await registerEmailAccount(`playerC_${runId}@example.com`, '会员C');
+    const playerD = await registerEmailAccount(`playerD_${runId}@example.com`, '会员D');
+    const finMatchId = await startReadyMatch(house4p!.versionId, [acct1, playerB, playerC, playerD]);
+
+    const finDel = await requestJson<{ error: string }>(`/api/matches/${finMatchId}`, {
+      method: 'DELETE',
+      cookie: acct1.cookie,
+    });
+    checkEq([finDel.status, finDel.data.error], [409, 'match_not_deletable'],
+      'DELETE after finalize returns 409 match_not_deletable');
+
+    const finLeave = await requestJson<{ error: string }>(`/api/matches/${finMatchId}/leave`, {
+      method: 'POST',
+      cookie: playerB.cookie,
+    });
+    checkEq([finLeave.status, finLeave.data.error], [409, 'match_already_started'],
+      'Leave after finalize returns 409 match_already_started');
+
+    // 5. Guest leave flow in preparing match
+    const leaveMatchCreate = await requestJson<{ match: { id: string } }>('/api/matches', {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: { rulesetVersionId: house4p!.versionId },
+    });
+    checkEq(leaveMatchCreate.status, 200, 'Create match for leave flow');
+    const leaveMatchId = leaveMatchCreate.data.match.id;
+
+    const ownerClaimLeaveMatch = await requestJson(`/api/matches/${leaveMatchId}/seats/claim`, {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: { seatNo: 0 },
+    });
+    checkEq(ownerClaimLeaveMatch.status, 200, 'Host claims seat 0 in leave match');
+
+    const leaverUser = await registerEmailAccount(`leaver_${runId}@example.com`, '退出玩家');
+    const leaverJoin = await requestJson<{ joinRequestId: string }>(`/api/matches/${leaveMatchId}/join-requests`, {
+      method: 'POST',
+      cookie: leaverUser.cookie,
+      body: { requestedSeatNo: 1 },
+    });
+    checkEq(leaverJoin.status, 200, 'Guest requests seat 1');
+
+    const approveLeaver = await requestJson(`/api/matches/${leaveMatchId}/join-requests/${leaverJoin.data.joinRequestId}/approve`, {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: { seatNo: 1 },
+    });
+    checkEq(approveLeaver.status, 200, 'Host approves guest seat 1');
+
+    const tokenForLeaver = await requestJson<{ token: string }>(`/api/matches/${leaveMatchId}/check-in-tokens`, {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: {},
+    });
+    checkEq(tokenForLeaver.status, 200, 'Host issues check-in token');
+
+    const leaverCheckIn = await requestJson(`/api/matches/${leaveMatchId}/check-ins`, {
+      method: 'POST',
+      cookie: leaverUser.cookie,
+      body: { token: tokenForLeaver.data.token },
+    });
+    checkEq(leaverCheckIn.status, 200, 'Guest checks in to seat 1');
+
+    // Host view before leave shows 2 checked in
+    const beforeLeaveView = await requestJson<{ seats: { seatNo: number; status: string; principalId: string | null }[]; checkedIn: number }>(
+      `/api/matches/${leaveMatchId}`,
+      { cookie: acct1.cookie },
+    );
+    checkEq(beforeLeaveView.data.checkedIn, 2, 'Two players checked in before leave');
+    checkEq(beforeLeaveView.data.seats[1].status, 'checked_in', 'Guest is checked_in at seat 1');
+
+    // Owner calling leave -> 409 owner_must_delete
+    const ownerLeaveAttempt = await requestJson<{ error: string }>(`/api/matches/${leaveMatchId}/leave`, {
+      method: 'POST',
+      cookie: acct1.cookie,
+    });
+    checkEq([ownerLeaveAttempt.status, ownerLeaveAttempt.data.error], [409, 'owner_must_delete'],
+      'Owner calling leave returns 409 owner_must_delete');
+
+    // Non-participant calling leave -> 403
+    const strangerLeaveAttempt = await requestJson(`/api/matches/${leaveMatchId}/leave`, {
+      method: 'POST',
+      cookie: strangerAcct.cookie,
+    });
+    checkEq(strangerLeaveAttempt.status, 403, 'Non-participant calling leave returns 403');
+
+    // Guest calls leave -> 200 { left: true }
+    const leaveResult = await requestJson<{ left: boolean }>(`/api/matches/${leaveMatchId}/leave`, {
+      method: 'POST',
+      cookie: leaverUser.cookie,
+    });
+    checkEq([leaveResult.status, leaveResult.data.left], [200, true], 'Guest leave returns 200 { left: true }');
+
+    // DB checks for member status, removed_at, hidden_at, invalidated check-in
+    const leaverMemberDb = await pool.query<{ status: string; removed_at: Date | null; hidden_at: Date | null }>(
+      `SELECT status, removed_at, hidden_at FROM app.match_members WHERE match_id = $1 AND principal_id = $2`,
+      [leaveMatchId, leaverUser.principalId],
+    );
+    checkEq(leaverMemberDb.rows[0].status, 'left', 'Leaver status updated to left');
+    check(Boolean(leaverMemberDb.rows[0].removed_at), 'Leaver removed_at is set');
+    check(Boolean(leaverMemberDb.rows[0].hidden_at), 'Leaver hidden_at is set');
+
+    const leaverCheckInDb = await pool.query<{ count: string }>(
+      `SELECT count(*) FROM app.check_ins WHERE match_id = $1 AND member_id = (
+         SELECT id FROM app.match_members WHERE match_id = $1 AND principal_id = $2
+       ) AND invalidated_at IS NOT NULL`,
+      [leaveMatchId, leaverUser.principalId],
+    );
+    checkEq(Number(leaverCheckInDb.rows[0].count), 1, 'Leaver check-in row was invalidated');
+
+    // Fresh host view shows seat 1 vacant, checkedIn == 1
+    const afterLeaveView = await requestJson<{ seats: { seatNo: number; status: string; principalId: string | null }[]; checkedIn: number }>(
+      `/api/matches/${leaveMatchId}`,
+      { cookie: acct1.cookie },
+    );
+    checkEq(afterLeaveView.data.checkedIn, 1, 'Only host remains checked in after guest leaves');
+    checkEq(afterLeaveView.data.seats[1].status, 'empty', 'Seat 1 is empty in host view after guest leaves');
+    checkEq(afterLeaveView.data.seats[1].principalId, null, 'Seat 1 principalId is null in host view');
+
+    // Match absent from guest's list
+    const leaverList = await requestJson<{ id: string }[]>('/api/matches?mine=1', {
+      cookie: leaverUser.cookie,
+    });
+    check(!leaverList.data.some((m) => m.id === leaveMatchId), 'Match is absent from leaver match list');
+
+    // Redeeming / using check-in by left guest fails
+    const newTokenForReCheckIn = await requestJson<{ token: string }>(`/api/matches/${leaveMatchId}/check-in-tokens`, {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: {},
+    });
+    const reCheckInAttempt = await requestJson(`/api/matches/${leaveMatchId}/check-ins`, {
+      method: 'POST',
+      cookie: leaverUser.cookie,
+      body: { token: newTokenForReCheckIn.data.token },
+    });
+    checkEq(reCheckInAttempt.status, 403, 'Left guest cannot check in');
+
+    // Seat claim by replacement guest succeeds
+    const replacementUser = await registerEmailAccount(`replacement_${runId}@example.com`, '补位玩家');
+    const replacementJoin = await requestJson<{ joinRequestId: string }>(`/api/matches/${leaveMatchId}/join-requests`, {
+      method: 'POST',
+      cookie: replacementUser.cookie,
+      body: { requestedSeatNo: 1 },
+    });
+    checkEq(replacementJoin.status, 200, 'Replacement guest can request vacated seat 1');
+
+    const approveReplacement = await requestJson(`/api/matches/${leaveMatchId}/join-requests/${replacementJoin.data.joinRequestId}/approve`, {
+      method: 'POST',
+      cookie: acct1.cookie,
+      body: { seatNo: 1 },
+    });
+    checkEq(approveReplacement.status, 200, 'Host can approve replacement guest into vacated seat 1');
+
+    const checkInReplacement = await requestJson(`/api/matches/${leaveMatchId}/check-ins`, {
+      method: 'POST',
+      cookie: replacementUser.cookie,
+      body: { token: newTokenForReCheckIn.data.token },
+    });
+    checkEq(checkInReplacement.status, 200, 'Replacement guest successfully checks into vacated seat 1');
+
+    const finalView = await requestJson<{ seats: { seatNo: number; status: string; principalId: string | null }[]; checkedIn: number }>(
+      `/api/matches/${leaveMatchId}`,
+      { cookie: acct1.cookie },
+    );
+    checkEq(finalView.data.checkedIn, 2, 'Host and replacement guest are both checked in');
+    checkEq(finalView.data.seats[1].status, 'checked_in', 'Vacated seat 1 is now checked_in by replacement');
+    checkEq(finalView.data.seats[1].principalId, replacementUser.principalId, 'Seat 1 belongs to replacement guest');
+
 
     return { assertionsPassed };
   } finally {

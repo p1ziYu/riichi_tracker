@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { ResultInput } from '@riichi/engine';
 import { ApiError, api, errorText, post, webSocketUrl } from './api';
 import { pointText, snapshotRuleSummary, winds } from './rules';
@@ -109,6 +109,8 @@ function nextHandText(nextHand: PaymentPreview['nextHand']): string {
 
 export default function Table() {
   const { id } = useParams();
+  const navigate = useNavigate();
+  const [deletedNotice, setDeletedNotice] = useState(false);
   const base = `/api/matches/${encodeURIComponent(id ?? '')}`;
   const requestRef = useRef(0);
   const [loaded, setLoaded] = useState<{ id: string; value: MatchState } | null>(null);
@@ -226,7 +228,21 @@ export default function Table() {
           setConnectionError('');
           void refresh().catch(() => {});
         };
-        ws.onmessage = () => { if (!stopped) void refresh().catch(() => {}); };
+        ws.onmessage = (event) => {
+          if (stopped) return;
+          try {
+            const data = typeof event.data === 'string' ? JSON.parse(event.data) : null;
+            if (data?.type === 'room_deleted') {
+              setDeletedNotice(true);
+              setActionError('牌桌已被房主删除');
+              window.setTimeout(() => {
+                if (!stopped) navigate('/history', { replace: true });
+              }, 1500);
+              return;
+            }
+          } catch {}
+          void refresh().catch(() => {});
+        };
         ws.onerror = () => { setConnectionError('实时连接失败'); ws.close(); };
         ws.onclose = () => {
           if (socket !== ws) return;
@@ -446,6 +462,7 @@ export default function Table() {
       实时连接：{connectionError || '当前离线或页面处于后台'}。{connection === '连接已断开' ? '实时同步已暂停，可手动刷新牌桌。' : '正在尝试重新连接。'}
       {connection === '连接已断开' && <button type="button" onClick={() => setRetryConnection((count) => count + 1)}>重连</button>}
     </div>}
+    {deletedNotice && <div className="notice invalid" role="alert">牌桌已被房主删除</div>}
     {loadError && loadError.id === id && <div className="notice invalid" role="alert">读取牌桌失败：{loadError.message}<button type="button" onClick={() => void refresh().catch(() => {})}>重试读取</button></div>}
     {actionError && <div className="notice invalid" role="alert">{actionError}</div>}
     {!state && loadError?.id !== id && <p className="notice" role="status">正在读取牌桌…</p>}

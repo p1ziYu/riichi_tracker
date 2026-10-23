@@ -16,7 +16,8 @@ export type WsEventType =
   | 'marks_changed'
   | 'hand_settled'
   | 'match_finished'
-  | 'settlement_confirmed';
+  | 'settlement_confirmed'
+  | 'room_deleted';
 
 interface MatchConnection {
   socket: WebSocket;
@@ -55,12 +56,15 @@ export function broadcastMatchEvent(matchId: string, type: WsEventType, payload:
       if (connection.socket.readyState !== 1) return;
       if (
         !(await hasLiveSession(connection.authSessionRef, connection.principalId)) ||
-        (await checkMatchAccess(matchId, connection.principalId)) !== 'allowed'
+        (type !== 'room_deleted' && (await checkMatchAccess(matchId, connection.principalId)) !== 'allowed')
       ) {
         connection.socket.close(1008, 'Session revoked or match access denied');
         return;
       }
       if (connection.socket.readyState === 1) connection.socket.send(message);
+      if (type === 'room_deleted') {
+        connection.socket.close(1000, 'Room deleted');
+      }
     }).catch(() => {
       connection.socket.close(1011, 'Subscription validation error');
     });

@@ -134,4 +134,29 @@ describe('isolated migration runner negative probes', () => {
     assert.deepEqual([...db.versions], migrations.map((m) => [m.version, m.checksum]));
   });
 
+  it('applies 012 on top of 011, records ledger, no-op on rerun, and preserves prior checksums', async () => {
+    const all = loadMigrations();
+    const m012 = all.find((m) => m.version === '012');
+    assert.ok(m012, 'migration 012 exists');
+
+    const db = new FakeDatabase();
+    for (const m of all) {
+      if (m.version === '012') break;
+      db.versions.set(m.version, m.version === '008' ? '4f1426907db9d02cef674c18ebdee1db1dd8aedfeed9905adae697fd24af25d0' : m.checksum);
+    }
+    assert.equal(db.versions.size, 11);
+    assert.equal(db.versions.has('012'), false);
+
+    await applyMigrations(new FakeClient(db), all);
+    assert.equal(db.versions.size, 12);
+    assert.equal(db.versions.get('012'), m012.checksum);
+    assert.deepEqual(db.executedSql, [m012.sql]);
+
+    db.executedSql.length = 0;
+    await applyMigrations(new FakeClient(db), all);
+    assert.deepEqual(db.executedSql, []);
+    assert.equal(db.versions.size, 12);
+    assert.equal(db.versions.get('008'), '4f1426907db9d02cef674c18ebdee1db1dd8aedfeed9905adae697fd24af25d0');
+  });
+
 });
