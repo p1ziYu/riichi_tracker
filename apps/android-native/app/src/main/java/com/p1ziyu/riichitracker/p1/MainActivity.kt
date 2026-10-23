@@ -9,7 +9,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
@@ -45,7 +44,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         incomingLink = intent?.dataString?.takeIf { parseCheckInLink(it) != null }
         setContent {
-            MaterialTheme {
+            BrandTheme {
                 val state by model.ui.collectAsState()
                 if (incomingLink != null) {
                     CheckInScreen(incomingLink, this::openExternalBrowser)
@@ -109,11 +108,11 @@ private fun MainContent(model: AppViewModel, state: AppState, onPasteLink: () ->
         NavHost(navController = nav, startDestination = Lobby, modifier = Modifier.padding(padding)) {
             composable<Lobby> {
                 MatchListScreen(true, state.matches, state.templates, state.listLoading, state.listError,
-                    state.listLoading, model::loadList, { nav.navigate(Table(it)) })
+                    state.listLoading, model::loadList, { nav.navigate(Table(it)) }, { nav.navigate(History) })
             }
             composable<History> {
                 MatchListScreen(false, state.matches, state.templates, state.listLoading, state.listError,
-                    state.listLoading, model::loadList, { nav.navigate(Table(it)) })
+                    state.listLoading, model::loadList, { nav.navigate(Table(it)) }, { nav.navigate(History) })
             }
             composable<Profile> {
                 LaunchedEffect(Unit) { model.loadProfile() }
