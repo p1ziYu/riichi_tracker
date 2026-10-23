@@ -16,17 +16,20 @@ import java.util.concurrent.TimeUnit
 
 class ApiFailure(val status: Int, val code: String?, val retryAfterSeconds: Long?, message: String) : IOException(message)
 class ApiClient(private val store: TokenStore, val client: OkHttpClient = OkHttpClient.Builder()
-    .pingInterval(20, TimeUnit.SECONDS).build()) {
+    .pingInterval(20, TimeUnit.SECONDS).build()) : JoinTransport {
     val json = Json { ignoreUnknownKeys = true }
     private val origin = BuildConfig.API_BASE_URL.trimEnd('/')
     val wsOrigin: String get() = if (origin.startsWith("https://"))
         "wss://${origin.removePrefix("https://")}" else "ws://${origin.removePrefix("http://")}"
 
-    suspend fun get(path: String): String = call(path)
-    suspend fun post(path: String, body: String = "{}"): String = call(path, body)
+    override suspend fun get(path: String): String = call(path)
+    override suspend fun post(path: String, body: String): String = call(path, body)
     private suspend fun call(path: String, body: String? = null): String = withContext(Dispatchers.IO) {
         val token = store.load()
         val builder = Request.Builder().url("$origin$path")
+        // Better Auth checks Origin on native auth writes as well as browser requests.
+        if (path.startsWith("/api/auth/") && body != null)
+            builder.header("Origin", "https://riichi.p1ziyu.com")
         if (token != null) builder.header("Authorization", "Bearer $token")
         if (body == null) builder.get()
         else builder.post(body.toRequestBody("application/json".toMediaType()))

@@ -29,7 +29,7 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
 
-@Composable fun InvitationQr(link: String) {
+@Composable fun InvitationQr(link: String, description: String = "签到二维码") {
     val bitmap = remember(link) { runCatching {
         val matrix = MultiFormatWriter().encode(link, BarcodeFormat.QR_CODE, 512, 512,
             mapOf(EncodeHintType.MARGIN to 2, EncodeHintType.ERROR_CORRECTION to com.google.zxing.qrcode.decoder.ErrorCorrectionLevel.M))
@@ -39,12 +39,12 @@ import com.google.zxing.MultiFormatWriter
         }
     }.getOrNull() }
     if (bitmap == null) Text("二维码不可用，请复制链接", color = Brand.text)
-    else Image(bitmap.asImageBitmap(), contentDescription = "玩家签到二维码，十分钟内供一位已批准玩家使用",
+    else Image(bitmap.asImageBitmap(), contentDescription = description,
         modifier = Modifier.size(256.dp))
 }
 
 @androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
-@Composable fun CheckInScanner(onFound: (String) -> Unit) {
+@Composable fun CheckInScanner(accept: (String) -> Boolean = { parseCheckInLink(it)?.hasToken == true }, onFound: (String) -> Unit) {
     val context = LocalContext.current
     val owner = LocalLifecycleOwner.current
     var permission by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }
@@ -78,7 +78,7 @@ import com.google.zxing.MultiFormatWriter
                 if (image == null) { imageProxy.close(); return@setAnalyzer }
                 scanner.process(InputImage.fromMediaImage(image, imageProxy.imageInfo.rotationDegrees))
                     .addOnSuccessListener { barcodes ->
-                        barcodes.firstOrNull { parseCheckInLink(it.rawValue.orEmpty())?.hasToken == true }
+                        barcodes.firstOrNull { accept(it.rawValue.orEmpty()) }
                             ?.rawValue?.let { if (delivered.compareAndSet(false, true)) onFound(it) }
                     }.addOnCompleteListener { imageProxy.close() }
             }

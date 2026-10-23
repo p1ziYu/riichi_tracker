@@ -4,7 +4,6 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -14,7 +13,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.*
-import kotlinx.serialization.encodeToString
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -24,11 +22,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 private fun Throwable.chineseMessage(): String = when (this) {
-    is ApiFailure -> when (code) {
-        "check_in_not_approved" -> "尚无已获批准的座位。签到必须由桌主先批准；当前客户端不提供审批界面。"
-        "rate_limited" -> "查询过于频繁，请${retryAfterSeconds ?: "稍后"}秒后重试"
-        else -> message ?: "请求失败（$status）"
-    }
+    is ApiFailure -> apiFailureMessage(this)
     else -> message ?: "网络连接失败，请重试"
 }
 
@@ -46,7 +40,9 @@ data class AppState(
     val tableError: String? = null, val connection: String = "手动刷新", val connectionEpoch: Int = 0,
     val profile: MeResponse? = null, val profileError: String? = null,
     val diagnostic: String? = null, val busy: Boolean = false, val actionError: String? = null,
-    val invitation: CheckInTokenDto? = null, val joinError: String? = null, val joinedSeat: Int? = null,
+    val invitation: CheckInTokenDto? = null, val joinedSeat: Int? = null, val joinedMatchId: String? = null,
+    val receipt: JoinReceipt? = null, val approvalReady: Boolean = false,
+    val approvalWaiting: Boolean = false,
     val preview: BoundPreview? = null, val terminal: BoundTerminal? = null,
     val pendingResult: PendingResult? = null, val createdMatchId: String? = null,
 )
@@ -55,6 +51,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val store = TokenStore(application)
     private val api = ApiClient(store)
     private val pendingStore = PendingResultStore(application)
+    private val receiptStore = JoinReceiptStore(application)
+    private val joins = JoinActions(api, api.json)
     private val state = MutableStateFlow(AppState(
         session = if (store.load() != null) SessionMode.RESTORING else SessionMode.SIGNED_OUT,
         authError = if (store.credentialInvalidated) "本机加密凭据不可读取，请重新登录" else null))
@@ -76,7 +74,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val me = api.json.decodeFromString<MeResponse>(api.get("/api/me"))
                 if (at == generation) state.value = state.value.copy(
                     session = if (me.principal.type == "guest") SessionMode.ONLINE_GUEST else SessionMode.ACCOUNT,
-                    profile = me, authError = null)
+                    profile = me, receipt = receiptStore.read(me.principal.id), authError = null)
             } catch (e: Exception) {
                 if (at == generation) state.value = state.value.copy(
                     session = if (store.load() == null) SessionMode.SIGNED_OUT else SessionMode.RESTORING,
@@ -101,7 +99,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 api.signIn(email.trim(), password, name?.trim())
                 val me = api.json.decodeFromString<MeResponse>(api.get("/api/me"))
                 generation++
-                state.value = AppState(session = SessionMode.ACCOUNT, profile = me)
+                state.value = AppState(session = SessionMode.ACCOUNT, profile = me, receipt = receiptStore.read(me.principal.id))
             } catch (error: Exception) {
                 state.value = state.value.copy(session = if (store.load() != null) SessionMode.RESTORING else SessionMode.SIGNED_OUT,
                     authBusy = false, authError = "登录或注册失败：${error.chineseMessage()}")
@@ -116,7 +114,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 api.anonymous()
                 val me = api.json.decodeFromString<MeResponse>(api.get("/api/me"))
                 generation++
-                state.value = AppState(session = SessionMode.ONLINE_GUEST, profile = me)
+                state.value = AppState(session = SessionMode.ONLINE_GUEST, profile = me, receipt = receiptStore.read(me.principal.id))
             } catch (e: Exception) {
                 state.value = state.value.copy(session = if (store.load() != null) SessionMode.RESTORING else SessionMode.SIGNED_OUT,
                     authBusy = false, authError = e.chineseMessage())
@@ -326,28 +324,67 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (tableId == id) state.value = state.value.copy(invitation = token)
     }
     fun finalizeSeats(id: String, dealer: Int?) = operation(id) {
-        api.post("/api/matches/$id/seats/finalize", dealer?.let { """{"dealerSeatNo":$it}""" } ?: "{}")
+        api.post("/api/matches/$id/seats/finalize", finalizeBody(dealer))
     }
-    fun beginCheckIn() { state.value = state.value.copy(joinedSeat = null, actionError = null) }
-    fun checkIn(link: CheckInLink) = operation(null) {
-        val token = link.token ?: throw IllegalStateException("链接缺少签到凭证")
-        val body = buildJsonObject { put("token", token) }.toString()
-        val result = api.json.decodeFromString<CheckInDto>(api.post("/api/matches/${link.matchId}/check-ins", body))
-        state.value = state.value.copy(joinedSeat = result.seat.seatNo, joinError = null)
+    fun beginCheckIn() { state.value = state.value.copy(joinedSeat = null, joinedMatchId = null, actionError = null) }
+    fun requestJoin(matchId: String) = operation(null) {
+        val principal = requireNotNull(state.value.profile?.principal) { "请先登录" }
+        val existing = state.value.receipt
+        val receipt = joins.request(matchId, principal.displayName, existing)
+        if (receipt == existing) return@operation
+        receiptStore.save(principal.id, receipt)
+        state.value = state.value.copy(receipt = receipt, approvalReady = false, approvalWaiting = false)
+    }
+    fun discardReceipt() {
+        state.value.profile?.principal?.id?.let { receiptStore.clear(it) }
+        state.value = state.value.copy(receipt = null, approvalReady = false, approvalWaiting = false)
+    }
+    /** Called by the visible check-in route; bounded so foreground waiting never spins forever. */
+    suspend fun pollApproval(receipt: JoinReceipt) {
+        val at = generation
+        state.value = state.value.copy(approvalWaiting = true)
+        try {
+            repeat(5) { attempt ->
+                if (at != generation || state.value.receipt != receipt) return
+                try {
+                    if (joins.approved(receipt.matchId)) {
+                        state.value = state.value.copy(approvalReady = true, approvalWaiting = false, actionError = null)
+                        return
+                    }
+                } catch (e: CancellationException) { throw e
+                } catch (e: Exception) {
+                    state.value = state.value.copy(actionError = error(e))
+                    return
+                }
+                if (attempt < 4) delay(3000)
+            }
+        } finally { if (at == generation) state.value = state.value.copy(approvalWaiting = false) }
+    }
+    fun checkIn(link: CheckInLink, sourceCode: String? = null) = operation(null) {
+        val result = joins.checkInRecovering(link, sourceCode)
+        state.value.profile?.principal?.id?.let { receiptStore.clear(it) }
+        state.value = state.value.copy(joinedSeat = result.seat.seatNo, joinedMatchId = link.matchId,
+            receipt = null, approvalReady = false)
         loadList()
     }
+    fun clearJoinedMatch() { state.value = state.value.copy(joinedMatchId = null) }
     fun byCode(code: String, onResolved: (CheckInLink) -> Unit) = operation(null) {
-        val normalized = code.trim().uppercase(java.util.Locale.ROOT)
-        require(Regex("^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$").matches(normalized)) { "请输入六位有效房间码" }
-        val result = api.json.decodeFromString<ByCodeDto>(api.get("/api/matches/by-code/$normalized"))
+        val result = joins.resolve(code)
         onResolved(CheckInLink(result.matchId, result.token,
             "https://riichi.p1ziyu.com/checkin/${result.matchId}?token=${java.net.URLEncoder.encode(result.token, "UTF-8")}"))
     }
+    fun approveReceipt(id: String, receipt: JoinReceipt, seatNo: Int, onApproved: () -> Unit) = operation(id) {
+        val table = state.value.table ?: throw IllegalStateException("请先刷新牌桌")
+        check(table.match.id == id && table.match.status == "preparing" &&
+            table.match.ownerPrincipalId == state.value.profile?.principal?.id &&
+            table.seats.any { it.seatNo == seatNo && it.principalId == null }) { "座位已变化，请刷新牌桌" }
+        joins.approve(receipt, seatNo, id)
+        onApproved()
+    }
     fun mark(id: String, hand: CurrentHandDto, seat: HandSeatDto, riichi: Boolean) = operation(id) {
-        val handId = requireNotNull(hand.id)
-        val revision = requireNotNull(hand.markRevision)
-        api.post("/api/matches/$id/hands/$handId/marks",
-            """{"seatNo":${seat.seatNo},"riichi":$riichi,"expectedMarkRevision":$revision}""")
+        val rules = state.value.table?.match?.rulesSnapshot
+        changeMark(api, id, hand, state.value.table?.currentHand, seat,
+            rules?.get("allowLowPointRiichi")?.jsonPrimitive?.booleanOrNull == true, riichi) { refreshTable(id) }
         state.value = state.value.copy(preview = null)
     }
     fun preview(id: String, hand: CurrentHandDto, input: JsonObject) = operation(id) {
@@ -363,14 +400,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun submit(id: String, hand: CurrentHandDto, input: JsonObject) {
         val preview = state.value.preview ?: return
-        if (preview.handId != hand.id || preview.revision != hand.markRevision || preview.input != input.toString()) return
+        if (!preview.matches(hand, input)) return
         if (state.value.pendingResult != null) return
-        val eventId = java.util.UUID.randomUUID().toString()
-        val body = buildJsonObject {
-            put("resultInput", input)
-            put("confirmedMarkRevision", preview.revision)
-            put("clientEventId", eventId)
-        }.toString()
+        val body = resultBody(input, preview.revision)
         val pending = PendingResult(id, preview.handId, body)
         val principalId = state.value.profile?.principal?.id ?: return
         try { pendingStore.save(principalId, pending) }

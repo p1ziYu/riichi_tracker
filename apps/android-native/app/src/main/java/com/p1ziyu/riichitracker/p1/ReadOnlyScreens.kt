@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -38,11 +39,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -115,7 +119,7 @@ fun AuthScreen(
                     Text(if (busy) "请稍候…" else if (register) "注册并登录" else "登录")
                 }
                 OutlinedButton(onClick = onGuest, enabled = !busy) { Text("临时访客加入在线牌桌") }
-                Caption("访客与本地无身份不同。获桌主批准座位后方可签到；访客不能创建牌桌。")
+                Caption("访客与本地无身份不同。申请座位后出示凭证，待桌主批准方可签到；访客不能创建牌桌。")
                 TextButton(onClick = onLocal, enabled = !busy) { Text("本地无身份模式") }
             }
         }
@@ -180,6 +184,7 @@ fun MatchListScreen(
     onJoin: () -> Unit,
     session: SessionMode,
     principalName: String?,
+    receipt: JoinReceipt? = null,
 ) {
     val finished = finishedOwnMatches(matches.orEmpty())
     val live = matches.orEmpty().filterNot { isFinishedMatch(it.status) }.sortedByDescending { it.createdAt }
@@ -190,6 +195,7 @@ fun MatchListScreen(
                 item {
                     Text("在线身份 · ${principalName?.takeIf { it.isNotBlank() } ?: if (session == SessionMode.ACCOUNT) "账户" else "临时访客"} · ${if (session == SessionMode.ACCOUNT) "账户" else "访客"}", color = Brand.goldText)
                     OutlinedButton(onClick = onJoin) { Text("扫码 / 链接 / 房间码加入") }
+                    if (receipt != null) Text("待签到申请 · ${receipt.name} · ${receipt.matchId}（点击加入入口查看凭证）", color = Brand.text)
                 }
                 if (loading && matches == null) item { CircularProgressIndicator() }
                 if (error != null) item { Text("加载失败：$error", color = MaterialTheme.colorScheme.error); TextButton(onClick = onRefresh) { Text("重试") } }
@@ -398,43 +404,75 @@ fun CheckInScreen(initial: String?, state: AppState, model: AppViewModel, onClos
     var code by remember { mutableStateOf("") }
     var scanner by remember { mutableStateOf(false) }
     var resolved by remember { mutableStateOf<CheckInLink?>(null) }
+    var sourceCode by remember { mutableStateOf<String?>(null) }
+    var pollAgain by remember { mutableIntStateOf(0) }
+    var attempted by remember(initial) { mutableStateOf<String?>(null) }
+    val clipboard = LocalClipboardManager.current
     val link = resolved ?: parseCheckInLink(input)
-    var attempted by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(link?.matchId, link?.token) {
-        if (link?.hasToken == true && state.session in listOf(SessionMode.ACCOUNT, SessionMode.ONLINE_GUEST)) {
-            val key = "${link.matchId}:${link.token}"
-            if (attempted != key) {
-                attempted = key
-                model.checkIn(link)
-            }
+    val receipt = state.receipt
+    LaunchedEffect(receipt, pollAgain) {
+        if (receipt != null && state.session in listOf(SessionMode.ACCOUNT, SessionMode.ONLINE_GUEST))
+            model.pollApproval(receipt)
+    }
+    LaunchedEffect(state.approvalReady, link?.matchId, link?.token, sourceCode, state.busy, state.joinedSeat) {
+        val key = approvedCheckInKey(receipt, link, state.approvalReady, state.busy, state.joinedSeat)
+        if (key != null && attempted != key && link != null) {
+            attempted = key
+            model.checkIn(link, sourceCode)
         }
     }
+    LaunchedEffect(state.joinedMatchId) { if (state.joinedMatchId != null) onClose() }
     Column(Modifier.fillMaxSize().background(Brand.background).verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)) {
         BrandLockup()
-        Heading("玩家签到")
-        Text("当前身份：${if (state.session == SessionMode.ONLINE_GUEST) "临时访客" else "账户"}。房主必须已批准该身份的座位；链接和房间码并不自动批准。", color = Brand.text)
+        Heading("玩家申请与签到")
+        Text("当前身份：${if (state.session == SessionMode.ONLINE_GUEST) "临时访客" else "账户"}。请保持同一身份，先申请座位并将凭证交给桌主。", color = Brand.text)
         if (state.joinedSeat != null) {
-            Text("已签到 ${state.joinedSeat + 1} 号位", color = Brand.goldText)
-            Button(onClick = onClose) { Text("返回大厅") }
+            Text("已签到 ${state.joinedSeat + 1} 号位，正在打开牌桌", color = Brand.goldText)
+            Button(onClick = onClose) { Text("查看牌桌") }
         } else {
             OutlinedButton(onClick = { scanner = !scanner }) { Text(if (scanner) "关闭相机" else "相机扫码") }
             if (scanner) CheckInScanner { scanned ->
-                input = scanned
-                resolved = null
-                scanner = false
+                input = scanned; resolved = null; sourceCode = null; scanner = false
             }
-            OutlinedTextField(input, { input = it; resolved = null }, label = { Text("粘贴完整 HTTPS 签到链接") },
+            OutlinedTextField(input, { input = it; resolved = null; sourceCode = null },
+                label = { Text("粘贴完整 HTTPS 签到链接") },
                 visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(code, { code = it.trim().uppercase(java.util.Locale.ROOT).take(6) },
+            OutlinedTextField(code, { code = it.trim().uppercase(java.util.Locale.ROOT) },
                 label = { Text("六位房间码") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-            Button(onClick = { model.byCode(code) { result -> resolved = result; input = "" } },
-                enabled = !state.busy && Regex("^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$").matches(code)) { Text("换取十分钟签到凭证") }
+            Button(onClick = { model.byCode(code) { result ->
+                resolved = result; sourceCode = normalizeJoinCode(code); input = ""
+            } }, enabled = !state.busy && normalizeJoinCode(code) != null) { Text("换取签到凭证") }
             if (input.isNotBlank() && link == null) Text("仅接受本站 /checkin/<对局编号> 安全链接", color = MaterialTheme.colorScheme.error)
             link?.let { Caption("目标牌桌 · ${it.matchId} · ${if (it.hasToken) "已有签到凭证" else "链接无签到凭证"}") }
-            Button(onClick = { link?.let(model::checkIn) }, enabled = !state.busy && link?.hasToken == true) { Text("提交签到") }
+            if (receipt == null) {
+                Button(onClick = { link?.let { model.requestJoin(it.matchId) } },
+                    enabled = !state.busy && link != null) { Text("申请座位（只提交一次）") }
+            } else if (link != null && link.matchId != receipt.matchId) {
+                Text("当前链接与已保存申请不属于同一牌桌；请勿丢失原申请凭证。", color = MaterialTheme.colorScheme.error)
+            }
+            receipt?.let {
+                Text("自述昵称（未验证）：${it.name} · ${it.matchId}", color = Brand.goldText)
+                Text("申请编号：${it.joinRequestId}", color = Brand.text)
+                OutlinedButton(onClick = { clipboard.setText(AnnotatedString(it.joinRequestId)) }) { Text("复制申请编号") }
+                InvitationQr(it.encode(), "向桌主出示的申请凭证二维码")
+                SelectionContainer { Text(it.encode(), color = Brand.text) }
+                Text(if (state.approvalReady) "房主已确认座次，正在签到" else "等待房主确认座次", color = Brand.text)
+                if (state.approvalWaiting) CircularProgressIndicator()
+                OutlinedButton(onClick = { pollAgain++ }, enabled = !state.approvalWaiting) { Text("检查状态") }
+                TextButton(onClick = model::discardReceipt, enabled = !state.busy) { Text("放弃本机保存的申请凭证") }
+            }
+            Button(onClick = { link?.let { model.checkIn(it, sourceCode) } },
+                enabled = !state.busy && link?.hasToken == true &&
+                    (receipt == null || state.approvalReady && receipt.matchId == link.matchId)) {
+                Text(if (receipt == null) "已有批准座位？直接签到" else "批准后签到")
+            }
+            if (receipt != null && state.approvalReady && link?.hasToken != true)
+                Text("座位已批准。请输入房间码或粘贴新的签到链接以完成签到。", color = Brand.text)
+            if (state.session == SessionMode.ONLINE_GUEST)
+                Caption("访客身份仅保留在此设备的有效登录会话；退出、凭据失效或卸载后，申请凭证不能恢复原身份。")
             state.actionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-            Text("若显示“尚无已获批准的座位”，保留此身份，待桌主在服务端批准后使用有效令牌重试；本客户端无审批界面。", color = Brand.muted)
+            Text("房间码令牌失效后会重新换取；链接令牌失效请桌主发送新链接。申请凭证不是签到令牌。", color = Brand.muted)
             TextButton(onClick = onClose) { Text("关闭") }
         }
     }

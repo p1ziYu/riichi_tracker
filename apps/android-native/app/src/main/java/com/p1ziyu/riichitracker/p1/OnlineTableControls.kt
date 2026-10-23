@@ -1,6 +1,5 @@
 package com.p1ziyu.riichitracker.p1
 
-import android.content.ClipData
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -25,12 +24,14 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
     var dealer by remember(id) { mutableStateOf<Int?>(null) }
     var showResult by remember(id) { mutableStateOf(false) }
     var confirmFinish by remember(id) { mutableStateOf(false) }
+    var receiptText by remember(id) { mutableStateOf("") }
+    var scanReceipt by remember(id) { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (state.actionError != null) Text(state.actionError, color = MaterialTheme.colorScheme.error)
         if (preparing && isOwner) {
             Text("桌主座位与邀请", color = Brand.goldText, style = MaterialTheme.typography.titleLarge)
-            Text("房主需自行选座。生成签到码不会自动批准玩家；所有座位需已签到才可确认座次。", color = Brand.text)
+            Text("房主需自行选座。先开放申请，核对访客出示的凭证并批准空座；所有座位需已签到才可确认座次。", color = Brand.text)
             table.seats.sortedBy { it.seatNo }.forEach { seat ->
                 if (seat.principalId == null || seat.principalId == principal && seat.status != "checked_in")
                     OutlinedButton(onClick = { model.claim(id, seat.seatNo) }, enabled = !state.busy,
@@ -45,7 +46,7 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
                 Text("房间码：$code", color = Brand.goldText)
                 OutlinedButton(onClick = { clipboard.setText(AnnotatedString(code)) }) { Text("复制房间码") }
             }
-            Button(onClick = { model.invite(id) }, enabled = !state.busy) { Text("为一位已批准玩家生成签到链接") }
+            Button(onClick = { model.invite(id) }, enabled = !state.busy) { Text("生成十分钟签到链接（同时开放申请）") }
             state.invitation?.let { token ->
                 val valid = runCatching { java.time.Instant.parse(token.expiresAt).isAfter(java.time.Instant.now()) }.getOrDefault(false)
                 if (valid) {
@@ -55,6 +56,30 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
                     OutlinedButton(onClick = { clipboard.setText(AnnotatedString(link)) }) { Text("复制玩家签到链接") }
                 } else Text("签到链接已过期，请重新生成", color = Brand.text)
             }
+            Text("批准访客申请 · 请核对现场出示的自述昵称与目标牌桌", color = Brand.goldText)
+            OutlinedButton(onClick = { scanReceipt = !scanReceipt }) { Text(if (scanReceipt) "关闭扫码" else "扫码确认入座") }
+            if (scanReceipt) CheckInScanner(accept = { parseJoinReceipt(it) != null }) {
+                receiptText = it; scanReceipt = false
+            }
+            OutlinedTextField(receiptText, { receiptText = it }, label = { Text("粘贴申请凭证 JSON") },
+                modifier = Modifier.fillMaxWidth())
+            val parsed = parseJoinReceipt(receiptText)
+            val receipt = parsed?.takeIf { it.matchId == id }
+            if (receiptText.isNotBlank() && parsed == null)
+                Text("申请凭证格式无效", color = MaterialTheme.colorScheme.error)
+            if (parsed != null && receipt == null)
+                Text("申请凭证属于其他牌桌，不能批准入座", color = MaterialTheme.colorScheme.error)
+            receipt?.let { request ->
+                Text("自述昵称（未验证）：${request.name}", color = Brand.text)
+                Text("申请编号：${request.joinRequestId}", color = Brand.text)
+                OutlinedButton(onClick = { clipboard.setText(AnnotatedString(request.joinRequestId)) }) { Text("复制申请编号") }
+                table.seats.filter { it.principalId == null }.sortedBy { it.seatNo }.forEach { seat ->
+                    OutlinedButton(onClick = { model.approveReceipt(id, request, seat.seatNo) { receiptText = "" } },
+                        enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
+                        Text("批准 ${request.name} 入 ${seat.seatNo + 1} 号空座")
+                    }
+                }
+            }
             Button(onClick = { model.finalizeSeats(id, dealer) }, enabled = !state.busy &&
                 table.seats.size == table.match.playerCount && table.seats.all { it.status == "checked_in" }) { Text("确认座次并开局") }
         }
@@ -62,10 +87,8 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
             Text("立直标记 · 服务器版本 ${hand.markRevision ?: "未提供"}", color = Brand.goldText)
             hand.seats.sortedBy { it.seatNo }.forEach { seat ->
                 val usage = seat.riichiChangeUsage
-                val lowPoints = seat.points == null || seat.points < 1000
                 val lowAllowed = table.match.rulesSnapshot?.get("allowLowPointRiichi")?.jsonPrimitive?.booleanOrNull == true
-                val allowed = if (seat.isRiichi == true) usage.cancels < 1
-                    else usage.declares < 2 && (lowAllowed || !lowPoints)
+                val allowed = canChangeRiichi(seat, lowAllowed)
                 OutlinedButton(onClick = { model.mark(id, hand, seat, seat.isRiichi != true) },
                     enabled = !state.busy && state.pendingResult == null && seat.isRiichi != null && hand.markRevision != null && allowed,
                     modifier = Modifier.fillMaxWidth()) {
@@ -144,7 +167,7 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
             }) })
         }
     }
-    val preview = state.preview?.takeIf { it.handId == hand.id && it.revision == hand.markRevision && it.input == input?.toString() }
+    val preview = state.preview?.takeIf { input != null && it.matches(hand, input) }
     AlertDialog(onDismissRequest = { if (!state.busy) onDismiss() },
         title = { Text("本局支付 · 以服务端预览为准") },
         text = {

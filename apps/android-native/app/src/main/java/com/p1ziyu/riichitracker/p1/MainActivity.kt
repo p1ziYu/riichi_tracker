@@ -94,6 +94,12 @@ private fun MainContent(model: AppViewModel, state: AppState, onPasteLink: () ->
             nav.navigate(Table(id)) { launchSingleTop = true }
         }
     }
+    LaunchedEffect(state.joinedMatchId) {
+        state.joinedMatchId?.let { id ->
+            nav.navigate(Table(id)) { launchSingleTop = true }
+            model.clearJoinedMatch()
+        }
+    }
     Scaffold(bottomBar = {
         if (!route.contains("Table") && !route.contains("Create")) NavigationBar {
             listOf(Triple("大厅", Lobby, route.contains("Lobby")),
@@ -113,12 +119,12 @@ private fun MainContent(model: AppViewModel, state: AppState, onPasteLink: () ->
             composable<Lobby> {
                 MatchListScreen(true, state.matches, state.templates, state.listLoading, state.listError,
                     state.listLoading, model::loadList, { nav.navigate(Table(it)) }, { nav.navigate(History) },
-                    { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName)
+                    { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName, state.receipt)
             }
             composable<History> {
                 MatchListScreen(false, state.matches, state.templates, state.listLoading, state.listError,
                     state.listLoading, model::loadList, { nav.navigate(Table(it)) }, { nav.navigate(History) },
-                    { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName)
+                    { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName, state.receipt)
             }
             composable<Create> {
                 CreateScreen(state.templates, state.busy, state.actionError, model::createMatch) { nav.popBackStack() }
