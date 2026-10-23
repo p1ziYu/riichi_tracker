@@ -77,7 +77,8 @@ private func handLabel(_ kind: String) -> String {
     case "abortive_draw": "途中流局"
     case "nagashi_mangan": "流局满贯"
     case "chombo": "犯规罚符"
-    default: return "其他结果"
+    default: "其他结果"
+    }
 }
 
 private func accountLabel(_ type: String) -> String {
@@ -85,7 +86,7 @@ private func accountLabel(_ type: String) -> String {
     case "anonymous", "guest": "访客"
     case "account", "user", "email", "registered": "注册用户"
     case "admin": "管理员"
-    default: return "账号类型未提供"
+    default: "账号类型未提供"
     }
 }
 
@@ -100,6 +101,7 @@ private func statusLabel(_ status: String) -> String {
     case "finished", "completed", "settled": "牌局已结束"
     case "abandoned", "cancelled": "牌局已取消"
     default: "未知状态"
+    }
 }
 
 private func windLabel(_ wind: String?) -> String {
@@ -119,7 +121,7 @@ private func reviewLabel(_ review: String) -> String {
     case "pending", "unreviewed": "待审核"
     case "draft": "草稿"
     case "rejected": "未通过"
-    default: return "审核状态未提供"
+    default: "审核状态未提供"
     }
 }
 
@@ -164,7 +166,7 @@ private struct RuleInfo: View {
         switch source {
         case "system", "global", "public": "系统模板"
         case "private", "mine": "私有模板"
-        default: return "来源未提供"
+        default: "来源未提供"
         }
     }
 
@@ -189,21 +191,26 @@ struct AuthScreen: View {
                     EastTile(size: 38)
                     Text("登录一姬").font(Brand.display(32)).foregroundStyle(Brand.text)
                 }
-                Picker("登录方式", selection: $registering) {
-                    Text("邮箱登录").tag(false)
-                    Text("注册账户").tag(true)
+                HStack(spacing: 8) {
+                    modeButton("邮箱登录", registering: false)
+                    modeButton("注册账户", registering: true)
                 }
-                .pickerStyle(.segmented)
-                TextField("邮箱", text: $email)
+                TextField("邮箱", text: $email, prompt: Text("邮箱").foregroundColor(Brand.muted))
                     .textContentType(.emailAddress)
                     .keyboardType(.emailAddress)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                SecureField("密码", text: $password)
+                    .padding(12)
+                    .background(Brand.deep, in: RoundedRectangle(cornerRadius: 10))
+                SecureField("密码", text: $password, prompt: Text("密码").foregroundColor(Brand.muted))
                     .textContentType(registering ? .newPassword : .password)
+                    .padding(12)
+                    .background(Brand.deep, in: RoundedRectangle(cornerRadius: 10))
                 if registering {
-                    TextField("昵称", text: $name)
+                    TextField("昵称", text: $name, prompt: Text("昵称").foregroundColor(Brand.muted))
                         .textContentType(.nickname)
+                        .padding(12)
+                        .background(Brand.deep, in: RoundedRectangle(cornerRadius: 10))
                 }
                 if let error {
                     Text("登录或注册失败：\(error)")
@@ -214,20 +221,39 @@ struct AuthScreen: View {
                     Task { await submit() }
                 } label: {
                     Text(busy ? "请稍候…" : registering ? "注册并登录" : "登录")
+                        .fontWeight(.semibold)
+                        .foregroundStyle(Brand.background)
                         .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Brand.gold, in: RoundedRectangle(cornerRadius: 10))
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Brand.gold)
-                .foregroundStyle(Brand.background)
+                .buttonStyle(.plain)
                 .disabled(busy || email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || password.isEmpty || (registering && name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
             }
-            .textFieldStyle(.roundedBorder)
+            .textFieldStyle(.plain)
+            .foregroundStyle(Brand.cream)
+            .tint(Brand.gold)
+            .padding(24)
+            .background(Brand.panel, in: RoundedRectangle(cornerRadius: 18))
             .padding(24)
             .frame(maxWidth: 540)
             .frame(maxWidth: .infinity)
         }
         .background(Brand.background)
-        .navigationTitle("登录一姬")
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
+    private func modeButton(_ title: String, registering mode: Bool) -> some View {
+        Button(title) { registering = mode }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(registering == mode ? Brand.background : Brand.cream)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(registering == mode ? Brand.gold : Brand.deep, in: RoundedRectangle(cornerRadius: 8))
+            .buttonStyle(.plain)
+            .accessibilityValue(registering == mode ? "已选中" : "未选中")
     }
 
     @MainActor private func submit() async {
