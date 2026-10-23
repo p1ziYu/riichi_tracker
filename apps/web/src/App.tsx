@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Capacitor } from '@capacitor/core';
+import { App as CapacitorApp } from '@capacitor/app';
 import { calculateSettlement, ENGINE_VERSION } from '@riichi/engine';
 import type { SettlementOutput } from '@riichi/engine';
 import { ApiError, api, clearNativeAuthToken, errorText, isNative, post } from './api';
@@ -13,6 +15,7 @@ import LocalTable from './LocalTable';
 import WizardSteps from './WizardSteps';
 import RulesAdjustment from './RulesAdjustment';
 import Segmented from './Segmented';
+import { routeFromExternalUrl } from './deepLinks';
 import './style.css';
 
 type Principal = { id: string; type: 'account' | 'guest'; displayName: string };
@@ -424,6 +427,30 @@ function GuestChoice({ onLocal }: { onLocal: () => void }) {
   </main>;
 }
 
+function NativeDeepLinks() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    let active = true;
+    let opened = false;
+    const listener = CapacitorApp.addListener('appUrlOpen', ({ url }) => {
+      if (!active) return;
+      const route = routeFromExternalUrl(url);
+      if (route) { opened = true; navigate(route); }
+    });
+    void CapacitorApp.getLaunchUrl().then((launch) => {
+      if (!active || opened || !launch?.url) return;
+      const route = routeFromExternalUrl(launch.url);
+      if (route) navigate(route);
+    });
+    return () => {
+      active = false;
+      void listener.then((handle) => handle.remove());
+    };
+  }, [navigate]);
+  return null;
+}
+
 export default function App() {
   const [principal, setPrincipal] = useState<Principal | null>(null);
   const [loading, setLoading] = useState(true);
@@ -469,7 +496,7 @@ export default function App() {
     setPrincipal(null);
     window.location.assign('/login');
   }
-  return <BrowserRouter><Shell principal={principal}>
+  return <BrowserRouter><NativeDeepLinks /><Shell principal={principal}>
     {loading ? <main className="page">正在验证身份…</main> : authError ? <main className="page narrow"><div className="notice invalid" role="alert">身份验证失败：{authError}</div><button type="button" onClick={() => window.location.reload()}>重试</button><button type="button" onClick={enterLocalMode}>改用本地模式</button></main> : !principal && !guestMode ? <Routes>
       <Route path="/login" element={<LoginRoute principal={principal} onAuthenticated={(value) => { localStorage.setItem(ACCOUNT_HINT, '1'); localStorage.removeItem(GUEST_MODE); setGuestMode(false); setPrincipal(value); }} onLogout={() => void logout()} logoutError={logoutError} />} />
       <Route path="/checkin/:matchId" element={<Protected principal={principal}><CheckIn /></Protected>} />
