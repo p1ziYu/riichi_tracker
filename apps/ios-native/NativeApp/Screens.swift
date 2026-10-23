@@ -243,7 +243,7 @@ struct AuthScreen: View {
                     }
                 }
                 .disabled(busy)
-                Text("访客仅能参与已批准的在线牌桌，不能开桌；本地模式不使用此身份。")
+                Text("访客扫码或输入房间码即可直接选座签到，不能开桌；本地模式不使用此身份。")
                     .font(.footnote).foregroundStyle(Brand.muted)
                 Text("本地无身份模式不创建服务端访客；离线牌桌将在本地阶段提供。")
                     .font(.footnote).foregroundStyle(Brand.muted)
