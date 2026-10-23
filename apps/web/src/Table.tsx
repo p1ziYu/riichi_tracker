@@ -538,7 +538,7 @@ export default function Table() {
             busy={busy}
             onSelectDealer={setDealerSeatNo}
           />
-          {state.match.joinCode && <JoinCodeBlock code={state.match.joinCode} copyStatus={joinCodeCopyStatus} onCopy={() => void copyJoinCode()} />}
+          {state.match.joinCode && !checkInUrl && <JoinCodeBlock code={state.match.joinCode} copyStatus={joinCodeCopyStatus} onCopy={() => void copyJoinCode()} />}
           <div className="table-controls table-controls-finalize">
             <button type="button" disabled={busy} onClick={() => void action(async () => {
               setToken(null);
