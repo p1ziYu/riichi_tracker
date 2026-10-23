@@ -10,6 +10,22 @@ enum EngineBridgeCheck {
         try normalize(CoreKt.normalizeRulesConfig(rawConfig: bridgedObject(config), inferredPlayerCount: nil))
     }
 
+    static func bundledTemplate(_ key: String) throws -> [String: Any] {
+        let config: EngineRulesConfig
+        switch key {
+        case "house_4p": config = CoreKt.HOUSE_4P_V1
+        case "reference_4p_competition": config = CoreKt.WRC_4P_REF_V1
+        case "house_3p": config = CoreKt.HOUSE_3P_V1
+        case "reference_3p_common": config = CoreKt.COMMON_3P_REF_V1
+        default: throw NSError(domain: "LocalEngine", code: 1,
+                               userInfo: [NSLocalizedDescriptionKey: "未知的本地模板"])
+        }
+        return normalize(config)
+    }
+
+    static func localCalculation(_ operation: String, _ args: [Any]) throws -> Any {
+        try invoke(["operation": operation, "args": args])
+    }
     static func samplePayment(config: [String: Any], input: [String: Any]) throws -> [String: Any] {
         guard let count = config["playerCount"] as? Int, (3...4).contains(count),
               let start = config["startingPoints"] as? Int, start > 0 else {

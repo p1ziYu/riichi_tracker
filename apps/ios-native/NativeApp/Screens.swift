@@ -245,7 +245,7 @@ struct AuthScreen: View {
                 .disabled(busy)
                 Text("访客扫码或输入房间码即可直接选座签到，不能开桌；本地模式不使用此身份。")
                     .font(.footnote).foregroundStyle(Brand.muted)
-                Text("本地无身份模式不创建服务端访客；离线牌桌将在本地阶段提供。")
+                Text("本地无身份模式在“本地牌桌”标签中开桌；不登录、不创建访客、不上传。")
                     .font(.footnote).foregroundStyle(Brand.muted)
                 if let warning = session.sessionError {
                     Text(warning).font(.footnote).foregroundStyle(.red)

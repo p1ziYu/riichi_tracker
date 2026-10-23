@@ -11,6 +11,8 @@ struct IchihimeNativeApp: App {
     @State private var lobbyPath: [String] = []
     @State private var historyPath: [String] = []
     @State private var removalNotice = false
+    @StateObject private var localStore = LocalMatchStore()
+    @State private var useLocalDuringRestore = false
 
     private func leaveRevokedTable() {
         lobbyPath = []
@@ -37,9 +39,15 @@ struct IchihimeNativeApp: App {
     var body: some Scene {
         WindowGroup {
             Group {
-                if session.identity == .restoring {
-                    ProgressView("恢复安全会话中…")
-                } else if session.authenticated {
+                if session.identity == .restoring && !useLocalDuringRestore {
+                    VStack(spacing: 18) {
+                        ProgressView("恢复安全会话中…")
+                        Button("先进入本地牌桌（保留在线凭据）") {
+                            useLocalDuringRestore = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                } else if session.authenticated && !useLocalDuringRestore {
                     TabView(selection: $selectedTab) {
                         NavigationStack(path: $lobbyPath) {
                             MatchListScreen(session: session, lobby: true, onRevoked: leaveRevokedTable)
@@ -58,6 +66,11 @@ struct IchihimeNativeApp: App {
                         .tabItem { Label("战绩", systemImage: "list.bullet.rectangle") }
                         .tag(1)
                         NavigationStack {
+                            LocalMatchListScreen(store: localStore)
+                        }
+                        .tabItem { Label("本地", systemImage: "square.stack.3d.up") }
+                        .tag(3)
+                        NavigationStack {
                             ProfileScreen(session: session, onCheckIn: {
                                 checkInLink = nil
                                 showingCheckIn = true
@@ -70,7 +83,29 @@ struct IchihimeNativeApp: App {
                         Button("知道了", role: .cancel) {}
                     }
                 } else {
-                    NavigationStack { AuthScreen(session: session) }
+                    TabView {
+                        NavigationStack {
+                            LocalMatchListScreen(store: localStore)
+                                .toolbar {
+                                    if session.authenticated {
+                                        ToolbarItem(placement: .primaryAction) {
+                                            Button("返回在线") { useLocalDuringRestore = false }
+                                        }
+                                    }
+                                }
+                        }
+                        .tabItem { Label("本地牌桌", systemImage: "square.stack.3d.up") }
+                        if session.identity == .restoring {
+                            ProgressView("在线账户恢复中；本地牌桌可以独立使用。")
+                                .tabItem { Label("在线恢复中", systemImage: "person.crop.circle") }
+                        } else if session.authenticated {
+                            Button("在线账户已恢复，返回在线牌桌") { useLocalDuringRestore = false }
+                                .tabItem { Label("在线牌桌", systemImage: "person.crop.circle") }
+                        } else {
+                            NavigationStack { AuthScreen(session: session) }
+                                .tabItem { Label("在线登录", systemImage: "person.crop.circle") }
+                        }
+                    }
                 }
             }
             .task {

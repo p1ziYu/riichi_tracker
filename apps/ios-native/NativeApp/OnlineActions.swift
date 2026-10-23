@@ -783,12 +783,8 @@ private struct ResultEntry: View {
     @State private var revisionChanged = false
     private var seats: [SeatDTO] { snapshot.seats.sorted { $0.seatNo < $1.seatNo } }
     private var base: String { "/api/matches/\(snapshot.match.id)/hands/\(hand.id)" }
-    private var nagashiEnabled: Bool { snapshot.match.rulesSnapshot?["nagashiManganEnabled"] == .bool(true) }
     private var input: [String: JSONValue]? {
         ResultInputBuilder.build(draft, hand: hand, seats: seats, rules: snapshot.match.rulesSnapshot)
-    }
-    private var fieldErrors: [String: String] {
-        ResultInputBuilder.fieldErrors(draft, rules: snapshot.match.rulesSnapshot)
     }
     private var inputBinding: String? {
         guard let input else { return nil }
@@ -796,98 +792,7 @@ private struct ResultEntry: View {
     }
     var body: some View {
         Form {
-            Section("支付输入") {
-                Picker("结果类型", selection: $draft.kind) {
-                    Text("荣和").tag("ron"); Text("自摸").tag("tsumo"); Text("荒牌流局").tag("ryuukyoku")
-                    if nagashiEnabled { Text("流局满贯").tag("nagashi_mangan") }
-                }
-                if draft.kind == "ron" {
-                    Picker("放铳座位", selection: $draft.dealIn) {
-                        ForEach(seats) { Text("\($0.seatNo + 1) 号位").tag($0.seatNo) }
-                    }
-                    if hand.seats.contains(where: { $0.seatNo == draft.dealIn && $0.isRiichi }) {
-                        Toggle("放铳牌是立直宣言牌（不扣宣言棒）", isOn: $draft.declarationDealIn)
-                    }
-                }
-                if draft.kind == "ron" || draft.kind == "tsumo" || draft.kind == "nagashi_mangan" {
-                    ForEach(seats) { seat in
-                        let number = seat.seatNo
-                        if draft.kind == "ron" || draft.kind == "nagashi_mangan" {
-                            Toggle("\(number + 1) 号位 · \(seat.displayName ?? "未命名")和牌", isOn: Binding(
-                                get: { draft.winners.contains(number) },
-                                set: { selected in
-                                    if selected && !draft.winners.contains(number) &&
-                                        (draft.kind != "ron" || draft.winners.count <
-                                         ResultInputBuilder.ronCap(rules: snapshot.match.rulesSnapshot,
-                                                                   playerCount: seats.count)) {
-                                        draft.winners.append(number)
-                                    }
-                                    if !selected { draft.winners.removeAll { $0 == number } }
-                                }))
-                                .disabled(draft.kind == "ron" && !draft.winners.contains(number) &&
-                                          (number == draft.dealIn || draft.winners.count >=
-                                           ResultInputBuilder.ronCap(rules: snapshot.match.rulesSnapshot,
-                                                                     playerCount: seats.count)))
-                        } else {
-                            Button("\(number + 1) 号位 · \(seat.displayName ?? "未命名")\(draft.winners == [number] ? " ✓" : "")") {
-                                draft.winners = [number]
-                            }
-                        }
-                        if draft.winners.contains(number) {
-                            if draft.kind == "nagashi_mangan" {
-                                TextField("按顺序填写完整幺九弃牌，如 1m 9m 1z",
-                                          text: field(number, keyPath: \.rivers))
-                                TextField("被鸣走弃牌（如有则不能流满）",
-                                          text: field(number, keyPath: \.called))
-                            } else {
-                                if (Int(draft.yakuman[number, default: "0"]) ?? 0) == 0 &&
-                                    (Int(draft.doubleYakuman[number, default: "0"]) ?? 0) == 0 {
-                                    TextField("\(number + 1) 号位番 1–130",
-                                              text: field(number, keyPath: \.han, fallback: "2")).keyboardType(.numberPad)
-                                    if let fieldError = fieldErrors["\(number).han"] {
-                                        Text(fieldError).foregroundStyle(.red)
-                                    }
-                                    TextField("\(number + 1) 号位符 20–140",
-                                              text: field(number, keyPath: \.fu, fallback: "30")).keyboardType(.numberPad)
-                                    if let fieldError = fieldErrors["\(number).fu"] {
-                                        Text(fieldError).foregroundStyle(.red)
-                                    }
-                                } else {
-                                    Text("役满按服务器要求提交番 1、符 30")
-                                        .font(.footnote).foregroundStyle(.secondary)
-                                }
-                                let ordinaryCap = snapshot.match.rulesSnapshot?["compositeYakuman"] == .bool(true) ? 10 : 1
-                                TextField("\(number + 1) 号位普通役满数 0–\(ordinaryCap)",
-                                          text: field(number, keyPath: \.yakuman, fallback: "0")).keyboardType(.numberPad)
-                                if let fieldError = fieldErrors["\(number).yakuman"] {
-                                    Text(fieldError).foregroundStyle(.red)
-                                }
-                                if snapshot.match.rulesSnapshot?["doubleYakuman"] == .bool(true) {
-                                    TextField("\(number + 1) 号位特殊双倍役满数 0–10",
-                                              text: field(number, keyPath: \.doubleYakuman, fallback: "0")).keyboardType(.numberPad)
-                                    if let fieldError = fieldErrors["\(number).doubleYakuman"] {
-                                        Text(fieldError).foregroundStyle(.red)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if draft.kind == "nagashi_mangan" {
-                        Toggle("确认每位赢家的弃牌河完整且未被鸣走", isOn: $draft.attested)
-                    }
-                }
-                if draft.kind == "ryuukyoku" || draft.kind == "nagashi_mangan" {
-                    ForEach(seats) { seat in
-                        Toggle("\(seat.seatNo + 1) 号位听牌", isOn: Binding(
-                            get: { draft.tenpai[seat.seatNo] ?? false },
-                            set: { draft.tenpai[seat.seatNo] = $0 }))
-                    }
-                }
-                if input == nil {
-                    Text("请填写合法座位、每位赢家番符及役满数；流满须提供每位赢家完整的弃牌河。")
-                        .foregroundStyle(.red)
-                }
-            }
+            ResultInputFields(draft: $draft, snapshot: snapshot, hand: hand)
             if let error { Section { Text(error).foregroundStyle(.red) } }
             Section("服务器支付预览") {
                 Button("计算逐座支付") { Task { await fetchPreview() } }.disabled(input == nil || busy || !draftReady)
@@ -957,11 +862,6 @@ private struct ResultEntry: View {
             }
         }
     }
-    private func field(_ seat: Int, keyPath: WritableKeyPath<ResultDraft, [Int: String]>,
-                       fallback: String = "") -> Binding<String> {
-        Binding(get: { draft[keyPath: keyPath][seat] ?? fallback },
-                set: { draft[keyPath: keyPath][seat] = $0 })
-    }
     private func fetchPreview() async {
         guard draftReady, let input, let key = inputBinding else { return }
         busy = true; error = nil; preview = nil; binding = nil
@@ -992,5 +892,119 @@ private struct ResultEntry: View {
         } catch {
             self.error = (error as? APIError).map(OnlineCommandPolicy.resultError) ?? error.localizedDescription
         }
+    }
+}
+/// The same winner, tenpai, yakuman and full river inputs serve online and offline settlement.
+@MainActor
+struct ResultInputFields: View {
+    @Binding var draft: ResultDraft
+    let snapshot: TableSnapshot
+    let hand: CurrentHandDTO
+    private var seats: [SeatDTO] { snapshot.seats.sorted { $0.seatNo < $1.seatNo } }
+    private var nagashiEnabled: Bool { snapshot.match.rulesSnapshot?["nagashiManganEnabled"] == .bool(true) }
+    private var fieldErrors: [String: String] {
+        ResultInputBuilder.fieldErrors(draft, rules: snapshot.match.rulesSnapshot)
+    }
+    private var input: [String: JSONValue]? {
+        ResultInputBuilder.build(draft, hand: hand, seats: seats, rules: snapshot.match.rulesSnapshot)
+    }
+    var body: some View {
+            Section("支付输入") {
+                Picker("结果类型", selection: $draft.kind) {
+                    Text("荣和").tag("ron"); Text("自摸").tag("tsumo"); Text("荒牌流局").tag("ryuukyoku")
+                    if nagashiEnabled { Text("流局满贯").tag("nagashi_mangan") }
+                }
+                if draft.kind == "ron" {
+                    Picker("放铳座位", selection: $draft.dealIn) {
+                        ForEach(seats) { Text("\($0.seatNo + 1) 号位").tag($0.seatNo) }
+                    }
+                    if hand.seats.contains(where: { $0.seatNo == draft.dealIn && $0.isRiichi }) {
+                        Toggle("放铳牌是立直宣言牌（不扣宣言棒）", isOn: $draft.declarationDealIn)
+                    }
+                }
+                if draft.kind == "ron" || draft.kind == "tsumo" || draft.kind == "nagashi_mangan" {
+                    ForEach(seats) { seat in
+                        let number = seat.seatNo
+                        if draft.kind == "ron" || draft.kind == "nagashi_mangan" {
+                            Toggle("\(number + 1) 号位 · \(seat.displayName ?? "未命名")和牌", isOn: Binding(
+                                get: { draft.winners.contains(number) },
+                                set: { selected in
+                                    if selected && !draft.winners.contains(number) &&
+                                        (draft.kind != "ron" || draft.winners.count <
+                                         ResultInputBuilder.ronCap(rules: snapshot.match.rulesSnapshot,
+                                                                   playerCount: seats.count)) {
+                                        draft.winners.append(number)
+                                    }
+                                    if !selected { draft.winners.removeAll { $0 == number } }
+                                }))
+                                .disabled(draft.kind == "ron" && !draft.winners.contains(number) &&
+                                          (number == draft.dealIn || draft.winners.count >=
+                                           ResultInputBuilder.ronCap(rules: snapshot.match.rulesSnapshot,
+                                                                     playerCount: seats.count)))
+                        } else {
+                            Button("\(number + 1) 号位 · \(seat.displayName ?? "未命名")\(draft.winners == [number] ? " ✓" : "")") {
+                                draft.winners = [number]
+                            }
+                        }
+                        if draft.winners.contains(number) {
+                            if draft.kind == "nagashi_mangan" {
+                                TextField("按顺序填写完整幺九弃牌，如 1m 9m 1z",
+                                          text: field(number, keyPath: \.rivers))
+                                TextField("被鸣走弃牌（如有则不能流满）",
+                                          text: field(number, keyPath: \.called))
+                            } else {
+                                if (Int(draft.yakuman[number, default: "0"]) ?? 0) == 0 &&
+                                    (Int(draft.doubleYakuman[number, default: "0"]) ?? 0) == 0 {
+                                    TextField("\(number + 1) 号位番 1–130",
+                                              text: field(number, keyPath: \.han, fallback: "2")).keyboardType(.numberPad)
+                                    if let fieldError = fieldErrors["\(number).han"] {
+                                        Text(fieldError).foregroundStyle(.red)
+                                    }
+                                    TextField("\(number + 1) 号位符 20–140",
+                                              text: field(number, keyPath: \.fu, fallback: "30")).keyboardType(.numberPad)
+                                    if let fieldError = fieldErrors["\(number).fu"] {
+                                        Text(fieldError).foregroundStyle(.red)
+                                    }
+                                } else {
+                                    Text("役满按引擎要求提交番 1、符 30")
+                                        .font(.footnote).foregroundStyle(.secondary)
+                                }
+                                let ordinaryCap = snapshot.match.rulesSnapshot?["compositeYakuman"] == .bool(true) ? 10 : 1
+                                TextField("\(number + 1) 号位普通役满数 0–\(ordinaryCap)",
+                                          text: field(number, keyPath: \.yakuman, fallback: "0")).keyboardType(.numberPad)
+                                if let fieldError = fieldErrors["\(number).yakuman"] {
+                                    Text(fieldError).foregroundStyle(.red)
+                                }
+                                if snapshot.match.rulesSnapshot?["doubleYakuman"] == .bool(true) {
+                                    TextField("\(number + 1) 号位特殊双倍役满数 0–10",
+                                              text: field(number, keyPath: \.doubleYakuman, fallback: "0")).keyboardType(.numberPad)
+                                    if let fieldError = fieldErrors["\(number).doubleYakuman"] {
+                                        Text(fieldError).foregroundStyle(.red)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if draft.kind == "nagashi_mangan" {
+                        Toggle("确认每位赢家的弃牌河完整且未被鸣走", isOn: $draft.attested)
+                    }
+                }
+                if draft.kind == "ryuukyoku" || draft.kind == "nagashi_mangan" {
+                    ForEach(seats) { seat in
+                        Toggle("\(seat.seatNo + 1) 号位听牌", isOn: Binding(
+                            get: { draft.tenpai[seat.seatNo] ?? false },
+                            set: { draft.tenpai[seat.seatNo] = $0 }))
+                    }
+                }
+                if input == nil {
+                    Text("请填写合法座位、每位赢家番符及役满数；流满须提供每位赢家完整的弃牌河。")
+                        .foregroundStyle(.red)
+                }
+            }
+    }
+    private func field(_ seat: Int, keyPath: WritableKeyPath<ResultDraft, [Int: String]>,
+                       fallback: String = "") -> Binding<String> {
+        Binding(get: { draft[keyPath: keyPath][seat] ?? fallback },
+                set: { draft[keyPath: keyPath][seat] = $0 })
     }
 }
