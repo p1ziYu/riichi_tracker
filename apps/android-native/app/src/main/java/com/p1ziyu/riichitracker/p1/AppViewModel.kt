@@ -41,8 +41,7 @@ data class AppState(
     val profile: MeResponse? = null, val profileError: String? = null,
     val diagnostic: String? = null, val busy: Boolean = false, val actionError: String? = null,
     val invitation: CheckInTokenDto? = null, val joinedSeat: Int? = null, val joinedMatchId: String? = null,
-    val receipt: JoinReceipt? = null, val approvalReady: Boolean = false,
-    val approvalWaiting: Boolean = false,
+    val joinSeats: CheckInSeatsDto? = null, val joinPreviewLink: CheckInLink? = null,
     val preview: BoundPreview? = null, val terminal: BoundTerminal? = null,
     val pendingResult: PendingResult? = null, val createdMatchId: String? = null,
 )
@@ -51,7 +50,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val store = TokenStore(application)
     private val api = ApiClient(store)
     private val pendingStore = PendingResultStore(application)
-    private val receiptStore = JoinReceiptStore(application)
     private val joins = JoinActions(api, api.json)
     private val state = MutableStateFlow(AppState(
         session = if (store.load() != null) SessionMode.RESTORING else SessionMode.SIGNED_OUT,
@@ -74,7 +72,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val me = api.json.decodeFromString<MeResponse>(api.get("/api/me"))
                 if (at == generation) state.value = state.value.copy(
                     session = if (me.principal.type == "guest") SessionMode.ONLINE_GUEST else SessionMode.ACCOUNT,
-                    profile = me, receipt = receiptStore.read(me.principal.id), authError = null)
+                    profile = me, authError = null)
             } catch (e: Exception) {
                 if (at == generation) state.value = state.value.copy(
                     session = if (store.load() == null) SessionMode.SIGNED_OUT else SessionMode.RESTORING,
@@ -99,7 +97,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 api.signIn(email.trim(), password, name?.trim())
                 val me = api.json.decodeFromString<MeResponse>(api.get("/api/me"))
                 generation++
-                state.value = AppState(session = SessionMode.ACCOUNT, profile = me, receipt = receiptStore.read(me.principal.id))
+                state.value = AppState(session = SessionMode.ACCOUNT, profile = me)
             } catch (error: Exception) {
                 state.value = state.value.copy(session = if (store.load() != null) SessionMode.RESTORING else SessionMode.SIGNED_OUT,
                     authBusy = false, authError = "登录或注册失败：${error.chineseMessage()}")
@@ -114,7 +112,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 api.anonymous()
                 val me = api.json.decodeFromString<MeResponse>(api.get("/api/me"))
                 generation++
-                state.value = AppState(session = SessionMode.ONLINE_GUEST, profile = me, receipt = receiptStore.read(me.principal.id))
+                state.value = AppState(session = SessionMode.ONLINE_GUEST, profile = me)
             } catch (e: Exception) {
                 state.value = state.value.copy(session = if (store.load() != null) SessionMode.RESTORING else SessionMode.SIGNED_OUT,
                     authBusy = false, authError = e.chineseMessage())
@@ -326,60 +324,45 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun finalizeSeats(id: String, dealer: Int?) = operation(id) {
         api.post("/api/matches/$id/seats/finalize", finalizeBody(dealer))
     }
-    fun beginCheckIn() { state.value = state.value.copy(joinedSeat = null, joinedMatchId = null, actionError = null) }
-    fun requestJoin(matchId: String) = operation(null) {
-        val principal = requireNotNull(state.value.profile?.principal) { "请先登录" }
-        val existing = state.value.receipt
-        val receipt = joins.request(matchId, principal.displayName, existing)
-        if (receipt == existing) return@operation
-        receiptStore.save(principal.id, receipt)
-        state.value = state.value.copy(receipt = receipt, approvalReady = false, approvalWaiting = false)
+    fun beginCheckIn() {
+        state.value = state.value.copy(joinedSeat = null, joinedMatchId = null,
+            joinSeats = null, joinPreviewLink = null, actionError = null)
     }
-    fun discardReceipt() {
-        state.value.profile?.principal?.id?.let { receiptStore.clear(it) }
-        state.value = state.value.copy(receipt = null, approvalReady = false, approvalWaiting = false)
+    fun previewJoin(link: CheckInLink) = operation(null) {
+        state.value = state.value.copy(joinSeats = null, joinPreviewLink = null)
+        val seats = joins.seats(link)
+        state.value = state.value.copy(joinSeats = seats, joinPreviewLink = link)
     }
-    /** Called by the visible check-in route; bounded so foreground waiting never spins forever. */
-    suspend fun pollApproval(receipt: JoinReceipt) {
-        val at = generation
-        state.value = state.value.copy(approvalWaiting = true)
-        try {
-            repeat(5) { attempt ->
-                if (at != generation || state.value.receipt != receipt) return
-                try {
-                    if (joins.approved(receipt.matchId)) {
-                        state.value = state.value.copy(approvalReady = true, approvalWaiting = false, actionError = null)
-                        return
-                    }
-                } catch (e: CancellationException) { throw e
-                } catch (e: Exception) {
-                    state.value = state.value.copy(actionError = error(e))
-                    return
-                }
-                if (attempt < 4) delay(3000)
-            }
-        } finally { if (at == generation) state.value = state.value.copy(approvalWaiting = false) }
-    }
-    fun checkIn(link: CheckInLink, sourceCode: String? = null) = operation(null) {
-        val result = joins.checkInRecovering(link, sourceCode)
-        state.value.profile?.principal?.id?.let { receiptStore.clear(it) }
+    fun checkIn(link: CheckInLink, seatNo: Int?, alias: String?) = operation(null) {
+        val result = joins.checkInWithSeatRefresh(link, seatNo, alias) { seats ->
+            state.value = state.value.copy(joinSeats = seats, joinPreviewLink = seats?.let { link })
+        }
         state.value = state.value.copy(joinedSeat = result.seat.seatNo, joinedMatchId = link.matchId,
-            receipt = null, approvalReady = false)
+            joinSeats = null, joinPreviewLink = null)
         loadList()
     }
     fun clearJoinedMatch() { state.value = state.value.copy(joinedMatchId = null) }
     fun byCode(code: String, onResolved: (CheckInLink) -> Unit) = operation(null) {
+        state.value = state.value.copy(joinSeats = null, joinPreviewLink = null)
         val result = joins.resolve(code)
         onResolved(CheckInLink(result.matchId, result.token,
             "https://riichi.p1ziyu.com/checkin/${result.matchId}?token=${java.net.URLEncoder.encode(result.token, "UTF-8")}"))
     }
-    fun approveReceipt(id: String, receipt: JoinReceipt, seatNo: Int, onApproved: () -> Unit) = operation(id) {
-        val table = state.value.table ?: throw IllegalStateException("请先刷新牌桌")
+    fun reassignSeat(id: String, fromSeatNo: Int, toSeatNo: Int) = operation(id) {
+        val table = requireNotNull(state.value.table) { "请先刷新牌桌" }
         check(table.match.id == id && table.match.status == "preparing" &&
             table.match.ownerPrincipalId == state.value.profile?.principal?.id &&
-            table.seats.any { it.seatNo == seatNo && it.principalId == null }) { "座位已变化，请刷新牌桌" }
-        joins.approve(receipt, seatNo, id)
-        onApproved()
+            fromSeatNo != toSeatNo && table.seats.any { it.seatNo == fromSeatNo && it.principalId != null } &&
+            table.seats.any { it.seatNo == toSeatNo }) { "座位已变化，请刷新牌桌" }
+        joins.reassign(id, fromSeatNo, toSeatNo)
+    }
+    fun removeMember(id: String, principalId: String) = operation(id) {
+        val table = requireNotNull(state.value.table) { "请先刷新牌桌" }
+        check(table.match.id == id && table.match.status == "preparing" &&
+            table.match.ownerPrincipalId == state.value.profile?.principal?.id &&
+            principalId != table.match.ownerPrincipalId &&
+            table.seats.any { it.principalId == principalId }) { "成员已变化，请刷新牌桌" }
+        joins.remove(id, principalId)
     }
     fun mark(id: String, hand: CurrentHandDto, seat: HandSeatDto, riichi: Boolean) = operation(id) {
         val rules = state.value.table?.match?.rulesSnapshot

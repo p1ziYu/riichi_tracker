@@ -59,7 +59,11 @@ import kotlinx.serialization.json.jsonPrimitive
 @Serializable data class CreatedMatchData(val id: String, val joinCode: String? = null)
 @Serializable data class CheckInTokenDto(val token: String, val expiresAt: String)
 @Serializable data class ByCodeDto(val matchId: String, val token: String, val expiresAt: String)
-@Serializable data class CheckInDto(val seat: CheckInSeat)
+@Serializable data class CheckInSeatsDto(val match: CheckInMatchDto, val seats: List<SeatDto>)
+@Serializable data class CheckInMatchDto(val id: String, val playerCount: Int, val status: String)
+@Serializable data class ReassignDto(val fromSeatNo: Int, val toSeatNo: Int, val swapped: Boolean)
+@Serializable data class RemoveMemberDto(val removed: Boolean)
+@Serializable data class CheckInDto(val seat: CheckInSeat, val grantId: String)
 @Serializable data class CheckInSeat(val seatNo: Int)
 @Serializable data class PrincipalDto(
     val id: String, val displayName: String, val type: String, val createdAt: String? = null,

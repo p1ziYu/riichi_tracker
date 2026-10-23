@@ -119,12 +119,12 @@ private fun MainContent(model: AppViewModel, state: AppState, onPasteLink: () ->
             composable<Lobby> {
                 MatchListScreen(true, state.matches, state.templates, state.listLoading, state.listError,
                     state.listLoading, model::loadList, { nav.navigate(Table(it)) }, { nav.navigate(History) },
-                    { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName, state.receipt)
+                    { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName)
             }
             composable<History> {
                 MatchListScreen(false, state.matches, state.templates, state.listLoading, state.listError,
                     state.listLoading, model::loadList, { nav.navigate(Table(it)) }, { nav.navigate(History) },
-                    { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName, state.receipt)
+                    { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName)
             }
             composable<Create> {
                 CreateScreen(state.templates, state.busy, state.actionError, model::createMatch) { nav.popBackStack() }

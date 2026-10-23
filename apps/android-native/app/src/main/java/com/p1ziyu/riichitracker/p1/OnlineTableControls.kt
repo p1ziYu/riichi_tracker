@@ -24,14 +24,14 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
     var dealer by remember(id) { mutableStateOf<Int?>(null) }
     var showResult by remember(id) { mutableStateOf(false) }
     var confirmFinish by remember(id) { mutableStateOf(false) }
-    var receiptText by remember(id) { mutableStateOf("") }
-    var scanReceipt by remember(id) { mutableStateOf(false) }
+    var movingSeat by remember(id) { mutableStateOf<Int?>(null) }
+    var removingSeat by remember(id) { mutableStateOf<SeatDto?>(null) }
     val clipboard = LocalClipboardManager.current
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (state.actionError != null) Text(state.actionError, color = MaterialTheme.colorScheme.error)
         if (preparing && isOwner) {
             Text("桌主座位与邀请", color = Brand.goldText, style = MaterialTheme.typography.titleLarge)
-            Text("房主需自行选座。先开放申请，核对访客出示的凭证并批准空座；所有座位需已签到才可确认座次。", color = Brand.text)
+            Text("房主选座后分享房间码或十分钟签到链接。访客直接选座签到；座位满员且已签到即可确认座次。", color = Brand.text)
             table.seats.sortedBy { it.seatNo }.forEach { seat ->
                 if (seat.principalId == null || seat.principalId == principal && seat.status != "checked_in")
                     OutlinedButton(onClick = { model.claim(id, seat.seatNo) }, enabled = !state.busy,
@@ -46,7 +46,7 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
                 Text("房间码：$code", color = Brand.goldText)
                 OutlinedButton(onClick = { clipboard.setText(AnnotatedString(code)) }) { Text("复制房间码") }
             }
-            Button(onClick = { model.invite(id) }, enabled = !state.busy) { Text("生成十分钟签到链接（同时开放申请）") }
+            Button(onClick = { model.invite(id) }, enabled = !state.busy) { Text("生成十分钟签到链接") }
             state.invitation?.let { token ->
                 val valid = runCatching { java.time.Instant.parse(token.expiresAt).isAfter(java.time.Instant.now()) }.getOrDefault(false)
                 if (valid) {
@@ -56,27 +56,16 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
                     OutlinedButton(onClick = { clipboard.setText(AnnotatedString(link)) }) { Text("复制玩家签到链接") }
                 } else Text("签到链接已过期，请重新生成", color = Brand.text)
             }
-            Text("批准访客申请 · 请核对现场出示的自述昵称与目标牌桌", color = Brand.goldText)
-            OutlinedButton(onClick = { scanReceipt = !scanReceipt }) { Text(if (scanReceipt) "关闭扫码" else "扫码确认入座") }
-            if (scanReceipt) CheckInScanner(accept = { parseJoinReceipt(it) != null }) {
-                receiptText = it; scanReceipt = false
-            }
-            OutlinedTextField(receiptText, { receiptText = it }, label = { Text("粘贴申请凭证 JSON") },
-                modifier = Modifier.fillMaxWidth())
-            val parsed = parseJoinReceipt(receiptText)
-            val receipt = parsed?.takeIf { it.matchId == id }
-            if (receiptText.isNotBlank() && parsed == null)
-                Text("申请凭证格式无效", color = MaterialTheme.colorScheme.error)
-            if (parsed != null && receipt == null)
-                Text("申请凭证属于其他牌桌，不能批准入座", color = MaterialTheme.colorScheme.error)
-            receipt?.let { request ->
-                Text("自述昵称（未验证）：${request.name}", color = Brand.text)
-                Text("申请编号：${request.joinRequestId}", color = Brand.text)
-                OutlinedButton(onClick = { clipboard.setText(AnnotatedString(request.joinRequestId)) }) { Text("复制申请编号") }
-                table.seats.filter { it.principalId == null }.sortedBy { it.seatNo }.forEach { seat ->
-                    OutlinedButton(onClick = { model.approveReceipt(id, request, seat.seatNo) { receiptText = "" } },
-                        enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
-                        Text("批准 ${request.name} 入 ${seat.seatNo + 1} 号空座")
+            Text("已入座成员 · 可在开局前移动、交换座位或移除访客", color = Brand.goldText)
+            table.seats.sortedBy { it.seatNo }.forEach { seat ->
+                Text("${seat.seatNo + 1} 号位 · ${seat.displayName ?: "空座"} · ${if (seat.status == "checked_in") "已签到" else if (seat.principalId != null) "已入座" else "空座"}",
+                    color = Brand.text)
+                if (seat.principalId != null) {
+                    OutlinedButton(onClick = { movingSeat = seat.seatNo }, enabled = !state.busy) {
+                        Text("移动 / 交换 ${seat.displayName ?: "${seat.seatNo + 1}号位"}")
+                    }
+                    if (seat.principalId != principal) OutlinedButton(onClick = { removingSeat = seat }, enabled = !state.busy) {
+                        Text("移除 ${seat.displayName ?: "${seat.seatNo + 1}号位"}")
                     }
                 }
             }
@@ -124,6 +113,36 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
         dismissButton = { TextButton(onClick = { confirmFinish = false }) { Text("取消") } })
     if (showResult && hand != null && open) {
         ResultEditor(id, table, hand, state, model) { showResult = false }
+    }
+    movingSeat?.let { from ->
+        val source = table.seats.firstOrNull { it.seatNo == from && it.principalId != null }
+        if (source == null || !preparing || !isOwner) movingSeat = null else AlertDialog(
+            onDismissRequest = { movingSeat = null },
+            title = { Text("调整 ${source.displayName ?: "${from + 1}号位"} 的座位") },
+            text = {
+                Column(Modifier.heightIn(max = 400.dp).verticalScroll(androidx.compose.foundation.rememberScrollState())) {
+                    table.seats.sortedBy { it.seatNo }.filterNot { it.seatNo == from }.forEach { target ->
+                        TextButton(onClick = { movingSeat = null; model.reassignSeat(id, from, target.seatNo) },
+                            enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
+                            Text("${target.seatNo + 1}号位 · ${target.displayName ?: "空座"} · ${if (target.principalId == null) "移动" else "交换"}")
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { movingSeat = null }) { Text("取消") } })
+    }
+    removingSeat?.let { seat ->
+        if (!preparing || !isOwner || seat.principalId == null ||
+            table.seats.none { it.seatNo == seat.seatNo && it.principalId == seat.principalId }) removingSeat = null
+        else AlertDialog(onDismissRequest = { removingSeat = null },
+            title = { Text("移除 ${seat.displayName ?: "${seat.seatNo + 1}号位"}？") },
+            text = { Text("此操作将腾出 ${seat.seatNo + 1} 号位；该成员需要新的签到凭证才能重新加入。") },
+            confirmButton = { TextButton(onClick = {
+                removingSeat = null
+                model.removeMember(id, seat.principalId)
+            }, enabled = !state.busy) { Text("确认移除") } },
+            dismissButton = { TextButton(onClick = { removingSeat = null }) { Text("取消") } })
     }
 }
 

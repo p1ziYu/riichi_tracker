@@ -139,7 +139,7 @@ fun CreateScreen(templates: List<TemplateDto>, busy: Boolean, serverError: Strin
                 Text("规则仅调整此桌；提交后服务端冻结规则快照。", color = Brand.text)
                 Text("已自定义 ${rules.changed} 项 · ${rules.playerCount} 麻", color = Brand.text)
                 Button(onClick = { onCreate(rules) }, enabled = !busy && runCatching { rules.validated() }.isSuccess) { Text(if (busy) "正在创建…" else "创建在线牌桌") }
-                Text("创建后桌主仍须选座，其他玩家须获批准并签到，才能确认座次。", color = Brand.muted)
+                Text("创建后桌主先选座；其他玩家可用房间码或链接直接选座签到，座位齐备后确认开局。", color = Brand.muted)
             }
             OutlinedButton(onClick = { step = if (step == 2) 1 else 0 }) { Text("返回上一步") }
         }
