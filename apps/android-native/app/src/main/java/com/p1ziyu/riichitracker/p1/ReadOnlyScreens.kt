@@ -399,6 +399,16 @@ fun CheckInScreen(initial: String?, state: AppState, model: AppViewModel, onClos
     var scanner by remember { mutableStateOf(false) }
     var resolved by remember { mutableStateOf<CheckInLink?>(null) }
     val link = resolved ?: parseCheckInLink(input)
+    var attempted by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(link?.matchId, link?.token) {
+        if (link?.hasToken == true && state.session in listOf(SessionMode.ACCOUNT, SessionMode.ONLINE_GUEST)) {
+            val key = "${link.matchId}:${link.token}"
+            if (attempted != key) {
+                attempted = key
+                model.checkIn(link)
+            }
+        }
+    }
     Column(Modifier.fillMaxSize().background(Brand.background).verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)) {
         BrandLockup()

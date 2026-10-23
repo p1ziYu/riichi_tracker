@@ -92,6 +92,7 @@ struct CheckInScreen: View {
     @State private var notice: String?
     @State private var completed = false
     @State private var resolved: JoinCodeDTO?
+    @State private var attempted: String?
     let onCompleted: () -> Void
     init(session: AppSession, link: String?, onCompleted: @escaping () -> Void = {}) {
         self.session = session
@@ -140,6 +141,13 @@ struct CheckInScreen: View {
         .background(Brand.background)
         .tint(Brand.gold)
         .navigationTitle("签到")
+        .task(id: session.authenticated ? destination?.token : nil) {
+            guard session.authenticated, let destination else { return }
+            let key = "\(destination.matchID):\(destination.token)"
+            guard attempted != key else { return }
+            attempted = key
+            await checkIn()
+        }
         .sheet(isPresented: $scanning) {
             NavigationStack {
                 CameraScanner { value in
