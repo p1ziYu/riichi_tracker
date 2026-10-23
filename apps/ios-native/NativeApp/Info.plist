@@ -15,14 +15,6 @@
     <key>APIBaseURL</key><string>$(API_BASE_URL)</string>
     <key>NSCameraUsageDescription</key><string>扫描同桌出示的一姬签到二维码；也可直接粘贴签到链接。</string>
     <key>UIAppFonts</key><array><string>LXGWWenKaiScreen-Display.ttf</string></array>
-    <key>NSAppTransportSecurity</key><dict>
-        <key>NSExceptionDomains</key><dict>
-            <!-- TRIAL ONLY: disposable test API at 100.64.172.17; never use against production. -->
-            <key>100.64.172.17</key><dict>
-                <key>NSExceptionAllowsInsecureHTTPLoads</key><true/>
-            </dict>
-        </dict>
-    </dict>
     <key>CFBundleURLTypes</key><array><dict>
         <key>CFBundleURLName</key><string>com.p1ziyu.riichitracker.native.checkin</string>
         <key>CFBundleURLSchemes</key><array><string>ichihime-native</string></array>
