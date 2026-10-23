@@ -14,6 +14,9 @@ internal fun isFinishedMatch(status: String): Boolean = when (status.lowercase(L
 internal fun finishedOwnMatches(matches: List<MatchSummary>): List<MatchSummary> =
     matches.filter { isFinishedMatch(it.status) }.sortedByDescending { it.createdAt }
 
+internal fun ownHistoryMatches(matches: List<MatchSummary>): List<MatchSummary> =
+    matches.sortedByDescending { it.createdAt }
+
 internal fun matchStatusLabel(status: String): String = when (status.lowercase(Locale.ROOT)) {
     "preparing", "lobby" -> "等待座次确认"
     "active", "in_progress" -> "牌局进行中"

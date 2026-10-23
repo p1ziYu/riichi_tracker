@@ -18,13 +18,14 @@ class MatchDisplayTest {
         assertEquals("时间未提供", localMatchTime(null, TimeZone.getTimeZone("UTC")))
     }
 
-    @Test fun ownHistoryExcludesPreparingAndActiveMatches() {
+    @Test fun ownHistoryIncludesPreparingAndActiveMatchesInRecentFirstOrder() {
         val fixture = requireNotNull(javaClass.classLoader?.getResource("matches_mine.json")).readText()
         val ownList = Json { ignoreUnknownKeys = true }.decodeFromString<List<MatchSummary>>(fixture)
         val preparing = ownList.single()
-        val active = preparing.copy(id = "active", status = "active")
-        val finished = preparing.copy(id = "finished", status = "finished")
-        val completed = preparing.copy(id = "completed", status = "completed")
-        assertEquals(listOf("finished", "completed"), finishedOwnMatches(listOf(preparing, active, finished, completed)).map { it.id })
+        val active = preparing.copy(id = "active", status = "active", createdAt = "2026-10-22T04:34:13.715Z")
+        val finished = preparing.copy(id = "finished", status = "finished", createdAt = "2026-10-21T04:34:13.715Z")
+        val completed = preparing.copy(id = "completed", status = "completed", createdAt = "2026-10-20T04:34:13.715Z")
+        assertEquals(listOf(preparing.id, "active", "finished", "completed"),
+            ownHistoryMatches(listOf(completed, finished, active, preparing)).map { it.id })
     }
 }

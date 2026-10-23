@@ -253,7 +253,7 @@ struct MatchListScreen: View {
     @State private var showCreateNotice = false
 
     private var ordered: [MatchSummary] {
-        (matches ?? []).filter { lobby || isFinished($0.status) }.sorted { lhs, rhs in
+        (matches ?? []).sorted { lhs, rhs in
             if lobby && isFinished(lhs.status) != isFinished(rhs.status) {
                 return !isFinished(lhs.status)
             }
@@ -262,7 +262,7 @@ struct MatchListScreen: View {
     }
 
     private var liveMatches: [MatchSummary] { ordered.filter { !isFinished($0.status) } }
-    private var recentMatches: [MatchSummary] { ordered.filter { isFinished($0.status) } }
+    private var recentMatches: [MatchSummary] { lobby ? ordered.filter { isFinished($0.status) } : ordered }
 
     private func row(_ match: MatchSummary) -> some View {
         NavigationLink(value: match.id) {
@@ -353,7 +353,7 @@ struct MatchListScreen: View {
                     }
                 }
             }
-            Section(lobby ? "战绩 · 最近对局" : "战绩 · 已结束的牌桌") {
+            Section(lobby ? "战绩 · 最近对局" : "战绩 · 对局记录") {
                 if matches != nil && recentMatches.isEmpty {
                     Text("暂无对局记录，下拉刷新试试").foregroundStyle(Brand.muted).brandPanel()
                 }

@@ -205,12 +205,13 @@ fun MatchListScreen(
                 }
                 items(finished.take(2), key = { "teaser:${it.id}" }) { MatchRow(it, templates, onOpen) }
             } else {
+                val history = ownHistoryMatches(matches.orEmpty())
                 item { Heading("战绩") }
-                item { Caption("自己的已结束对局 · 下拉刷新") }
+                item { Caption("自己的对局记录 · 下拉刷新") }
                 if (loading && matches == null) item { CircularProgressIndicator() }
                 if (error != null) item { Text("加载失败：$error", color = MaterialTheme.colorScheme.error); TextButton(onClick = onRefresh) { Text("重试") } }
-                if (!loading && matches != null && finished.isEmpty()) item { Caption("暂无已结束的对局记录。") }
-                items(finished, key = { it.id }) { MatchRow(it, templates, onOpen) }
+                if (!loading && matches != null && history.isEmpty()) item { Caption("暂无对局记录。") }
+                items(history, key = { it.id }) { MatchRow(it, templates, onOpen) }
             }
         }
     }
