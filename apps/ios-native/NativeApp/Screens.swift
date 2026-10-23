@@ -647,6 +647,17 @@ struct ProfileScreen: View {
 
     var body: some View {
         List {
+            Section {
+                HStack(spacing: 12) {
+                    EastTile(size: 38)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("一姬").font(Brand.display(29)).foregroundStyle(Brand.text)
+                        Text("ICHIHIME").font(.caption2).tracking(3).foregroundStyle(Brand.gold)
+                    }
+                }
+                .padding(.vertical, 12)
+            }
+            .listRowBackground(Brand.panel)
             Section("我的账号") {
                 if loading && session.profile == nil { ProgressView("读取账号中…") }
                 if let error {
