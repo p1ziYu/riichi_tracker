@@ -1,0 +1,271 @@
+[
+  {
+    "templateId": "14f6e437-8e19-4630-bbe9-7b05f34cad75",
+    "templateKey": "reference_3p_common",
+    "kind": "3p",
+    "scope": "system",
+    "versionId": "9867b965-52ac-4b01-953e-4f6354f7ee78",
+    "name": "三麻常见玩法参考",
+    "reviewStatus": "pending",
+    "config": {
+      "oka": 15,
+      "uma": [
+        20,
+        0,
+        -20
+      ],
+      "honbaRon": 200,
+      "multiRon": "double_ron",
+      "tsumoLoss": true,
+      "playerCount": 3,
+      "riichiStick": 1000,
+      "templateKey": "common_3p_ref_v1",
+      "bustEndsGame": true,
+      "kazoeYakuman": true,
+      "returnPoints": 40000,
+      "targetPoints": 40000,
+      "doubleYakuman": false,
+      "honbaPerPayer": 100,
+      "kiriageMangan": false,
+      "pendingReview": [
+        "ryuukyoku_penalty_2000_candidate",
+        "tile_set",
+        "kita_nukidora",
+        "dora",
+        "end_conditions",
+        "payments"
+      ],
+      "tiedUmaPolicy": "seat_order",
+      "startingPoints": 35000,
+      "compositeYakuman": true,
+      "notenPenaltyTotal": 2000,
+      "automaticEndPolicy": "ranked_sanma",
+      "allowLowPointRiichi": false,
+      "doubleRonHonbaPolicy": "nearest_only",
+      "fixedSouth4EndPolicy": "target_or_bust",
+      "nagashiManganEnabled": true,
+      "terminalRiichiPoolPolicy": "first",
+      "nagashiCollectsRiichiPool": false,
+      "nagashiDealerRepeatRequiresTenpai": true,
+      "startPoints": 35000,
+      "umaTenths": [
+        200,
+        0,
+        -200
+      ],
+      "okaTenths": 150,
+      "ryuukyokuPenaltyTotal": 2000,
+      "ryuukyokuPoolTotal": 2000,
+      "roundLength": "south",
+      "endTarget": 40000,
+      "maxRounds": 12,
+      "dealerFinish": true,
+      "bustEndsMatch": true,
+      "openTanyao": true,
+      "redFives": 2,
+      "sanmaTsumoLoss": true,
+      "doubleRon": true
+    }
+  },
+  {
+    "templateId": "275a39c7-47bd-4b8e-9989-f691754bb2a7",
+    "templateKey": "house_3p",
+    "kind": "3p",
+    "scope": "system",
+    "versionId": "43852e80-a398-4efe-bf8a-18d5aba805a4",
+    "name": "三麻家规",
+    "reviewStatus": "reviewed",
+    "config": {
+      "honba": {
+        "ronTotal": 200,
+        "tsumoPerPayer": 100
+      },
+      "kuitan": true,
+      "akaDora": {
+        "man": 0,
+        "pin": 1,
+        "sou": 1
+      },
+      "autoPao": false,
+      "tiebreak": "initial_seat_order",
+      "okaTenths": 150,
+      "umaTenths": [
+        200,
+        0,
+        -200
+      ],
+      "multipleRon": {
+        "double": "allowed"
+      },
+      "playerCount": 3,
+      "riichiStick": 1000,
+      "kazoeYakuman": "single_yakuman_at_13_han",
+      "returnPoints": 40000,
+      "tsumoPayment": "tsumo_loss",
+      "doubleYakuman": false,
+      "kiriageMangan": false,
+      "doubleWindPair": "designated_round_and_seat_wind",
+      "startingPoints": 35000,
+      "multipleRonPool": "nearest_winner_after_discarder",
+      "compositeYakuman": true,
+      "multipleRonHonba": "each_winner",
+      "autoChomboPenalty": false,
+      "autoNagashiMangan": false,
+      "bustEndsBelowZero": true,
+      "ryuukyokuPenaltyTotal": 3000,
+      "startPoints": 35000,
+      "uma": [
+        20,
+        0,
+        -20
+      ],
+      "ryuukyokuPoolTotal": 3000,
+      "honbaPerPayer": 100,
+      "roundLength": "south",
+      "endTarget": 40000,
+      "maxRounds": 12,
+      "dealerFinish": true,
+      "bustEndsMatch": true,
+      "openTanyao": true,
+      "redFives": 2,
+      "sanmaTsumoLoss": true,
+      "doubleRon": true
+    }
+  },
+  {
+    "templateId": "4041d028-89c1-4ecd-9974-c28afdd582a8",
+    "templateKey": "reference_4p_competition",
+    "kind": "4p",
+    "scope": "system",
+    "versionId": "d40c5ee7-a924-45b6-93ec-aaae57db1218",
+    "name": "四麻国际竞技参考",
+    "reviewStatus": "pending",
+    "config": {
+      "oka": 0,
+      "uma": [
+        15,
+        5,
+        -5,
+        -15
+      ],
+      "akaDora": {
+        "man": 0,
+        "pin": 0,
+        "sou": 0
+      },
+      "honbaRon": 300,
+      "multiRon": "head_bump",
+      "tsumoLoss": false,
+      "playerCount": 4,
+      "riichiStick": 1000,
+      "templateKey": "wrc_4p_ref_v1",
+      "bustEndsGame": false,
+      "kazoeYakuman": true,
+      "returnPoints": 30000,
+      "targetPoints": 30000,
+      "doubleYakuman": false,
+      "honbaPerPayer": 100,
+      "kiriageMangan": true,
+      "pendingReview": [
+        "competition_penalties"
+      ],
+      "tiedUmaPolicy": "split",
+      "startingPoints": 30000,
+      "compositeYakuman": true,
+      "notenPenaltyTotal": 3000,
+      "automaticEndPolicy": "manual",
+      "allowLowPointRiichi": true,
+      "doubleRonHonbaPolicy": "nearest_only",
+      "fixedSouth4EndPolicy": "completed_south_4",
+      "nagashiManganEnabled": false,
+      "terminalRiichiPoolPolicy": "unallocated",
+      "startPoints": 30000,
+      "umaTenths": [
+        150,
+        50,
+        -50,
+        -150
+      ],
+      "okaTenths": 0,
+      "ryuukyokuPenaltyTotal": 3000,
+      "ryuukyokuPoolTotal": 3000,
+      "roundLength": "south",
+      "endTarget": 30000,
+      "maxRounds": 12,
+      "dealerFinish": true,
+      "bustEndsMatch": false,
+      "openTanyao": true,
+      "redFives": 0,
+      "sanmaTsumoLoss": false,
+      "doubleRon": false
+    }
+  },
+  {
+    "templateId": "8369e805-15d7-481e-94c1-1f2c39ac98d7",
+    "templateKey": "house_4p",
+    "kind": "4p",
+    "scope": "system",
+    "versionId": "173bfd06-b7f6-454f-b720-9745f47c0790",
+    "name": "四麻家规",
+    "reviewStatus": "reviewed",
+    "config": {
+      "honba": {
+        "ronTotal": 300,
+        "tsumoPerPayer": 100
+      },
+      "kuitan": true,
+      "akaDora": {
+        "man": 1,
+        "pin": 1,
+        "sou": 1
+      },
+      "autoPao": false,
+      "tiebreak": "initial_seat_order",
+      "okaTenths": 200,
+      "umaTenths": [
+        200,
+        100,
+        -100,
+        -200
+      ],
+      "multipleRon": {
+        "double": "allowed",
+        "triple": "abortive_draw"
+      },
+      "playerCount": 4,
+      "riichiStick": 1000,
+      "kazoeYakuman": "single_yakuman_at_13_han",
+      "returnPoints": 30000,
+      "tsumoPayment": "standard",
+      "doubleYakuman": false,
+      "kiriageMangan": false,
+      "doubleWindPair": "fu_4",
+      "startingPoints": 25000,
+      "multipleRonPool": "nearest_winner_after_discarder",
+      "compositeYakuman": true,
+      "multipleRonHonba": "each_winner",
+      "autoChomboPenalty": false,
+      "autoNagashiMangan": false,
+      "bustEndsBelowZero": true,
+      "ryuukyokuPenaltyTotal": 3000,
+      "startPoints": 25000,
+      "uma": [
+        20,
+        10,
+        -10,
+        -20
+      ],
+      "ryuukyokuPoolTotal": 3000,
+      "honbaPerPayer": 100,
+      "roundLength": "south",
+      "endTarget": 30000,
+      "maxRounds": 12,
+      "dealerFinish": true,
+      "bustEndsMatch": true,
+      "openTanyao": true,
+      "redFives": 3,
+      "sanmaTsumoLoss": false,
+      "doubleRon": true
+    }
+  }
+]

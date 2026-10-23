@@ -1,0 +1,109 @@
+{
+  "match": {
+    "id": "72fa6a0d-67a5-4235-b7f0-e5f551226a42",
+    "ownerPrincipalId": "4334cf00-6cd0-4c69-81ce-12f3d2424b0b",
+    "playerCount": 4,
+    "rulesetVersionId": "173bfd06-b7f6-454f-b720-9745f47c0790",
+    "rulesSnapshot": {
+      "honba": {
+        "ronTotal": 300,
+        "tsumoPerPayer": 100
+      },
+      "kuitan": true,
+      "akaDora": {
+        "man": 1,
+        "pin": 1,
+        "sou": 1
+      },
+      "autoPao": false,
+      "tiebreak": "initial_seat_order",
+      "okaTenths": 200,
+      "umaTenths": [
+        200,
+        100,
+        -100,
+        -200
+      ],
+      "multipleRon": {
+        "double": "allowed",
+        "triple": "abortive_draw"
+      },
+      "playerCount": 4,
+      "riichiStick": 1000,
+      "kazoeYakuman": "single_yakuman_at_13_han",
+      "returnPoints": 30000,
+      "tsumoPayment": "standard",
+      "doubleYakuman": false,
+      "kiriageMangan": false,
+      "doubleWindPair": "fu_4",
+      "startingPoints": 25000,
+      "multipleRonPool": "nearest_winner_after_discarder",
+      "compositeYakuman": true,
+      "multipleRonHonba": "each_winner",
+      "autoChomboPenalty": false,
+      "autoNagashiMangan": false,
+      "bustEndsBelowZero": true,
+      "ryuukyokuPenaltyTotal": 3000
+    },
+    "rulesHash": "335a00f1c05e8ef884dbeb0e3fdd9785476a01d459c46fbdc4d43ca16e757f37",
+    "engineVersion": "0.1.0",
+    "status": "preparing",
+    "state": "preparing",
+    "version": 0,
+    "currentHandId": null,
+    "settlementConfirmed": false,
+    "createdAt": "2026-10-23T04:34:13.715Z",
+    "startedAt": null,
+    "endedAt": null
+  },
+  "seats": [
+    {
+      "seatNo": 0,
+      "principalId": "4334cf00-6cd0-4c69-81ce-12f3d2424b0b",
+      "displayName": "Disposable Fixture Owner",
+      "points": 25000,
+      "status": "checked_in"
+    },
+    {
+      "seatNo": 1,
+      "principalId": null,
+      "displayName": null,
+      "points": 25000,
+      "status": "empty"
+    },
+    {
+      "seatNo": 2,
+      "principalId": null,
+      "displayName": null,
+      "points": 25000,
+      "status": "empty"
+    },
+    {
+      "seatNo": 3,
+      "principalId": null,
+      "displayName": null,
+      "points": 25000,
+      "status": "empty"
+    }
+  ],
+  "currentHand": null,
+  "scoreboard": [
+    {
+      "seatNo": 0,
+      "points": 25000
+    },
+    {
+      "seatNo": 1,
+      "points": 25000
+    },
+    {
+      "seatNo": 2,
+      "points": 25000
+    },
+    {
+      "seatNo": 3,
+      "points": 25000
+    }
+  ],
+  "checkedIn": 1
+}

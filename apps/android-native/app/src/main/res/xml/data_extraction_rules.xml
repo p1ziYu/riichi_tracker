@@ -1,0 +1,8 @@
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="auth-token.bin" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="auth-token.bin" />
+    </device-transfer>
+</data-extraction-rules>
