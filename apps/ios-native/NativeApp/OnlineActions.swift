@@ -393,6 +393,17 @@ enum InvitationClock {
 }
 
 
+private struct PendingResolutionInput {
+    let body: Data
+    let handID: String
+    let command: ResultCommand?
+}
+
+private struct ResultEntryInput {
+    let hand: CurrentHandDTO
+    let principal: String
+}
+
 @MainActor
 struct OnlineTableActions: View {
     let session: AppSession
@@ -422,6 +433,15 @@ struct OnlineTableActions: View {
     private var base: String { "/api/matches/\(matchID)" }
     private var isOwner: Bool { session.principalID != nil && session.principalID == snapshot.match.ownerPrincipalId }
     private var signedIn: Bool { session.principalID != nil && snapshot.seats.contains { $0.principalId == session.principalID && $0.status == "checked_in" } }
+    private var pendingResolutionInput: PendingResolutionInput? {
+        guard signedIn, let pendingBody, let pendingHand else { return nil }
+        return PendingResolutionInput(body: pendingBody, handID: pendingHand, command: pendingCommand)
+    }
+    private var resultEntryInput: ResultEntryInput? {
+        guard let hand = snapshot.currentHand, let principal = session.principalID,
+              OnlineCommandPolicy.canWrite(snapshot, principal: principal) else { return nil }
+        return ResultEntryInput(hand: hand, principal: principal)
+    }
     private var occupiedSeats: [SeatDTO] {
         snapshot.seats.filter { $0.principalId != nil }.sorted { $0.seatNo < $1.seatNo }
     }
@@ -466,8 +486,8 @@ struct OnlineTableActions: View {
                         terminalVersion = snapshot.match.version
                     }
                 }.disabled(busy)
-                if let terminal, terminalVersion == snapshot.match.version {
-                    ForEach(terminal.standings.sorted { $0.rank < $1.rank }, id: \.seatNo) { standing in
+                if let currentTerminal = terminal, terminalVersion == snapshot.match.version {
+                    ForEach(currentTerminal.standings.sorted { $0.rank < $1.rank }, id: \.seatNo) { standing in
                         Text("第 \(standing.rank) 名 · \(standing.seatNo + 1) 号位 · \(Double(standing.totalTenths) / 10) 分")
                     }
                     if OnlineCommandPolicy.canConfirmSettlement(snapshot, principal: session.principalID) {
@@ -497,30 +517,30 @@ struct OnlineTableActions: View {
             Text("移除 \(memberName) 将释放其座位；对方可使用新的有效凭证重新加入。")
         }
         .sheet(isPresented: $showResult) {
-            if let hand = snapshot.currentHand, let principal = session.principalID,
-               OnlineCommandPolicy.canWrite(snapshot, principal: principal) {
+            if let input = resultEntryInput {
                 NavigationStack {
-                    ResultEntry(snapshot: snapshot, hand: hand, api: session.api, principal: principal,
+                    ResultEntry(snapshot: snapshot, hand: input.hand, api: session.api, principal: input.principal,
                                 onAccessDenied: { await onUpdated() }) { body in
-                        guard session.principalID == principal,
-                              OnlineCommandPolicy.canWrite(snapshot, principal: principal) else {
+                        guard session.principalID == input.principal,
+                              OnlineCommandPolicy.canWrite(snapshot, principal: input.principal) else {
                             throw APIError(status: 403, message: "当前身份已无本局写入权限")
                         }
-                        try OnlinePrivateStore.live.savePending(body, handID: hand.id, principal: principal, match: matchID)
+                        try OnlinePrivateStore.live.savePending(body, handID: input.hand.id, principal: input.principal, match: matchID)
                         pendingBody = body
-                        pendingHand = hand.id
+                        pendingHand = input.hand.id
                         pendingCommand = try JSONDecoder().decode(ResultCommand.self, from: body)
                         pendingReviewed = false
                         reviewedHand = nil
                         do {
+                            let hand = input.hand
                             let _: PaymentPreviewDTO = try await session.api.postRaw("\(base)/hands/\(hand.id)/results", data: body)
-                            try OnlinePrivateStore.live.clearPending(principal: principal, match: matchID)
-                            if session.principalID == principal {
+                            try OnlinePrivateStore.live.clearPending(principal: input.principal, match: matchID)
+                            if session.principalID == input.principal {
                                 pendingBody = nil
                                 pendingHand = nil
                                 pendingCommand = nil
                             }
-                            try? OnlinePrivateStore.live.clearDraft(principal: principal, match: matchID, hand: hand.id)
+                            try? OnlinePrivateStore.live.clearDraft(principal: input.principal, match: matchID, hand: input.hand.id)
                             showResult = false
                             await onUpdated()
                         } catch {
@@ -550,10 +570,10 @@ struct OnlineTableActions: View {
         }
     }
     @ViewBuilder private var pendingResolutionControls: some View {
-        if let pendingBody = pendingBody, let pendingHand = pendingHand, signedIn {
+        if let input = pendingResolutionInput {
             Text("结果未确认：待确认请求必须先核对，不能编辑后复用旧 clientEventId。")
-            if let pendingCommand, snapshot.currentHand?.id == pendingHand,
-               snapshot.currentHand?.markRevision != pendingCommand.confirmedMarkRevision {
+            if let command = input.command, snapshot.currentHand?.id == input.handID,
+               snapshot.currentHand?.markRevision != command.confirmedMarkRevision {
                 Text("立直标记版本已变化；旧请求不可更改版本后重发。请核对标记并重新预览。")
                     .foregroundStyle(.orange)
             }
@@ -564,21 +584,22 @@ struct OnlineTableActions: View {
                     guard let principal = session.principalID,
                           OnlineCommandPolicy.canWrite(snapshot, principal: principal),
                           pendingReviewed,
-                          OnlineCommandPolicy.canResend(pendingCommand, hand: reviewedHand, handID: pendingHand),
-                          OnlineCommandPolicy.canResend(pendingCommand, hand: snapshot.currentHand, handID: pendingHand) else {
+                          OnlineCommandPolicy.canResend(input.command, hand: reviewedHand, handID: input.handID),
+                          OnlineCommandPolicy.canResend(input.command, hand: snapshot.currentHand, handID: input.handID) else {
                         throw APIError(status: nil, message: "标记已变化或尚未刷新核对，请重新预览")
                     }
-                    let _: PaymentPreviewDTO = try await session.api.postRaw("\(base)/hands/\(pendingHand)/results", data: pendingBody)
+                    let pendingHand = input.handID
+                    let _: PaymentPreviewDTO = try await session.api.postRaw("\(base)/hands/\(pendingHand)/results", data: input.body)
                     try OnlinePrivateStore.live.clearPending(principal: principal, match: matchID)
                     if session.principalID == principal {
                         pendingBody = nil; self.pendingHand = nil; pendingCommand = nil
                     }
-                    try? OnlinePrivateStore.live.clearDraft(principal: principal, match: matchID, hand: pendingHand)
+                    try? OnlinePrivateStore.live.clearDraft(principal: principal, match: matchID, hand: input.handID)
                 }
             }.disabled(busy || !pendingReviewed ||
                         !OnlineCommandPolicy.canWrite(snapshot, principal: session.principalID) ||
-                        !OnlineCommandPolicy.canResend(pendingCommand, hand: reviewedHand, handID: pendingHand) ||
-                        !OnlineCommandPolicy.canResend(pendingCommand, hand: snapshot.currentHand, handID: pendingHand))
+                        !OnlineCommandPolicy.canResend(input.command, hand: reviewedHand, handID: input.handID) ||
+                        !OnlineCommandPolicy.canResend(input.command, hand: snapshot.currentHand, handID: input.handID))
         }
     }
     @ViewBuilder private var preparingControls: some View {
@@ -802,14 +823,17 @@ private struct ResultEntry: View {
         guard let input else { return nil }
         return OnlineCommandPolicy.previewBinding(handID: hand.id, revision: hand.markRevision, input: input)
     }
+    private func nextHandText(_ preview: PaymentPreviewDTO) -> String {
+        "下一局：\(preview.nextHand.roundWind) \(preview.nextHand.roundNumber) · 庄 \(preview.nextHand.dealerSeatNo + 1) · 本场 \(preview.nextHand.honba) · 供托 \(preview.nextHand.riichiPool) 点"
+    }
     var body: some View {
         Form {
             ResultInputFields(draft: $draft, snapshot: snapshot, hand: hand)
             if let error { Section { Text(error).foregroundStyle(.red) } }
             Section("服务器支付预览") {
                 Button("计算逐座支付") { Task { await fetchPreview() } }.disabled(input == nil || busy || !draftReady)
-                if let preview, binding == inputBinding {
-                    ForEach(preview.perSeat, id: \.seatNo) { payment in
+                if let paymentPreview = preview, binding == inputBinding {
+                    ForEach(paymentPreview.perSeat, id: \.seatNo) { payment in
                         VStack(alignment: .leading) {
                             Text("\(payment.seatNo + 1) 号位：\(payment.netPoints >= 0 ? "+" : "")\(payment.netPoints) 点").monospacedDigit()
                             ForEach(0..<payment.breakdown.count, id: \.self) { index in
@@ -817,7 +841,7 @@ private struct ResultEntry: View {
                             }
                         }
                     }
-                    Text("下一局：\(preview.nextHand.roundWind) \(preview.nextHand.roundNumber) · 庄 \(preview.nextHand.dealerSeatNo + 1) · 本场 \(preview.nextHand.honba) · 供托 \(preview.nextHand.riichiPool) 点")
+                    Text(nextHandText(paymentPreview))
                     Button("确认并结算") { Task { await submit() } }.disabled(busy || submitted || !draftReady)
                 } else { Text(revisionChanged ? "立直标记已变化，请重新预览" : "输入变化后，请重新预览。") }
             }

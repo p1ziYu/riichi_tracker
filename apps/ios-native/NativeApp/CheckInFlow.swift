@@ -199,7 +199,7 @@ struct CheckInScreen: View {
                         }
                     Button("粘贴剪贴板中的链接") { input = UIPasteboard.general.string ?? "" }
                     Button("扫描二维码") { requestCamera() }
-                    if let destination { Text("牌桌：\(destination.matchID) · 含签到凭证") }
+                    if let displayedDestination = destination { Text("牌桌：\(displayedDestination.matchID) · 含签到凭证") }
                     else if !input.isEmpty { Text("仅接受一姬 HTTPS 签到链接和有效 UUID").foregroundStyle(.red) }
                 }
                 Section("通过房间码") {
@@ -259,24 +259,24 @@ struct CheckInScreen: View {
                 Text("你在 \(joinedSeat + 1) 号位，等待房主开局。")
                 Button("查看牌桌") { onCompleted(destination.matchID) }
             }
-        } else if let destination, session.authenticated {
+        } else if let destinationForSeats = destination, session.authenticated {
             Section("选择座位") {
                 if loadingSeats { ProgressView("读取座位中…") }
-                if let preview, previewKey == destinationKey, preview.match.id == destination.matchID {
-                    let occupiedCount = preview.seats.reduce(0) { $0 + ($1.principalId == nil ? 0 : 1) }
-                    let fullForGuest = occupiedCount >= preview.match.playerCount &&
-                        !preview.seats.contains(where: { $0.principalId == session.principalID })
-                    Text("\(preview.match.playerCount) 人牌桌 · \(preview.match.status == "preparing" ? "待开局" : "已开局")")
+                if let seatsPreview = preview, previewKey == destinationKey, seatsPreview.match.id == destinationForSeats.matchID {
+                    let occupiedCount = seatsPreview.seats.reduce(0) { $0 + ($1.principalId == nil ? 0 : 1) }
+                    let fullForGuest = occupiedCount >= seatsPreview.match.playerCount &&
+                        !seatsPreview.seats.contains(where: { $0.principalId == session.principalID })
+                    Text("\(seatsPreview.match.playerCount) 人牌桌 · \(seatsPreview.match.status == "preparing" ? "待开局" : "已开局")")
                     Picker("座位", selection: $selectedSeat) {
                         Text("自动选择第一个空座").tag(Int?.none)
-                        ForEach(0..<preview.match.playerCount, id: \.self) { number in
-                            let seat = preview.seat(at: number)
+                        ForEach(0..<seatsPreview.match.playerCount, id: \.self) { number in
+                            let seat = seatsPreview.seat(at: number)
                             Text("\(number + 1) 号位 · \(seat?.principalId == nil ? "空座" : seat?.displayName ?? "已占用")")
                                 .tag(Optional(number))
                                 .disabled(seat?.principalId != nil)
                         }
                     }
-                    Text("已有成员：\(occupiedCount) / \(preview.match.playerCount)。自动选择会在提交时取最低空座。")
+                    Text("已有成员：\(occupiedCount) / \(seatsPreview.match.playerCount)。自动选择会在提交时取最低空座。")
                         .font(.footnote).foregroundStyle(.secondary)
                     if fullForGuest {
                         Text("牌桌已满，暂无可选座位。").foregroundStyle(.orange)
@@ -284,8 +284,8 @@ struct CheckInScreen: View {
                     TextField("昵称（可选；更新个人展示名）", text: $alias)
                         .textInputAutocapitalization(.words)
                     Button(busy ? "正在签到…" : "确认座位并加入") { Task { await checkIn() } }
-                        .disabled(busy || loadingSeats || preview.match.status != "preparing" || fullForGuest ||
-                                  (selectedSeat.map { preview.seat(at: $0)?.principalId != nil } ?? false))
+                        .disabled(busy || loadingSeats || seatsPreview.match.status != "preparing" || fullForGuest ||
+                                  (selectedSeat.map { seatsPreview.seat(at: $0)?.principalId != nil } ?? false))
                 }
                 if recoverableKey == destinationKey, preview == nil {
                     Button("已签到？找回座位") { Task { await recoverCheckIn() } }.disabled(busy || loadingSeats)

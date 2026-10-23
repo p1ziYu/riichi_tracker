@@ -512,25 +512,25 @@ struct AuthScreen: View {
                 }
             }
             .listRowBackground(Brand.deep)
-            if let snapshot {
+            if let currentSnapshot = snapshot {
                 Section("对局信息") {
-                    let details = ruleDetails(snapshot: snapshot.match.rulesSnapshot, template: templates.first { $0.versionId == snapshot.match.rulesetVersionId })
+                    let details = ruleDetails(snapshot: currentSnapshot.match.rulesSnapshot, template: templates.first { $0.versionId == currentSnapshot.match.rulesetVersionId })
                     HStack(spacing: 12) {
                         EastTile(size: 40)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(details.title).font(Brand.display(24)).foregroundStyle(Brand.gold)
-                            Text("\(statusLabel(snapshot.match.status)) · \(snapshot.match.playerCount) 麻")
+                            Text("\(statusLabel(currentSnapshot.match.status)) · \(currentSnapshot.match.playerCount) 麻")
                                 .foregroundStyle(Brand.text)
                         }
                     }
-                    Text("创建时间：\(localDate(snapshot.match.createdAt))").monospacedDigit()
-                    Text("牌桌 \(snapshot.match.id)")
+                    Text("创建时间：\(localDate(currentSnapshot.match.createdAt))").monospacedDigit()
+                    Text("牌桌 \(currentSnapshot.match.id)")
                         .font(.caption2).foregroundStyle(Brand.muted).textSelection(.enabled)
-                    RuleInfo(snapshot: snapshot.match.rulesSnapshot, templates: templates, versionID: snapshot.match.rulesetVersionId)
+                    RuleInfo(snapshot: currentSnapshot.match.rulesSnapshot, templates: templates, versionID: currentSnapshot.match.rulesetVersionId)
                 }
                 .listRowBackground(Brand.panel)
-                if snapshot.match.status == "preparing",
-                   let ownSeat = snapshot.seats.first(where: { $0.principalId == session.principalID && $0.status == "checked_in" }) {
+                if currentSnapshot.match.status == "preparing",
+                   let ownSeat = currentSnapshot.seats.first(where: { $0.principalId == session.principalID && $0.status == "checked_in" }) {
                     Section {
                         Text("你在 \(ownSeat.seatNo + 1) 号位，等待房主开局。")
                             .foregroundStyle(Brand.gold)
@@ -538,7 +538,7 @@ struct AuthScreen: View {
                     .listRowBackground(Brand.panel)
                 }
                 Section("座位与点数") {
-                    ForEach(snapshot.seats.sorted { $0.seatNo < $1.seatNo }, id: \.seatNo) { seat in
+                    ForEach(currentSnapshot.seats.sorted { $0.seatNo < $1.seatNo }, id: \.seatNo) { seat in
                         HStack(spacing: 12) {
                             Text(windLabel(["E", "S", "W", "N"][seat.seatNo % 4]))
                                 .font(.headline)
@@ -569,7 +569,7 @@ struct AuthScreen: View {
                     }
                 }
                 Section("当前局") {
-                    if let hand = snapshot.currentHand {
+                    if let hand = currentSnapshot.currentHand {
                         Text("\(windLabel(hand.roundWind)) \(hand.roundNumber.map { String($0) } ?? "?") 局 · 庄家 \(hand.dealerSeatNo.map { String($0 + 1) } ?? "?") 号位")
                             .monospacedDigit()
                         Text("本场棒：\(hand.honba.map { String($0) } ?? "未提供")")
@@ -585,10 +585,10 @@ struct AuthScreen: View {
                     }
                 }
                 .listRowBackground(Brand.deep)
-                if isFinished(snapshot.match.status) {
+                if isFinished(currentSnapshot.match.status) {
                     Section("最终排名") {
-                        if let settlement, !settlement.standings.isEmpty {
-                            ForEach(settlement.standings.sorted { $0.rank < $1.rank }, id: \.seatNo) { standing in
+                        if let currentSettlement = settlement, !currentSettlement.standings.isEmpty {
+                            ForEach(currentSettlement.standings.sorted { $0.rank < $1.rank }, id: \.seatNo) { standing in
                                 Text("第 \(standing.rank) 名 · \(standing.seatNo + 1) 号位 · \(standing.finalPoints) 点 · 总成绩 \(Double(standing.totalTenths) / 10)")
                                     .monospacedDigit()
                             }
@@ -598,14 +598,14 @@ struct AuthScreen: View {
                     }
                     .listRowBackground(Brand.panel)
                 }
-                OnlineTableActions(session: session, snapshot: snapshot) { await refresh() }
+                OnlineTableActions(session: session, snapshot: currentSnapshot) { await refresh() }
             }
             Section("局历史") {
                 Text("显示最早的已结算局摘要（最多 100 局），非完整牌谱回放；无后续分页或原始输入。")
                     .font(.footnote).foregroundStyle(.secondary)
-                if let hands {
-                    if hands.isEmpty { Text("暂无牌局记录") }
-                    ForEach(hands.sorted { $0.handNo < $1.handNo }, id: \.handNo) { hand in
+                if let recordedHands = hands {
+                    if recordedHands.isEmpty { Text("暂无牌局记录") }
+                    ForEach(recordedHands.sorted { $0.handNo < $1.handNo }, id: \.handNo) { hand in
                         VStack(alignment: .leading, spacing: 4) {
                             Text("第 \(hand.handNo) 局 · \(windLabel(hand.roundWind)) \(hand.roundNumber) 局 · \(handLabel(hand.kind))")
                                 .font(.headline)

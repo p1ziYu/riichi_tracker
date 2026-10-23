@@ -322,75 +322,75 @@ import SwiftUI
     var body: some View {
         List {
             if let issue { Section { Text(issue).foregroundStyle(.red) } }
-            if let match {
-                Section("\(match.templateName) · \(match.reviewStatus)") {
-                    Text("\(match.name) · \(match.status == "active" ? "进行中" : "已结束")")
-                    Text("引擎 \(match.engineVersion) · 规则与已结算局不可修改").font(.footnote)
-                    DisclosureGroup("本桌规则快照 · 自定义 \(match.customizedKeys.count) 项") {
-                        Text("调整字段：\(match.customizedKeys.isEmpty ? "无" : match.customizedKeys.joined(separator: "、"))")
-                        Text(jsonText(match.rules)).font(.caption).textSelection(.enabled)
+            if let currentMatch = match {
+                Section("\(currentMatch.templateName) · \(currentMatch.reviewStatus)") {
+                    Text("\(currentMatch.name) · \(currentMatch.status == "active" ? "进行中" : "已结束")")
+                    Text("引擎 \(currentMatch.engineVersion) · 规则与已结算局不可修改").font(.footnote)
+                    DisclosureGroup("本桌规则快照 · 自定义 \(currentMatch.customizedKeys.count) 项") {
+                        Text("调整字段：\(currentMatch.customizedKeys.isEmpty ? "无" : currentMatch.customizedKeys.joined(separator: "、"))")
+                        Text(jsonText(currentMatch.rules)).font(.caption).textSelection(.enabled)
                     }
-                    if match.engineVersion != EngineBridgeCheck.version {
+                    if currentMatch.engineVersion != EngineBridgeCheck.version {
                         Text("引擎版本不同，此牌桌只能读取历史，不能继续计算").foregroundStyle(.red)
                     }
                 }
                 Section("座位与点数") {
-                    ForEach(match.seats) { seat in
+                    ForEach(currentMatch.seats) { seat in
                         HStack {
                             VStack(alignment: .leading) {
                                 Text("\(seat.seatNo + 1) 号位 · \(seat.displayName)")
-                                Text("\(match.points[seat.seatNo]) 点").monospacedDigit()
+                                Text("\(currentMatch.points[seat.seatNo]) 点").monospacedDigit()
                             }
                             Spacer()
                             Button("改名") { editSeat = seat.seatNo; newName = seat.displayName }
-                                .disabled(match.status != "active")
+                                .disabled(currentMatch.status != "active")
                         }
                     }
                 }
-                if let hand = match.currentHand {
+                if let hand = currentMatch.currentHand {
                     Section("\(hand.roundWind) \(hand.roundNumber) · 庄 \(hand.dealerSeatNo + 1) · 本场 \(hand.honba) · 供托 \(hand.riichiPool) 点（\(hand.riichiPool / 1000) 根）") {
                         ForEach(hand.seats, id: \.seatNo) { seat in
                             HStack {
                                 Text("\(seat.seatNo + 1) 号位 · \(seat.points) 点 · \(seat.isRiichi ? "立直" : "未立直")")
                                 Spacer()
                                 Button(seat.isRiichi ? "取消" : "立直") { action { try store.mark(id, seat: seat.seatNo) } }
-                                    .disabled(match.engineVersion != EngineBridgeCheck.version)
+                                    .disabled(currentMatch.engineVersion != EngineBridgeCheck.version)
                             }
                             Text("声明 \(seat.declares)/2 · 取消 \(seat.cancels)/1").font(.caption).foregroundStyle(.secondary)
                         }
-                        Button("录入本局结果") { entering = true }.disabled(match.engineVersion != EngineBridgeCheck.version)
+                        Button("录入本局结果") { entering = true }.disabled(currentMatch.engineVersion != EngineBridgeCheck.version)
                     }
-                } else if match.status == "active" {
-                    Section { Button("新开一局") { action { try store.openHand(id) } }.disabled(match.engineVersion != EngineBridgeCheck.version) }
+                } else if currentMatch.status == "active" {
+                    Section { Button("新开一局") { action { try store.openHand(id) } }.disabled(currentMatch.engineVersion != EngineBridgeCheck.version) }
                 }
-                if match.status == "active" {
+                if currentMatch.status == "active" {
                     Section {
-                        Button(match.currentHand == nil ? "手动终局" : "放弃未结算当前局并终局", role: .destructive) {
+                        Button(currentMatch.currentHand == nil ? "手动终局" : "放弃未结算当前局并终局", role: .destructive) {
                             abandonFirst = true
-                        }.disabled(match.engineVersion != EngineBridgeCheck.version)
+                        }.disabled(currentMatch.engineVersion != EngineBridgeCheck.version)
                         Text("放弃只丢弃当前未结算手及立直标记；已结算记录、供托及点数不撤回。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 } else {
                     Section("终局") {
-                        if let saved = match.terminal {
+                        if let saved = currentMatch.terminal {
                             terminalRows(saved)
-                        } else if let terminalPreview {
-                            terminalRows(terminalPreview)
-                            if terminalPreview["isGameEnd"] == .bool(true) {
+                        } else if let currentTerminalPreview = terminalPreview {
+                            terminalRows(currentTerminalPreview)
+                            if currentTerminalPreview["isGameEnd"] == .bool(true) {
                                 Button("确认并保存最终成绩") { action { try store.confirmTerminal(id); self.terminalPreview = nil } }
                             } else {
                                 Text("终局条件未满足，成绩尚不可确认。").foregroundStyle(.red)
                             }
                         } else {
                             Button("预览最终成绩") { action { terminalPreview = try store.previewTerminal(id) } }
-                                .disabled(match.engineVersion != EngineBridgeCheck.version)
+                                .disabled(currentMatch.engineVersion != EngineBridgeCheck.version)
                         }
                     }
                 }
                 Section("已结算逐局历史 · 保存的原始输入及引擎输出") {
-                    if match.results.isEmpty { Text("暂无已结算局") }
-                    ForEach(match.results) { result in
+                    if currentMatch.results.isEmpty { Text("暂无已结算局") }
+                    ForEach(currentMatch.results) { result in
                         DisclosureGroup("\(result.hand.roundWind) \(result.hand.roundNumber) · \(result.input["kind"]?.string ?? "结果") · \(result.settledAt)") {
                             Text("庄 \(result.hand.dealerSeatNo + 1) · 本场 \(result.hand.honba) · 原供托 \(result.hand.riichiPool) 点")
                             if let seats = result.output["perSeat"]?.arrayValue {
@@ -486,16 +486,24 @@ import SwiftUI
     private var input: [String: JSONValue]? {
         ResultInputBuilder.build(draft, hand: currentHand, seats: snapshot.seats, rules: match.rules)
     }
+    private struct ValidPreview {
+        let output: [String: JSONValue]
+        let input: [String: JSONValue]
+    }
+    private var validPreview: ValidPreview? {
+        guard let preview, let previewInput, previewInput == input,
+              liveMatch?.currentHand?.handId == hand.handId,
+              liveMatch?.currentHand?.markRevision == hand.markRevision, draftSaved else { return nil }
+        return ValidPreview(output: preview, input: previewInput)
+    }
     var body: some View {
         Form {
             ResultInputFields(draft: $draft, snapshot: snapshot, hand: currentHand)
             if let issue { Section { Text(issue).foregroundStyle(.red) } }
             Section("本机引擎支付预览") {
                 Button("计算逐座支付") { calculate() }.disabled(input == nil || !draftSaved)
-                if let preview = preview, let previewInput = previewInput, previewInput == input,
-                   liveMatch?.currentHand?.handId == hand.handId,
-                   liveMatch?.currentHand?.markRevision == hand.markRevision, draftSaved {
-                    if let rows = preview["perSeat"]?.arrayValue {
+                if let valid = validPreview {
+                    if let rows = valid.output["perSeat"]?.arrayValue {
                         ForEach(0..<rows.count, id: \.self) { index in
                             let row = rows[index].object ?? [:]
                             Text("\((number(row["seatNo"]) ?? 0) + 1) 号位 · \(number(row["netPoints"]) ?? 0) 点")
@@ -507,11 +515,11 @@ import SwiftUI
                             }
                         }
                     }
-                    if let next = preview["nextHand"]?.object {
+                    if let next = valid.output["nextHand"]?.object {
                         Text("下局：\(next["roundWind"]?.string ?? "?") \(number(next["roundNumber"]) ?? 0) · 本场 \(number(next["honba"]) ?? 0) · 供托 \(number(next["riichiPool"]) ?? 0) 点")
                     }
                     Button("确认并原子结算") {
-                        do { try store.settle(match.id, handID: hand.handId, revision: hand.markRevision, input: previewInput); dismiss() }
+                        do { try store.settle(match.id, handID: hand.handId, revision: hand.markRevision, input: valid.input); dismiss() }
                         catch { issue = error.localizedDescription; self.preview = nil }
                     }
                 } else { Text("输入或标记变化后须重新预览").foregroundStyle(.secondary) }
