@@ -454,22 +454,25 @@ struct OnlineTableActions: View {
         return url.url?.absoluteString
     }
     var body: some View {
-        Section("牌桌操作") {
-            if let error { Text(error).foregroundStyle(.red) }
+        Section {
+            if let error { Text(error).foregroundStyle(Brand.loss).brandPanel() }
             if !OnlineCommandPolicy.canWrite(snapshot, principal: session.principalID) &&
                 !OnlineCommandPolicy.canConfirmSettlement(snapshot, principal: session.principalID) &&
                 !(isOwner && snapshot.match.status == "preparing") {
                 Text("当前身份未签到入座，仅可只读查看牌桌；写入操作需由已签到玩家执行。")
-                    .font(.footnote).foregroundStyle(.secondary)
+                    .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
             }
             if let code = snapshot.match.joinCode, isOwner, snapshot.match.status == "preparing" {
-                LabeledContent("房间码", value: code)
-                Button("复制房间码") { UIPasteboard.general.string = code }
+                LabeledContent {
+                    Text(code).foregroundStyle(Brand.muted)
+                } label: { Text("房间码").foregroundStyle(Brand.text) }
+                .brandPanel()
+                Button("复制房间码") { UIPasteboard.general.string = code }.brandPanel()
             }
             preparingControls
             handControls
             if OnlineCommandPolicy.canWrite(snapshot, principal: session.principalID) && !pendingLoaded {
-                Button("重试读取安全保存的结算请求") { loadPending() }
+                Button("重试读取安全保存的结算请求") { loadPending() }.brandPanel()
             }
             pendingResolutionControls
             if snapshot.match.status == "finished" {
@@ -485,20 +488,23 @@ struct OnlineTableActions: View {
                         terminal = received
                         terminalVersion = snapshot.match.version
                     }
-                }.disabled(busy)
+                }.disabled(busy).brandPanel()
                 if let currentTerminal = terminal, terminalVersion == snapshot.match.version {
                     ForEach(currentTerminal.standings.sorted { $0.rank < $1.rank }, id: \.seatNo) { standing in
                         Text("第 \(standing.rank) 名 · \(standing.seatNo + 1) 号位 · \(Double(standing.totalTenths) / 10) 分")
+                            .brandPanel()
                     }
                     if OnlineCommandPolicy.canConfirmSettlement(snapshot, principal: session.principalID) {
                         Button("房主确认终局结算") {
                             execute { let _: CommandReceiptDTO = try await session.api.post("\(base)/settlement/confirm") }
-                        }.disabled(busy)
+                        }.disabled(busy).brandPanel()
                     }
                 }
             }
-        }
-        .listRowBackground(Brand.panel)
+        } header: { BrandSectionHeader("牌桌操作") }
+        .foregroundStyle(Brand.text)
+        .tint(Brand.gold)
+        .brandPanel()
         .alert("移除成员？", isPresented: Binding(
             get: { memberToRemove != nil },
             set: { if !$0 { memberToRemove = nil } }
@@ -572,13 +578,14 @@ struct OnlineTableActions: View {
     @ViewBuilder private var pendingResolutionControls: some View {
         if let input = pendingResolutionInput {
             Text("结果未确认：待确认请求必须先核对，不能编辑后复用旧 clientEventId。")
+                .foregroundStyle(Brand.muted).brandPanel()
             if let command = input.command, snapshot.currentHand?.id == input.handID,
                snapshot.currentHand?.markRevision != command.confirmedMarkRevision {
                 Text("立直标记版本已变化；旧请求不可更改版本后重发。请核对标记并重新预览。")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Brand.gold).brandPanel()
             }
             Button("刷新确认服务端状态") { Task { await resolvePending() } }
-                .disabled(busy)
+                .disabled(busy).brandPanel()
             Button("原样重发结算请求") {
                 execute {
                     guard let principal = session.principalID,
@@ -600,15 +607,16 @@ struct OnlineTableActions: View {
                         !OnlineCommandPolicy.canWrite(snapshot, principal: session.principalID) ||
                         !OnlineCommandPolicy.canResend(input.command, hand: reviewedHand, handID: input.handID) ||
                         !OnlineCommandPolicy.canResend(input.command, hand: snapshot.currentHand, handID: input.handID))
+                .brandPanel()
         }
     }
     @ViewBuilder private var preparingControls: some View {
             if isOwner && snapshot.match.status == "preparing" {
                 Text("访客通过签到链接或房间码直接选择空座入座；加入者会实时显示在下方。")
-                    .font(.footnote).foregroundStyle(.secondary)
+                    .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
                 if !occupiedSeats.isEmpty {
                     Group {
-                        Text("已加入成员 · 调整座次").font(.headline)
+                        Text("已加入成员 · 调整座次").font(.headline).brandPanel()
                         ForEach(occupiedSeats) { seat in
                             HStack {
                                 Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "未命名")")
@@ -621,20 +629,21 @@ struct OnlineTableActions: View {
                                     .disabled(busy)
                                 }
                             }
+                            .brandPanel()
                         }
                         Picker("从座位", selection: $fromSeat) {
                             Text("选择成员").tag(Int?.none)
                             ForEach(occupiedSeats) { seat in
                                 Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "未命名")").tag(Optional(seat.seatNo))
                             }
-                        }
+                        }.brandPanel()
                         Picker("到座位", selection: $toSeat) {
                             Text("选择目标").tag(Int?.none)
                             ForEach(0..<snapshot.match.playerCount, id: \.self) { number in
                                 let occupant = snapshot.seats.first { $0.seatNo == number }
                                 Text("\(number + 1) 号位 · \(occupant?.displayName ?? "空座")").tag(Optional(number))
                             }
-                        }
+                        }.brandPanel()
                         Button(snapshot.seats.contains { $0.seatNo == toSeat && $0.principalId != nil }
                                ? "交换座位" : "移动到空座") {
                             guard let fromSeat = fromSeat, let toSeat = toSeat, fromSeat != toSeat,
@@ -655,6 +664,7 @@ struct OnlineTableActions: View {
                         }
                         .disabled(busy || fromSeat == nil || toSeat == nil || fromSeat == toSeat ||
                                   !occupiedSeats.contains(where: { $0.seatNo == fromSeat }))
+                        .brandPanel()
                     }
                 }
                 ForEach(snapshot.seats.sorted { $0.seatNo < $1.seatNo }) { seat in
@@ -664,7 +674,7 @@ struct OnlineTableActions: View {
                                 let _: [String: JSONValue] = try await session.api.post("\(base)/seats/claim", body: SeatClaim(seatNo: seat.seatNo))
                                 dealer = nil
                             }
-                        }.disabled(busy)
+                        }.disabled(busy).brandPanel()
                     }
                 }
                 Button("生成单人签到链接（10 分钟）") {
@@ -674,23 +684,24 @@ struct OnlineTableActions: View {
                         issuingCount = snapshot.seats.filter { $0.status == "checked_in" }.count
                         invitation = try await session.api.post("\(base)/check-in-tokens")
                     }
-                }.disabled(busy)
+                }.disabled(busy).brandPanel()
                 if let invitationURL {
-                    InvitationQR(link: invitationURL)
-                    Button("复制签到链接") { UIPasteboard.general.string = invitationURL }
+                    InvitationQR(link: invitationURL).brandPanel()
+                    Button("复制签到链接") { UIPasteboard.general.string = invitationURL }.brandPanel()
                     Text("签入凭证仅供一人使用。请勿公开转发；使用或过期后需重新生成。")
-                        .font(.footnote)
+                        .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
                 }
                 Picker("指定起家（可选）", selection: $dealer) {
                     Text("服务器随机").tag(Int?.none)
                     ForEach(snapshot.seats) { seat in Text("\(seat.seatNo + 1) 号位").tag(Optional(seat.seatNo)) }
-                }
+                }.brandPanel()
                 Button("全员签到后确认座次") {
                     execute {
                         let _: [String: JSONValue] = try await session.api.post("\(base)/seats/finalize", body: FinalizeSeats(dealerSeatNo: dealer))
                     }
                 }
                 .disabled(busy || snapshot.seats.count != snapshot.match.playerCount || snapshot.seats.contains { $0.status != "checked_in" })
+                .brandPanel()
             }
     }
     @ViewBuilder private var handControls: some View {
@@ -707,18 +718,19 @@ struct OnlineTableActions: View {
                                 let _: CommandReceiptDTO = try await session.api.post("\(base)/hands/\(hand.id)/marks", body: MarkCommand(seatNo: seat.seatNo, riichi: !seat.isRiichi, expectedMarkRevision: hand.markRevision))
                             }
                         }
-                        .disabled(toggleDisabled)
+                        .disabled(toggleDisabled).brandPanel()
                     }
                     Button("录入本局结果") { showResult = true }
                         .disabled(busy || !pendingLoaded || pendingBody != nil)
+                        .accessibilityIdentifier("online.table.resultEntry").brandPanel()
                 } else {
                     Button("新开一局") {
                         execute { let _: [String: JSONValue] = try await session.api.post("\(base)/hands") }
-                    }.disabled(busy)
+                    }.disabled(busy).brandPanel()
                     if isOwner, snapshot.match.rulesSnapshot?["automaticEndPolicy"] != .string("ranked_sanma") {
                         Button("终局") {
                             execute { let _: [String: JSONValue] = try await session.api.post("\(base)/finish") }
-                        }.disabled(busy)
+                        }.disabled(busy).brandPanel()
                     }
                 }
             }
@@ -829,24 +841,34 @@ private struct ResultEntry: View {
     var body: some View {
         Form {
             ResultInputFields(draft: $draft, snapshot: snapshot, hand: hand)
-            if let error { Section { Text(error).foregroundStyle(.red) } }
-            Section("服务器支付预览") {
-                Button("计算逐座支付") { Task { await fetchPreview() } }.disabled(input == nil || busy || !draftReady)
+            if let error { Section { Text(error).foregroundStyle(Brand.loss).brandPanel() } }
+            Section {
+                Button("计算逐座支付") { Task { await fetchPreview() } }
+                    .disabled(input == nil || busy || !draftReady)
+                    .accessibilityIdentifier("online.result.preview").brandPanel()
                 if let paymentPreview = preview, binding == inputBinding {
                     ForEach(paymentPreview.perSeat, id: \.seatNo) { payment in
                         VStack(alignment: .leading) {
                             Text("\(payment.seatNo + 1) 号位：\(payment.netPoints >= 0 ? "+" : "")\(payment.netPoints) 点").monospacedDigit()
                             ForEach(0..<payment.breakdown.count, id: \.self) { index in
-                                Text("\(payment.breakdown[index].reason)：\(payment.breakdown[index].amount)").font(.footnote)
+                                Text("\(payment.breakdown[index].reason)：\(payment.breakdown[index].amount)")
+                                    .font(.footnote).foregroundStyle(Brand.muted)
                             }
                         }
+                        .brandPanel()
                     }
-                    Text(nextHandText(paymentPreview))
-                    Button("确认并结算") { Task { await submit() } }.disabled(busy || submitted || !draftReady)
-                } else { Text(revisionChanged ? "立直标记已变化，请重新预览" : "输入变化后，请重新预览。") }
-            }
+                    Text(nextHandText(paymentPreview)).foregroundStyle(Brand.muted).brandPanel()
+                    Button("确认并结算") { Task { await submit() } }
+                        .disabled(busy || submitted || !draftReady)
+                        .accessibilityIdentifier("online.result.confirm").brandPanel()
+                } else {
+                    Text(revisionChanged ? "立直标记已变化，请重新预览" : "输入变化后，请重新预览。")
+                        .foregroundStyle(Brand.muted).brandPanel()
+                }
+            } header: { BrandSectionHeader("服务器支付预览") }
         }
         .scrollContentBackground(.hidden)
+        .foregroundStyle(Brand.text)
         .background(Brand.background)
         .tint(Brand.gold)
         .navigationTitle("本局结算")
@@ -945,17 +967,17 @@ struct ResultInputFields: View {
         ResultInputBuilder.build(draft, hand: hand, seats: seats, rules: snapshot.match.rulesSnapshot)
     }
     var body: some View {
-            Section("支付输入") {
+            Section {
                 Picker("结果类型", selection: $draft.kind) {
                     Text("荣和").tag("ron"); Text("自摸").tag("tsumo"); Text("荒牌流局").tag("ryuukyoku")
                     if nagashiEnabled { Text("流局满贯").tag("nagashi_mangan") }
-                }
+                }.brandPanel()
                 if draft.kind == "ron" {
                     Picker("放铳座位", selection: $draft.dealIn) {
                         ForEach(seats) { Text("\($0.seatNo + 1) 号位").tag($0.seatNo) }
-                    }
+                    }.brandPanel()
                     if hand.seats.contains(where: { $0.seatNo == draft.dealIn && $0.isRiichi }) {
-                        Toggle("放铳牌是立直宣言牌（不扣宣言棒）", isOn: $draft.declarationDealIn)
+                        Toggle("放铳牌是立直宣言牌（不扣宣言棒）", isOn: $draft.declarationDealIn).brandPanel()
                     }
                 }
                 winningControls
@@ -963,14 +985,17 @@ struct ResultInputFields: View {
                     ForEach(seats) { seat in
                         Toggle("\(seat.seatNo + 1) 号位听牌", isOn: Binding(
                             get: { draft.tenpai[seat.seatNo] ?? false },
-                            set: { draft.tenpai[seat.seatNo] = $0 }))
+                            set: { draft.tenpai[seat.seatNo] = $0 })).brandPanel()
                     }
                 }
                 if input == nil {
                     Text("请填写合法座位、每位赢家番符及役满数；流满须提供每位赢家完整的弃牌河。")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Brand.loss).brandPanel()
                 }
-            }
+            } header: { BrandSectionHeader("支付输入") }
+            .foregroundStyle(Brand.text)
+            .tint(Brand.gold)
+            .brandPanel()
     }
     @ViewBuilder private var winningControls: some View {
                 if draft.kind == "ron" || draft.kind == "tsumo" || draft.kind == "nagashi_mangan" {
@@ -978,7 +1003,7 @@ struct ResultInputFields: View {
                         winnerSeatFields(seat)
                     }
                     if draft.kind == "nagashi_mangan" {
-                        Toggle("确认每位赢家的弃牌河完整且未被鸣走", isOn: $draft.attested)
+                        Toggle("确认每位赢家的弃牌河完整且未被鸣走", isOn: $draft.attested).brandPanel()
                     }
                 }
     }
@@ -1001,46 +1026,68 @@ struct ResultInputFields: View {
                                  ResultInputBuilder.ronCap(rules: snapshot.match.rulesSnapshot,
                                                            playerCount: seats.count))
                             Toggle("\(number + 1) 号位 · \(seat.displayName ?? "未命名")和牌", isOn: winnerBinding)
-                                .disabled(selectionDisabled)
+                                .disabled(selectionDisabled).brandPanel()
                         } else {
                             Button("\(number + 1) 号位 · \(seat.displayName ?? "未命名")\(draft.winners == [number] ? " ✓" : "")") {
                                 draft.winners = [number]
-                            }
+                            }.brandPanel()
                         }
                         if draft.winners.contains(number) {
                             if draft.kind == "nagashi_mangan" {
                                 TextField("按顺序填写完整幺九弃牌，如 1m 9m 1z",
-                                          text: field(number, keyPath: \.rivers))
+                                          text: field(number, keyPath: \.rivers),
+                                          prompt: Text("按顺序填写完整幺九弃牌，如 1m 9m 1z").foregroundColor(Brand.muted))
+                                    .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
+                                    .brandPanel()
                                 TextField("被鸣走弃牌（如有则不能流满）",
-                                          text: field(number, keyPath: \.called))
+                                          text: field(number, keyPath: \.called),
+                                          prompt: Text("被鸣走弃牌（如有则不能流满）").foregroundColor(Brand.muted))
+                                    .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
+                                    .brandPanel()
                             } else {
                                 if (Int(draft.yakuman[number, default: "0"]) ?? 0) == 0 &&
                                     (Int(draft.doubleYakuman[number, default: "0"]) ?? 0) == 0 {
                                     TextField("\(number + 1) 号位番 1–130",
-                                              text: field(number, keyPath: \.han, fallback: "2")).keyboardType(.numberPad)
+                                              text: field(number, keyPath: \.han, fallback: "2"),
+                                              prompt: Text("\(number + 1) 号位番 1–130").foregroundColor(Brand.muted))
+                                        .keyboardType(.numberPad)
+                                        .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
+                                        .brandPanel()
                                     if let fieldError = fieldErrors["\(number).han"] {
-                                        Text(fieldError).foregroundStyle(.red)
+                                        Text(fieldError).foregroundStyle(Brand.loss).brandPanel()
                                     }
                                     TextField("\(number + 1) 号位符 20–140",
-                                              text: field(number, keyPath: \.fu, fallback: "30")).keyboardType(.numberPad)
+                                              text: field(number, keyPath: \.fu, fallback: "30"),
+                                              prompt: Text("\(number + 1) 号位符 20–140").foregroundColor(Brand.muted))
+                                        .keyboardType(.numberPad)
+                                        .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
+                                        .brandPanel()
                                     if let fieldError = fieldErrors["\(number).fu"] {
-                                        Text(fieldError).foregroundStyle(.red)
+                                        Text(fieldError).foregroundStyle(Brand.loss).brandPanel()
                                     }
                                 } else {
                                     Text("役满按引擎要求提交番 1、符 30")
-                                        .font(.footnote).foregroundStyle(.secondary)
+                                        .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
                                 }
                                 let ordinaryCap = snapshot.match.rulesSnapshot?["compositeYakuman"] == .bool(true) ? 10 : 1
                                 TextField("\(number + 1) 号位普通役满数 0–\(ordinaryCap)",
-                                          text: field(number, keyPath: \.yakuman, fallback: "0")).keyboardType(.numberPad)
+                                          text: field(number, keyPath: \.yakuman, fallback: "0"),
+                                          prompt: Text("\(number + 1) 号位普通役满数 0–\(ordinaryCap)").foregroundColor(Brand.muted))
+                                    .keyboardType(.numberPad)
+                                    .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
+                                    .brandPanel()
                                 if let fieldError = fieldErrors["\(number).yakuman"] {
-                                    Text(fieldError).foregroundStyle(.red)
+                                    Text(fieldError).foregroundStyle(Brand.loss).brandPanel()
                                 }
                                 if snapshot.match.rulesSnapshot?["doubleYakuman"] == .bool(true) {
                                     TextField("\(number + 1) 号位特殊双倍役满数 0–10",
-                                              text: field(number, keyPath: \.doubleYakuman, fallback: "0")).keyboardType(.numberPad)
+                                              text: field(number, keyPath: \.doubleYakuman, fallback: "0"),
+                                              prompt: Text("\(number + 1) 号位特殊双倍役满数 0–10").foregroundColor(Brand.muted))
+                                        .keyboardType(.numberPad)
+                                        .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
+                                        .brandPanel()
                                     if let fieldError = fieldErrors["\(number).doubleYakuman"] {
-                                        Text(fieldError).foregroundStyle(.red)
+                                        Text(fieldError).foregroundStyle(Brand.loss).brandPanel()
                                     }
                                 }
                             }

@@ -72,10 +72,10 @@ struct RulesWizard: View {
 
     var body: some View {
         Form {
-            if let issue { Section { Text(issue).foregroundStyle(.red) } }
+            if let issue { Section { Text(issue).foregroundStyle(Brand.loss).brandPanel() } }
             if step == 0 {
-                Section("选择系统规则模板") {
-                    if templates.isEmpty { ProgressView("读取模板中…") }
+                Section {
+                    if templates.isEmpty { ProgressView("读取模板中…").brandPanel() }
                     ForEach(templates.filter { $0.scope != "mine" }) { template in
                         Button {
                             if selected != nil && !changed.isEmpty { confirmTemplate = template }
@@ -84,23 +84,27 @@ struct RulesWizard: View {
                             VStack(alignment: .leading) {
                                 Text(template.name)
                                 Text("\(template.scope == "system" ? "系统" : "参考") · \(template.reviewStatus == "pending" ? "待审核" : template.reviewStatus)")
-                                    .font(.footnote).foregroundStyle(.secondary)
+                                    .font(.footnote).foregroundStyle(Brand.muted)
                             }
                         }
+                        .brandPanel()
+                        .accessibilityIdentifier("rulesWizard.template.\(template.versionId)")
                     }
-                }
-                if selected != nil { Button("下一步：调整规则") { step = 1 } }
+                } header: { BrandSectionHeader("选择系统规则模板") }
+                if selected != nil { Button("下一步：调整规则") { step = 1 }.brandPanel() }
             } else if step == 1 {
                 Section {
-                    Text(selected?.name ?? "").font(.headline)
+                    Text(selected?.name ?? "").font(.headline).brandPanel()
                     Text("人数随模板固定，立直棒固定 1,000 点；只调整本桌。")
-                    Button("重选模板") { step = 0 }
+                        .foregroundStyle(Brand.muted).brandPanel()
+                    Button("重选模板") { step = 0 }.brandPanel()
                     DisclosureGroup("规则调整 · 已自定义 \(changed.count) 项", isExpanded: $showAdjustments) {
                         Button("恢复模板") { values = base; syncText(); recalculate() }.disabled(changed.isEmpty)
                     }
+                    .brandPanel()
                 }
                 if showAdjustments {
-                Section("起点与成绩") {
+                Section {
                     ForEach(0..<3, id: \.self) { index in
                         let key = pointKeys[index]
                         pointInput(key, label: pointLabels[index])
@@ -109,36 +113,43 @@ struct RulesWizard: View {
                                 Button(preset.formatted()) { setPoint(key, preset) }.font(.footnote)
                             }
                         }
+                        .brandPanel()
                     }
                     Text("头名赏（只读）：\(Double(((values["returnPoints"] as? Int ?? 0) - (values["startingPoints"] as? Int ?? 0)) * count) / 1000) 竞技分")
+                        .foregroundStyle(Brand.muted).brandPanel()
                     ForEach(0..<umaText.count, id: \.self) { index in
-                        TextField("第 \(index + 1) 位马点", text: Binding(get: { umaText[index] }, set: { umaText[index] = $0; recalculate() }))
+                        TextField("第 \(index + 1) 位马点", text: Binding(get: { umaText[index] }, set: { umaText[index] = $0; recalculate() }),
+                                  prompt: Text("第 \(index + 1) 位马点").foregroundColor(Brand.muted))
                             .keyboardType(.decimalPad)
+                            .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
+                            .brandPanel()
                     }
                     ForEach(umaPresets(), id: \.self) { preset in
                         Button(preset.map { String($0) }.joined(separator: " / ")) {
                             umaText = preset.map { String($0) }; recalculate()
                         }
+                        .brandPanel()
                     }
-                }
+                } header: { BrandSectionHeader("起点与成绩") }
                 ForEach(groups, id: \.self) { group in
-                    Section(group) {
+                    Section {
                         if group == "支付数值" {
                             ForEach(3..<6, id: \.self) { index in
                                 pointInput(pointKeys[index], label: pointLabels[index])
                             }
                             Text("罚符 1,500 点无法按所有听牌人数以整百分摊，不支持。")
-                                .font(.footnote).foregroundStyle(.secondary)
+                                .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
                             ForEach(count == 3 ? [0, 2000, 3000] : [0, 3000], id: \.self) { value in
-                                Button("罚符 \(value)") { setPoint("notenPenaltyTotal", value) }
+                                Button("罚符 \(value)") { setPoint("notenPenaltyTotal", value) }.brandPanel()
                             }
                             ForEach([100, 200], id: \.self) { value in
-                                Button("本场自摸每人 \(value) / 荣和 \(value * (count - 1))") { setPoint("honbaPerPayer", value) }
+                                Button("本场自摸每人 \(value) / 荣和 \(value * (count - 1))") { setPoint("honbaPerPayer", value) }.brandPanel()
                             }
                         }
                         ForEach(fields.filter { $0.group == group && visible($0.key) }) { field in
                             if field.options.isEmpty {
                                 Toggle(field.label, isOn: Binding(get: { values[field.key] as? Bool ?? false }, set: { values[field.key] = $0; recalculate() }))
+                                    .brandPanel()
                             } else {
                                 Picker(field.label, selection: Binding(get: { values[field.key] as? String ?? "" }, set: { values[field.key] = $0; recalculate() })) {
                                     ForEach(field.options.filter { option in
@@ -147,29 +158,40 @@ struct RulesWizard: View {
                                         return true
                                     }) { option in Text(option.label).tag(option.value) }
                                 }
+                                .brandPanel()
                             }
                         }
+                    } header: { BrandSectionHeader(group) }
+                }
+                }
+                Section {
+                    if examples.isEmpty {
+                        Text(issue == nil ? "输入有效后计算" : "规则无效，预览已清除")
+                            .foregroundStyle(Brand.muted).brandPanel()
                     }
-                }
-                }
-                Section("本机支付预览 · 仅用于规则示例") {
-                    if examples.isEmpty { Text(issue == nil ? "输入有效后计算" : "规则无效，预览已清除") }
                     ForEach(0..<examples.count, id: \.self) { index in
-                        VStack(alignment: .leading) { Text(examples[index].0).font(.headline); Text(examples[index].1).font(.footnote).monospacedDigit() }
+                        VStack(alignment: .leading) {
+                            Text(examples[index].0).font(.headline)
+                            Text(examples[index].1).font(.footnote).foregroundStyle(Brand.muted).monospacedDigit()
+                        }
+                        .brandPanel()
                     }
-                    Button("下一步：创建在线桌") { step = 2 }.disabled(issue != nil)
-                }
+                    Button("下一步：创建在线桌") { step = 2 }.disabled(issue != nil).brandPanel()
+                } header: { BrandSectionHeader("本机支付预览 · 仅用于规则示例") }
             } else {
-                Section("确认创建") {
-                    Text("\(selected?.name ?? "") · \(count) 麻 · 自定义 \(changed.count) 项")
+                Section {
+                    Text("\(selected?.name ?? "") · \(count) 麻 · 自定义 \(changed.count) 项").brandPanel()
                     Text("创建后需房主自行选座，所有座位签到并确认起家方可开始。")
+                        .foregroundStyle(Brand.muted).brandPanel()
                     Button(busy ? "创建中…" : "创建并进入牌桌") { Task { await create() } }
                         .disabled(busy || issue != nil || creationUncertain)
-                    Button("返回调整") { step = 1 }
-                }
+                        .accessibilityIdentifier("rulesWizard.createTable").brandPanel()
+                    Button("返回调整") { step = 1 }.brandPanel()
+                } header: { BrandSectionHeader("确认创建") }
             }
         }
         .scrollContentBackground(.hidden)
+        .foregroundStyle(Brand.text)
         .background(Brand.background)
         .tint(Brand.gold)
         .navigationTitle("开桌")
@@ -196,10 +218,12 @@ struct RulesWizard: View {
                 numberText[key] = text
                 if let amount = Int(text) { setPoint(key, amount, preserveText: true) }
                 else { issue = "\(label)需填写整数"; examples = [] }
-            }))
+            }), prompt: Text(label).foregroundColor(Brand.muted))
             .keyboardType(.numberPad)
-            if numberText[key]?.isEmpty == true { Text("此项不能为空").font(.footnote).foregroundStyle(.red) }
+            .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
+            if numberText[key]?.isEmpty == true { Text("此项不能为空").font(.footnote).foregroundStyle(Brand.loss) }
         }
+        .brandPanel()
     }
     private func setPoint(_ key: String, _ amount: Int, preserveText: Bool = false) {
         guard amount >= 0, amount <= 2_147_483_647,

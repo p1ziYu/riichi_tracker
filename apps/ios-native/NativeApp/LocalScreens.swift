@@ -1,5 +1,13 @@
 import SwiftUI
 
+private extension View {
+    func localBrandField() -> some View {
+        foregroundStyle(Brand.text)
+            .padding(10)
+            .background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 @MainActor struct LocalMatchListScreen: View {
     @ObservedObject var store: LocalMatchStore
     @State private var creating = false
@@ -10,20 +18,20 @@ import SwiftUI
 
     var body: some View {
         List {
-            if let failure = store.failure { Section { Text(failure).foregroundStyle(.red) } }
-            if let issue { Section { Text(issue).foregroundStyle(.red) } }
+            if let failure = store.failure { Section { Text(failure).foregroundStyle(Brand.loss).brandPanel() } }
+            if let issue { Section { Text(issue).foregroundStyle(Brand.loss).brandPanel() } }
             Section {
-                Text("本机独立牌桌 · 无账户、签到或云端同步").foregroundStyle(.secondary)
-                Button("离线开桌") { creating = true }.disabled(store.failure != nil)
+                Text("本机独立牌桌 · 无账户、签到或云端同步").foregroundStyle(Brand.muted).brandPanel()
+                Button("离线开桌") { creating = true }.disabled(store.failure != nil).brandPanel()
             }
-            Section("进行中") {
+            Section {
                 ForEach(store.matches.filter { $0.status == "active" }) { match in row(match) }
-            }
-            Section("已结束 · 逐局明细") {
+            } header: { BrandSectionHeader("进行中") }
+            Section {
                 ForEach(store.matches.filter { $0.status == "finished" }) { match in row(match) }
-            }
+            } header: { BrandSectionHeader("已结束 · 逐局明细") }
         }
-        .scrollContentBackground(.hidden).background(Brand.background).tint(Brand.gold)
+        .scrollContentBackground(.hidden).background(Brand.background).tint(Brand.gold).foregroundStyle(Brand.text)
         .navigationTitle("本地牌桌")
         .navigationDestination(for: String.self) { id in LocalTableScreen(store: store, id: id) }
         .sheet(isPresented: $creating) {
@@ -50,15 +58,17 @@ import SwiftUI
                 VStack(alignment: .leading) {
                     Text(match.name).font(.headline)
                     Text("\(match.templateName) · \(match.reviewStatus) · \(match.seats.count) 麻")
-                        .font(.footnote).foregroundStyle(.secondary)
+                        .font(.footnote).foregroundStyle(Brand.muted)
                     Text("\(match.status == "active" ? "继续对局" : "查看记录") · \(match.updatedAt)")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("自定义规则 \(match.customizedKeys.count) 项").font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(Brand.muted)
+                    Text("自定义规则 \(match.customizedKeys.count) 项").font(.caption).foregroundStyle(Brand.muted)
                 }
             }
-            Button(role: .destructive) { deleteFirst = match.id } label: { Image(systemName: "trash") }
+            Button(role: .destructive) { deleteFirst = match.id } label: {
+                Image(systemName: "trash").foregroundStyle(Brand.loss)
+            }
                 .buttonStyle(.borderless).accessibilityLabel("删除整桌 \(match.name)")
-        }
+        }.brandPanel()
     }
 }
 
@@ -107,57 +117,61 @@ import SwiftUI
     private var changes: Int { Set(base.keys).union(values.keys).filter { base[$0] != values[$0] && $0 != "oka" }.count }
     var body: some View {
         Form {
-            if let issue { Section { Text(issue).foregroundStyle(.red) } }
+            if let issue { Section { Text(issue).foregroundStyle(Brand.loss).brandPanel() } }
             if step == 0 {
-                Section("随包分发的四份模板") {
+                Section {
                     ForEach(LocalTemplate.all) { template in
                         Button("\(template.name) · \(template.reviewStatus)") {
                             if selected != nil && changes > 0 { confirming = template }
                             else { select(template) }
-                        }
+                        }.brandPanel().accessibilityIdentifier("local.template.\(template.id)")
                     }
-                }
-                if selected != nil { Button("下一步：调整规则") { step = 1 } }
+                } header: { BrandSectionHeader("随包分发的四份模板") }
+                if selected != nil { Button("下一步：调整规则") { step = 1 }.brandPanel().accessibilityIdentifier("local.wizard.nextRules") }
             } else if step == 1 {
                 Section {
-                    Text("\(selected?.name ?? "") · \(count) 麻 · 立直棒固定 1,000 点")
-                    Button("重选模板") { step = 0 }
+                    Text("\(selected?.name ?? "") · \(count) 麻 · 立直棒固定 1,000 点").foregroundStyle(Brand.muted).brandPanel()
+                    Button("重选模板") { step = 0 }.brandPanel()
                     DisclosureGroup("规则调整 · 已自定义 \(changes) 项", isExpanded: $adjustments) {
                         Button("恢复模板") { values = base; sync(); recalculate() }.disabled(changes == 0)
-                    }
+                            .brandPanel()
+                    }.brandPanel()
                 }
                 if adjustments {
-                    Section("起点与成绩") {
+                    Section {
                         ForEach(0..<3, id: \.self) { index in
                             point(pointKeys[index], pointLabels[index])
                             HStack {
                                 ForEach(index == 0 ? [25_000, 30_000, 35_000] : [30_000, 40_000], id: \.self) { value in
                                     Button(value.formatted()) { setPoint(pointKeys[index], value) }.font(.footnote)
                                 }
-                            }
+                            }.brandPanel()
                         }
                         if case .number(let start)? = values["startingPoints"], case .number(let returned)? = values["returnPoints"] {
-                            Text("头名赏（只读） \((returned - start) * Double(count) / 1000) 竞技分")
+                            Text("头名赏（只读） \((returned - start) * Double(count) / 1000) 竞技分").foregroundStyle(Brand.muted).brandPanel()
                         }
                         ForEach(0..<uma.count, id: \.self) { index in
-                            TextField("第 \(index + 1) 位马点", text: Binding(get: { uma[index] }, set: { uma[index] = $0; recalculate() }))
-                                .keyboardType(.decimalPad)
+                            TextField("", text: Binding(get: { uma[index] }, set: { uma[index] = $0; recalculate() }),
+                                prompt: Text("第 \(index + 1) 位马点").foregroundColor(Brand.muted))
+                                .keyboardType(.decimalPad).localBrandField().brandPanel()
                         }
                         ForEach(count == 3 ? [[20, 0, -20], [30, 0, -30], [10, 0, -10], [0, 0, 0]] :
                                     [[20, 10, -10, -20], [15, 5, -5, -15], [30, 10, -10, -30], [10, 5, -5, -10], [0, 0, 0, 0]], id: \.self) { preset in
                             Button(preset.map(String.init).joined(separator: " / ")) { uma = preset.map(String.init); recalculate() }
+                                .brandPanel()
                         }
-                    }
+                    } header: { BrandSectionHeader("起点与成绩") }
                     ForEach(groups, id: \.self) { group in
-                        Section(group) {
+                        Section {
                             if group == "支付数值" {
                                 ForEach(3..<6, id: \.self) { index in point(pointKeys[index], pointLabels[index]) }
-                                Text("罚符 1,500 点不可整百分摊，不支持。")
+                                Text("罚符 1,500 点不可整百分摊，不支持。").foregroundStyle(Brand.muted).brandPanel()
                                 ForEach(count == 3 ? [0, 2000, 3000] : [0, 3000], id: \.self) { value in
-                                    Button("罚符 \(value)") { setPoint("notenPenaltyTotal", value) }
+                                    Button("罚符 \(value)") { setPoint("notenPenaltyTotal", value) }.brandPanel()
                                 }
                                 ForEach([100, 200], id: \.self) { value in
                                     Button("本场自摸每人 \(value) / 荣和 \(value * (count - 1))") { setPoint("honbaPerPayer", value) }
+                                        .brandPanel()
                                 }
                             }
                             ForEach(options.indices.filter { index in
@@ -168,7 +182,7 @@ import SwiftUI
                                 let item = options[itemIndex]
                                 if item.3.isEmpty {
                                     Toggle(item.1, isOn: Binding(get: { values[item.0] == .bool(true) },
-                                        set: { values[item.0] = .bool($0); recalculate() }))
+                                        set: { values[item.0] = .bool($0); recalculate() })).brandPanel()
                                 } else {
                                     Picker(item.1, selection: Binding(get: { values[item.0]?.string ?? "" },
                                         set: { values[item.0] = .string($0); recalculate() })) {
@@ -179,39 +193,42 @@ import SwiftUI
                                         }, id: \.self) { candidateIndex in
                                             Text(item.3[candidateIndex].1).tag(item.3[candidateIndex].0)
                                         }
-                                    }
+                                    }.brandPanel()
                                 }
                             }
-                        }
+                        } header: { BrandSectionHeader(group) }
                     }
                 }
-                Section("本机引擎四例预览") {
-                    if examples.isEmpty { Text("规则无效时不会展示过期金额") }
+                Section {
+                    if examples.isEmpty { Text("规则无效时不会展示过期金额").foregroundStyle(Brand.muted).brandPanel() }
                     ForEach(0..<examples.count, id: \.self) { index in
                         VStack(alignment: .leading) {
                             Text(examples[index].0).font(.headline)
-                            Text(examples[index].1).font(.footnote).monospacedDigit()
-                        }
+                            Text(examples[index].1).font(.footnote).monospacedDigit().foregroundStyle(Brand.muted)
+                        }.brandPanel().accessibilityIdentifier("local.wizard.example.\(index)")
                     }
-                    Button("下一步：设置姓名与起家") { step = 2 }.disabled(issue != nil)
-                }
+                    Button("下一步：设置姓名与起家") { step = 2 }.disabled(issue != nil).brandPanel().accessibilityIdentifier("local.wizard.nextNames")
+                } header: { BrandSectionHeader("本机引擎四例预览") }
             } else {
-                Section("设置本地牌桌") {
-                    TextField("牌桌名称", text: $name)
+                Section {
+                    TextField("", text: $name, prompt: Text("牌桌名称").foregroundColor(Brand.muted))
+                        .localBrandField().brandPanel()
                     ForEach(0..<names.count, id: \.self) { index in
-                        TextField("\(index + 1) 号位 · 玩家姓名（最多 40 字）", text: $names[index])
+                        TextField("", text: $names[index], prompt: Text("\(index + 1) 号位 · 玩家姓名（最多 40 字）").foregroundColor(Brand.muted))
+                            .localBrandField().brandPanel()
                     }
                     Picker("指定起家", selection: $dealer) {
                         ForEach(0..<count, id: \.self) { index in Text("\(index + 1) 号位").tag(index) }
-                    }
-                    Text("创建后立即打开东一局；本桌与登录账户完全无关。")
-                    Button("创建并进入首局") { create() }.disabled(issue != nil || names.contains { $0.count > 40 })
-                    Button("返回规则调整") { step = 1 }
-                }
+                    }.brandPanel()
+                    Text("创建后立即打开东一局；本桌与登录账户完全无关。").foregroundStyle(Brand.muted).brandPanel()
+                    Button("创建并进入首局") { create() }.disabled(issue != nil || names.contains { $0.count > 40 }).brandPanel().accessibilityIdentifier("local.wizard.create")
+                    Button("返回规则调整") { step = 1 }.brandPanel()
+                } header: { BrandSectionHeader("设置本地牌桌") }
             }
         }
-        .scrollContentBackground(.hidden).background(Brand.background).tint(Brand.gold)
+        .scrollContentBackground(.hidden).background(Brand.background).tint(Brand.gold).foregroundStyle(Brand.text)
         .navigationTitle("离线开桌")
+        .accessibilityIdentifier("local.wizard.step.\(step)")
         .alert("切换模板将丢弃当前调整", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } })) {
             Button("保留调整", role: .cancel) { confirming = nil }
             Button("丢弃并切换", role: .destructive) { if let confirming { select(confirming) }; confirming = nil }
@@ -237,12 +254,12 @@ import SwiftUI
     private func point(_ key: String, _ label: String) -> some View {
         VStack(alignment: .leading) {
             Text(label)
-            TextField(label, text: Binding(get: { numbers[key] ?? "" }, set: { text in
+            TextField("", text: Binding(get: { numbers[key] ?? "" }, set: { text in
                 numbers[key] = text
                 if let value = Int(text) { setPoint(key, value, keepText: true) }
                 else { issue = "\(label)需填写整数"; examples = [] }
-            })).keyboardType(.numberPad)
-        }
+            }), prompt: Text(label).foregroundColor(Brand.muted)).keyboardType(.numberPad).localBrandField()
+        }.brandPanel()
     }
     private func setPoint(_ key: String, _ value: Int, keepText: Bool = false) {
         guard value >= 0 && value <= 2_147_483_647 && (key != "honbaPerPayer" || value <= 2_147_483_647 / (count - 1)) else {
@@ -321,98 +338,103 @@ import SwiftUI
     private var match: LocalMatch? { store.matches.first { $0.id == id } }
     var body: some View {
         List {
-            if let issue { Section { Text(issue).foregroundStyle(.red) } }
+            if let issue { Section { Text(issue).foregroundStyle(Brand.loss).brandPanel() } }
             if let currentMatch = match {
-                Section("\(currentMatch.templateName) · \(currentMatch.reviewStatus)") {
-                    Text("\(currentMatch.name) · \(currentMatch.status == "active" ? "进行中" : "已结束")")
-                    Text("引擎 \(currentMatch.engineVersion) · 规则与已结算局不可修改").font(.footnote)
+                Section {
+                    Text("\(currentMatch.name) · \(currentMatch.status == "active" ? "进行中" : "已结束")").brandPanel()
+                    Text("引擎 \(currentMatch.engineVersion) · 规则与已结算局不可修改").font(.footnote).foregroundStyle(Brand.muted).brandPanel()
                     DisclosureGroup("本桌规则快照 · 自定义 \(currentMatch.customizedKeys.count) 项") {
                         Text("调整字段：\(currentMatch.customizedKeys.isEmpty ? "无" : currentMatch.customizedKeys.joined(separator: "、"))")
-                        Text(jsonText(currentMatch.rules)).font(.caption).textSelection(.enabled)
-                    }
+                            .foregroundStyle(Brand.muted).brandPanel()
+                        Text(jsonText(currentMatch.rules)).font(.caption).foregroundStyle(Brand.muted).textSelection(.enabled).brandPanel()
+                    }.brandPanel()
                     if currentMatch.engineVersion != EngineBridgeCheck.version {
-                        Text("引擎版本不同，此牌桌只能读取历史，不能继续计算").foregroundStyle(.red)
+                        Text("引擎版本不同，此牌桌只能读取历史，不能继续计算").foregroundStyle(Brand.loss).brandPanel()
                     }
-                }
-                Section("座位与点数") {
+                } header: { BrandSectionHeader("\(currentMatch.templateName) · \(currentMatch.reviewStatus)") }
+                Section {
                     ForEach(currentMatch.seats) { seat in
                         HStack {
                             VStack(alignment: .leading) {
                                 Text("\(seat.seatNo + 1) 号位 · \(seat.displayName)")
-                                Text("\(currentMatch.points[seat.seatNo]) 点").monospacedDigit()
+                                Text("\(currentMatch.points[seat.seatNo]) 点").monospacedDigit().foregroundStyle(Brand.muted)
                             }
                             Spacer()
                             Button("改名") { editSeat = seat.seatNo; newName = seat.displayName }
                                 .disabled(currentMatch.status != "active")
-                        }
+                        }.brandPanel().accessibilityIdentifier("local.table.seat.\(seat.seatNo)")
                     }
-                }
+                } header: { BrandSectionHeader("座位与点数") }
                 if let hand = currentMatch.currentHand {
-                    Section("\(hand.roundWind) \(hand.roundNumber) · 庄 \(hand.dealerSeatNo + 1) · 本场 \(hand.honba) · 供托 \(hand.riichiPool) 点（\(hand.riichiPool / 1000) 根）") {
+                    Section {
                         ForEach(hand.seats, id: \.seatNo) { seat in
                             HStack {
                                 Text("\(seat.seatNo + 1) 号位 · \(seat.points) 点 · \(seat.isRiichi ? "立直" : "未立直")")
                                 Spacer()
                                 Button(seat.isRiichi ? "取消" : "立直") { action { try store.mark(id, seat: seat.seatNo) } }
                                     .disabled(currentMatch.engineVersion != EngineBridgeCheck.version)
-                            }
-                            Text("声明 \(seat.declares)/2 · 取消 \(seat.cancels)/1").font(.caption).foregroundStyle(.secondary)
+                            }.brandPanel().accessibilityIdentifier("local.table.hand.seat.\(seat.seatNo)")
+                            Text("声明 \(seat.declares)/2 · 取消 \(seat.cancels)/1").font(.caption).foregroundStyle(Brand.muted).brandPanel()
                         }
                         Button("录入本局结果") { entering = true }.disabled(currentMatch.engineVersion != EngineBridgeCheck.version)
-                    }
+                            .brandPanel().accessibilityIdentifier("local.table.enterResult")
+                    } header: { BrandSectionHeader("\(hand.roundWind) \(hand.roundNumber) · 庄 \(hand.dealerSeatNo + 1) · 本场 \(hand.honba) · 供托 \(hand.riichiPool) 点（\(hand.riichiPool / 1000) 根）") }
                 } else if currentMatch.status == "active" {
-                    Section { Button("新开一局") { action { try store.openHand(id) } }.disabled(currentMatch.engineVersion != EngineBridgeCheck.version) }
+                    Section { Button("新开一局") { action { try store.openHand(id) } }.disabled(currentMatch.engineVersion != EngineBridgeCheck.version).brandPanel() }
                 }
                 if currentMatch.status == "active" {
                     Section {
                         Button(currentMatch.currentHand == nil ? "手动终局" : "放弃未结算当前局并终局", role: .destructive) {
                             abandonFirst = true
-                        }.disabled(currentMatch.engineVersion != EngineBridgeCheck.version)
+                        }.disabled(currentMatch.engineVersion != EngineBridgeCheck.version).brandPanel()
                         Text("放弃只丢弃当前未结算手及立直标记；已结算记录、供托及点数不撤回。")
-                            .font(.footnote).foregroundStyle(.secondary)
+                            .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
                     }
                 } else {
-                    Section("终局") {
+                    Section {
                         if let saved = currentMatch.terminal {
                             terminalRows(saved)
                         } else if let currentTerminalPreview = terminalPreview {
                             terminalRows(currentTerminalPreview)
                             if currentTerminalPreview["isGameEnd"] == .bool(true) {
                                 Button("确认并保存最终成绩") { action { try store.confirmTerminal(id); self.terminalPreview = nil } }
+                                    .brandPanel().accessibilityIdentifier("local.table.confirmTerminal")
                             } else {
-                                Text("终局条件未满足，成绩尚不可确认。").foregroundStyle(.red)
+                                Text("终局条件未满足，成绩尚不可确认。").foregroundStyle(Brand.loss).brandPanel()
                             }
                         } else {
                             Button("预览最终成绩") { action { terminalPreview = try store.previewTerminal(id) } }
                                 .disabled(currentMatch.engineVersion != EngineBridgeCheck.version)
+                                .brandPanel().accessibilityIdentifier("local.table.previewTerminal")
                         }
-                    }
+                    } header: { BrandSectionHeader("终局") }
                 }
-                Section("已结算逐局历史 · 保存的原始输入及引擎输出") {
-                    if currentMatch.results.isEmpty { Text("暂无已结算局") }
+                Section {
+                    if currentMatch.results.isEmpty { Text("暂无已结算局").foregroundStyle(Brand.muted).brandPanel() }
                     ForEach(currentMatch.results) { result in
                         DisclosureGroup("\(result.hand.roundWind) \(result.hand.roundNumber) · \(result.input["kind"]?.string ?? "结果") · \(result.settledAt)") {
                             Text("庄 \(result.hand.dealerSeatNo + 1) · 本场 \(result.hand.honba) · 原供托 \(result.hand.riichiPool) 点")
+                                .foregroundStyle(Brand.muted).brandPanel()
                             if let seats = result.output["perSeat"]?.arrayValue {
                                 ForEach(0..<seats.count, id: \.self) { index in
                                     let fields = seats[index].object ?? [:]
-                                    Text("\(number(fields["seatNo"]).map { $0 + 1 } ?? 0) 号位：\(number(fields["netPoints"]) ?? 0) 点")
+                                    Text("\(number(fields["seatNo"]).map { $0 + 1 } ?? 0) 号位：\(number(fields["netPoints"]) ?? 0) 点").brandPanel()
                                     if let parts = fields["breakdown"]?.arrayValue {
                                         ForEach(0..<parts.count, id: \.self) { part in
                                             Text("\(parts[part].object?["reason"]?.string ?? "支付")：\(number(parts[part].object?["amount"]) ?? 0)")
-                                                .font(.footnote)
+                                                .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
                                         }
                                     }
                                 }
                             }
-                            Text("输入：\(jsonText(result.input))").font(.caption).textSelection(.enabled)
-                            Text("完整输出：\(jsonText(result.output))").font(.caption).textSelection(.enabled)
-                        }
+                            Text("输入：\(jsonText(result.input))").font(.caption).foregroundStyle(Brand.muted).textSelection(.enabled).brandPanel()
+                            Text("完整输出：\(jsonText(result.output))").font(.caption).foregroundStyle(Brand.muted).textSelection(.enabled).brandPanel()
+                        }.brandPanel().accessibilityIdentifier("local.table.history.\(result.id)")
                     }
-                }
-            } else { Text("本地牌桌不存在或已删除") }
+                } header: { BrandSectionHeader("已结算逐局历史 · 保存的原始输入及引擎输出") }
+            } else { Text("本地牌桌不存在或已删除").foregroundStyle(Brand.muted).brandPanel() }
         }
-        .scrollContentBackground(.hidden).background(Brand.background).tint(Brand.gold)
+        .scrollContentBackground(.hidden).background(Brand.background).tint(Brand.gold).foregroundStyle(Brand.text)
         .navigationTitle(match?.name ?? "本地牌桌")
         .sheet(isPresented: $entering) {
             resultEntrySheet
@@ -426,7 +448,8 @@ import SwiftUI
             Button("放弃当前局并终局", role: .destructive) { action { try store.finish(id) } }
         } message: { Text("牌桌结束后只能读取及确认终局成绩。") }
         .alert("修改本地玩家姓名", isPresented: Binding(get: { editSeat != nil }, set: { if !$0 { editSeat = nil } })) {
-            TextField("姓名（最多 40 字）", text: $newName)
+            TextField("", text: $newName, prompt: Text("姓名（最多 40 字）").foregroundColor(Brand.muted))
+                .foregroundStyle(Brand.text)
             Button("取消", role: .cancel) { editSeat = nil }
             Button("保存") { if let editSeat { action { try store.rename(id, seat: editSeat, name: newName) } }; editSeat = nil }
         }
@@ -452,9 +475,10 @@ import SwiftUI
             ForEach(0..<standings.count, id: \.self) { index in
                 let fields = standings[index].object ?? [:]
                 Text("座位 \((number(fields["seatNo"]) ?? 0) + 1) · 排名 \(number(fields["rank"]) ?? 0) · 最终点数 \(number(fields["finalPoints"]) ?? 0) · 成绩十分位 \(number(fields["totalTenths"]) ?? 0)")
+                    .brandPanel().accessibilityIdentifier("local.table.standing.\(index)")
             }
         }
-        Text("完整终局输出：\(jsonText(terminal))").font(.caption).textSelection(.enabled)
+        Text("完整终局输出：\(jsonText(terminal))").font(.caption).foregroundStyle(Brand.muted).textSelection(.enabled).brandPanel()
     }
 }
 
@@ -499,33 +523,36 @@ import SwiftUI
     var body: some View {
         Form {
             ResultInputFields(draft: $draft, snapshot: snapshot, hand: currentHand)
-            if let issue { Section { Text(issue).foregroundStyle(.red) } }
-            Section("本机引擎支付预览") {
+            if let issue { Section { Text(issue).foregroundStyle(Brand.loss).brandPanel() } }
+            Section {
                 Button("计算逐座支付") { calculate() }.disabled(input == nil || !draftSaved)
+                    .brandPanel().accessibilityIdentifier("local.result.preview")
                 if let valid = validPreview {
                     if let rows = valid.output["perSeat"]?.arrayValue {
                         ForEach(0..<rows.count, id: \.self) { index in
                             let row = rows[index].object ?? [:]
                             Text("\((number(row["seatNo"]) ?? 0) + 1) 号位 · \(number(row["netPoints"]) ?? 0) 点")
+                                .brandPanel().accessibilityIdentifier("local.result.payment.\(index)")
                             if let parts = row["breakdown"]?.arrayValue {
                                 ForEach(0..<parts.count, id: \.self) { part in
                                     Text("\(parts[part].object?["reason"]?.string ?? "支付")：\(number(parts[part].object?["amount"]) ?? 0)")
-                                        .font(.footnote).foregroundStyle(.secondary)
+                                        .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
                                 }
                             }
                         }
                     }
                     if let next = valid.output["nextHand"]?.object {
                         Text("下局：\(next["roundWind"]?.string ?? "?") \(number(next["roundNumber"]) ?? 0) · 本场 \(number(next["honba"]) ?? 0) · 供托 \(number(next["riichiPool"]) ?? 0) 点")
+                            .foregroundStyle(Brand.muted).brandPanel()
                     }
                     Button("确认并原子结算") {
                         do { try store.settle(match.id, handID: hand.handId, revision: hand.markRevision, input: valid.input); dismiss() }
                         catch { issue = error.localizedDescription; self.preview = nil }
-                    }
-                } else { Text("输入或标记变化后须重新预览").foregroundStyle(.secondary) }
-            }
+                    }.brandPanel().accessibilityIdentifier("local.result.settle")
+                } else { Text("输入或标记变化后须重新预览").foregroundStyle(Brand.muted).brandPanel() }
+            } header: { BrandSectionHeader("本机引擎支付预览") }
         }
-        .scrollContentBackground(.hidden).background(Brand.background).tint(Brand.gold)
+        .scrollContentBackground(.hidden).background(Brand.background).tint(Brand.gold).foregroundStyle(Brand.text)
         .navigationTitle("本地本局结算")
         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
         .onAppear {

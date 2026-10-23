@@ -188,8 +188,9 @@ struct CheckInScreen: View {
     var body: some View {
         Form {
             if joinedSeat == nil {
-                Section("扫码或粘贴签到链接") {
-                    SecureField("HTTPS 签到链接", text: $input)
+                Section {
+                    SecureField("HTTPS 签到链接", text: $input, prompt: Text("HTTPS 签到链接").foregroundColor(Brand.muted))
+                        .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
                         .textContentType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
                         .onChange(of: input) { _, _ in
                             resolved = nil
@@ -197,13 +198,20 @@ struct CheckInScreen: View {
                             previewKey = nil
                             selectedSeat = nil
                         }
-                    Button("粘贴剪贴板中的链接") { input = UIPasteboard.general.string ?? "" }
+                        .brandPanel()
+                    Button("粘贴剪贴板中的链接") { input = UIPasteboard.general.string ?? "" }.brandPanel()
                     Button("扫描二维码") { requestCamera() }
-                    if let displayedDestination = destination { Text("牌桌：\(displayedDestination.matchID) · 含签到凭证") }
-                    else if !input.isEmpty { Text("仅接受一姬 HTTPS 签到链接和有效 UUID").foregroundStyle(.red) }
-                }
-                Section("通过房间码") {
-                    TextField("6 位房间码", text: $code)
+                        .accessibilityIdentifier("checkIn.scanQRCode").brandPanel()
+                    if let displayedDestination = destination {
+                        Text("牌桌：\(displayedDestination.matchID) · 含签到凭证")
+                            .foregroundStyle(Brand.muted).brandPanel()
+                    } else if !input.isEmpty {
+                        Text("仅接受一姬 HTTPS 签到链接和有效 UUID").foregroundStyle(Brand.loss).brandPanel()
+                    }
+                } header: { BrandSectionHeader("扫码或粘贴签到链接") }
+                Section {
+                    TextField("6 位房间码", text: $code, prompt: Text("6 位房间码").foregroundColor(Brand.muted))
+                        .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
                         .textInputAutocapitalization(.characters).autocorrectionDisabled()
                         .onChange(of: code) { _, _ in
                             resolved = nil
@@ -212,18 +220,27 @@ struct CheckInScreen: View {
                             previewKey = nil
                             selectedSeat = nil
                         }
+                        .accessibilityIdentifier("checkIn.roomCode").brandPanel()
                     Button("换取签到凭证") { Task { await lookupCode() } }
                         .disabled(!session.authenticated || busy || code.isEmpty)
-                    Text("房间码换取短时签到凭证；选择空座后即可直接入座。").font(.footnote)
-                }
+                        .accessibilityIdentifier("checkIn.redeemCode").brandPanel()
+                    Text("房间码换取短时签到凭证；选择空座后即可直接入座。")
+                        .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
+                } header: { BrandSectionHeader("通过房间码") }
             }
             if !session.authenticated {
-                Section { Text("请先登录账户或选择在线临时访客，再回到此处签到。离线本地身份不能签到。") }
+                Section {
+                    Text("请先登录账户或选择在线临时访客，再回到此处签到。离线本地身份不能签到。")
+                        .foregroundStyle(Brand.muted).brandPanel()
+                }
             }
-            if let notice { Section { Text(notice).foregroundStyle(joinedSeat == nil ? Color.orange : Color.green) } }
+            if let notice {
+                Section { Text(notice).foregroundStyle(joinedSeat == nil ? Brand.gold : Brand.gain).brandPanel() }
+            }
             joinedSeatControls
         }
         .scrollContentBackground(.hidden)
+        .foregroundStyle(Brand.text)
         .background(Brand.background)
         .tint(Brand.gold)
         .navigationTitle("签到")
@@ -255,18 +272,20 @@ struct CheckInScreen: View {
     }
     @ViewBuilder private var joinedSeatControls: some View {
         if let joinedSeat = joinedSeat, let destination = destination {
-            Section("已加入牌桌") {
-                Text("你在 \(joinedSeat + 1) 号位，等待房主开局。")
+            Section {
+                Text("你在 \(joinedSeat + 1) 号位，等待房主开局。").brandPanel()
                 Button("查看牌桌") { onCompleted(destination.matchID) }
-            }
+                    .accessibilityIdentifier("checkIn.viewTable").brandPanel()
+            } header: { BrandSectionHeader("已加入牌桌") }
         } else if let destinationForSeats = destination, session.authenticated {
-            Section("选择座位") {
-                if loadingSeats { ProgressView("读取座位中…") }
+            Section {
+                if loadingSeats { ProgressView("读取座位中…").brandPanel() }
                 if let seatsPreview = preview, previewKey == destinationKey, seatsPreview.match.id == destinationForSeats.matchID {
                     let occupiedCount = seatsPreview.seats.reduce(0) { $0 + ($1.principalId == nil ? 0 : 1) }
                     let fullForGuest = occupiedCount >= seatsPreview.match.playerCount &&
                         !seatsPreview.seats.contains(where: { $0.principalId == session.principalID })
                     Text("\(seatsPreview.match.playerCount) 人牌桌 · \(seatsPreview.match.status == "preparing" ? "待开局" : "已开局")")
+                        .foregroundStyle(Brand.muted).brandPanel()
                     Picker("座位", selection: $selectedSeat) {
                         Text("自动选择第一个空座").tag(Int?.none)
                         ForEach(0..<seatsPreview.match.playerCount, id: \.self) { number in
@@ -276,22 +295,29 @@ struct CheckInScreen: View {
                                 .disabled(seat?.principalId != nil)
                         }
                     }
+                    .accessibilityIdentifier("checkIn.seatPicker").brandPanel()
                     Text("已有成员：\(occupiedCount) / \(seatsPreview.match.playerCount)。自动选择会在提交时取最低空座。")
-                        .font(.footnote).foregroundStyle(.secondary)
+                        .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
                     if fullForGuest {
-                        Text("牌桌已满，暂无可选座位。").foregroundStyle(.orange)
+                        Text("牌桌已满，暂无可选座位。").foregroundStyle(Brand.gold).brandPanel()
                     }
-                    TextField("昵称（可选；更新个人展示名）", text: $alias)
+                    TextField("昵称（可选；更新个人展示名）", text: $alias,
+                              prompt: Text("昵称（可选；更新个人展示名）").foregroundColor(Brand.muted))
+                        .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
                         .textInputAutocapitalization(.words)
+                        .brandPanel()
                     Button(busy ? "正在签到…" : "确认座位并加入") { Task { await checkIn() } }
                         .disabled(busy || loadingSeats || seatsPreview.match.status != "preparing" || fullForGuest ||
                                   (selectedSeat.map { seatsPreview.seat(at: $0)?.principalId != nil } ?? false))
+                        .accessibilityIdentifier("checkIn.confirmSeat").brandPanel()
                 }
                 if recoverableKey == destinationKey, preview == nil {
-                    Button("已签到？找回座位") { Task { await recoverCheckIn() } }.disabled(busy || loadingSeats)
+                    Button("已签到？找回座位") { Task { await recoverCheckIn() } }
+                        .disabled(busy || loadingSeats).brandPanel()
                 }
-                Button("刷新座位") { Task { await loadSeats() } }.disabled(loadingSeats || busy)
-            }
+                Button("刷新座位") { Task { await loadSeats() } }
+                    .disabled(loadingSeats || busy).brandPanel()
+            } header: { BrandSectionHeader("选择座位") }
         }
     }
     private func requestCamera() {

@@ -38,7 +38,21 @@ private struct BrandPanel: ViewModifier {
     }
 }
 
-private extension View {
+struct BrandSectionHeader: View {
+    let title: String
+
+    init(_ title: String) { self.title = title }
+
+    var body: some View {
+        Text(title)
+            .font(Brand.display(17))
+            .foregroundStyle(Brand.gold)
+            .textCase(nil)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+extension View {
     func brandPanel() -> some View { modifier(BrandPanel()) }
 }
 
@@ -218,7 +232,7 @@ struct AuthScreen: View {
                 }
                 if let error {
                     Text("登录或注册失败：\(error)")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Brand.loss)
                         .accessibilityAddTraits(.updatesFrequently)
                 }
                 Button {
@@ -248,7 +262,7 @@ struct AuthScreen: View {
                 Text("本地无身份模式在“本地牌桌”标签中开桌；不登录、不创建访客、不上传。")
                     .font(.footnote).foregroundStyle(Brand.muted)
                 if let warning = session.sessionError {
-                    Text(warning).font(.footnote).foregroundStyle(.red)
+                    Text(warning).font(.footnote).foregroundStyle(Brand.loss)
                 }
             }
             .textFieldStyle(.plain)
@@ -333,6 +347,7 @@ struct AuthScreen: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .brandPanel()
+        .accessibilityIdentifier(!isFinished(match.status) ? "online.match.active" : "online.match.finished")
     }
 
     var body: some View {
@@ -361,6 +376,7 @@ struct AuthScreen: View {
                         .tint(Brand.gold)
                         .foregroundStyle(Brand.background)
                         .disabled(!session.canHost)
+                        .accessibilityIdentifier("online.wizard.open")
                         Text(session.canHost ? "选择模板、调整规则、预览支付后创建" : "访客不能创建牌桌，请使用注册账户")
                             .font(.footnote).foregroundStyle(Brand.muted)
                     }
@@ -377,20 +393,21 @@ struct AuthScreen: View {
                 }
             }
             if loading && matches == nil {
-                ProgressView("读取对局中…")
+                ProgressView("读取对局中…").brandPanel()
             }
             if let error {
                 Section {
-                    Text("加载失败：\(error)").foregroundStyle(.red)
+                    Text("加载失败：\(error)").foregroundStyle(Brand.loss)
                     Button("重试") { Task { await refresh() } }
                 }
+                .brandPanel()
             }
             if lobby {
-                Section("正在进行的牌桌") {
+                Section {
                     if matches != nil && liveMatches.isEmpty { Text("暂无进行中的牌桌").foregroundStyle(Brand.muted).brandPanel() }
                     ForEach(liveMatches, id: \.id) { match in row(match) }
-                }
-                Section("规则模板 / 桌边入口") {
+                } header: { BrandSectionHeader("正在进行的牌桌") }
+                Section {
                     if templates.isEmpty {
                         Text("规则模板暂未提供").foregroundStyle(Brand.muted).brandPanel()
                     }
@@ -402,17 +419,18 @@ struct AuthScreen: View {
                         }
                         .brandPanel()
                     }
-                }
+                } header: { BrandSectionHeader("规则模板 / 桌边入口") }
             }
-            Section(lobby ? "战绩 · 最近对局" : "战绩 · 对局记录") {
+            Section {
                 if matches != nil && recentMatches.isEmpty {
                     Text("暂无对局记录，下拉刷新试试").foregroundStyle(Brand.muted).brandPanel()
                 }
                 ForEach(recentMatches, id: \.id) { match in row(match) }
-            }
+            } header: { BrandSectionHeader(lobby ? "战绩 · 最近对局" : "战绩 · 对局记录") }
         }
         .scrollContentBackground(.hidden)
         .background(Brand.background)
+        .tint(Brand.gold)
         .foregroundStyle(Brand.text)
         .navigationTitle(lobby ? "大厅" : "战绩")
         .refreshable { await refresh() }
@@ -504,7 +522,7 @@ struct AuthScreen: View {
                     .accessibilityLabel("实时连接状态：\(live.connection)")
                 if loading && snapshot == nil { ProgressView("读取对局中…") }
                 if let error {
-                    Text("加载失败：\(error)").foregroundStyle(.red)
+                    Text("加载失败：\(error)").foregroundStyle(Brand.loss)
                     Button("重试") { Task { await refresh() } }
                 }
                 if snapshot == nil && !loading && error == nil {
@@ -512,8 +530,9 @@ struct AuthScreen: View {
                 }
             }
             .listRowBackground(Brand.deep)
+            .listRowSeparatorTint(Brand.hairline)
             if let currentSnapshot = snapshot {
-                Section("对局信息") {
+                Section {
                     let details = ruleDetails(snapshot: currentSnapshot.match.rulesSnapshot, template: templates.first { $0.versionId == currentSnapshot.match.rulesetVersionId })
                     HStack(spacing: 12) {
                         EastTile(size: 40)
@@ -527,17 +546,17 @@ struct AuthScreen: View {
                     Text("牌桌 \(currentSnapshot.match.id)")
                         .font(.caption2).foregroundStyle(Brand.muted).textSelection(.enabled)
                     RuleInfo(snapshot: currentSnapshot.match.rulesSnapshot, templates: templates, versionID: currentSnapshot.match.rulesetVersionId)
-                }
-                .listRowBackground(Brand.panel)
+                } header: { BrandSectionHeader("对局信息") }
+                .brandPanel()
                 if currentSnapshot.match.status == "preparing",
                    let ownSeat = currentSnapshot.seats.first(where: { $0.principalId == session.principalID && $0.status == "checked_in" }) {
                     Section {
                         Text("你在 \(ownSeat.seatNo + 1) 号位，等待房主开局。")
                             .foregroundStyle(Brand.gold)
                     }
-                    .listRowBackground(Brand.panel)
+                    .brandPanel()
                 }
-                Section("座位与点数") {
+                Section {
                     ForEach(currentSnapshot.seats.sorted { $0.seatNo < $1.seatNo }, id: \.seatNo) { seat in
                         HStack(spacing: 12) {
                             Text(windLabel(["E", "S", "W", "N"][seat.seatNo % 4]))
@@ -567,8 +586,8 @@ struct AuthScreen: View {
                         ], center: .center, startRadius: 0, endRadius: 260))
                         .listRowSeparatorTint(Brand.gold.opacity(0.5))
                     }
-                }
-                Section("当前局") {
+                } header: { BrandSectionHeader("座位与点数") }
+                Section {
                     if let hand = currentSnapshot.currentHand {
                         Text("\(windLabel(hand.roundWind)) \(hand.roundNumber.map { String($0) } ?? "?") 局 · 庄家 \(hand.dealerSeatNo.map { String($0 + 1) } ?? "?") 号位")
                             .monospacedDigit()
@@ -583,10 +602,11 @@ struct AuthScreen: View {
                     } else {
                         Text("暂无进行中的牌局")
                     }
-                }
+                } header: { BrandSectionHeader("当前局") }
                 .listRowBackground(Brand.deep)
+                .listRowSeparatorTint(Brand.hairline)
                 if isFinished(currentSnapshot.match.status) {
-                    Section("最终排名") {
+                    Section {
                         if let currentSettlement = settlement, !currentSettlement.standings.isEmpty {
                             ForEach(currentSettlement.standings.sorted { $0.rank < $1.rank }, id: \.seatNo) { standing in
                                 Text("第 \(standing.rank) 名 · \(standing.seatNo + 1) 号位 · \(standing.finalPoints) 点 · 总成绩 \(Double(standing.totalTenths) / 10)")
@@ -595,14 +615,14 @@ struct AuthScreen: View {
                         } else {
                             Text("结算数据暂未提供")
                         }
-                    }
-                    .listRowBackground(Brand.panel)
+                    } header: { BrandSectionHeader("最终排名") }
+                    .brandPanel()
                 }
                 OnlineTableActions(session: session, snapshot: currentSnapshot) { await refresh() }
             }
-            Section("局历史") {
+            Section {
                 Text("显示最早的已结算局摘要（最多 100 局），非完整牌谱回放；无后续分页或原始输入。")
-                    .font(.footnote).foregroundStyle(.secondary)
+                    .font(.footnote).foregroundStyle(Brand.muted)
                 if let recordedHands = hands {
                     if recordedHands.isEmpty { Text("暂无牌局记录") }
                     ForEach(recordedHands.sorted { $0.handNo < $1.handNo }, id: \.handNo) { hand in
@@ -623,10 +643,12 @@ struct AuthScreen: View {
                 } else {
                     Text("牌局记录暂未提供")
                 }
-            }
+            } header: { BrandSectionHeader("局历史") }
+            .brandPanel()
         }
         .scrollContentBackground(.hidden)
         .background(Brand.background)
+        .tint(Brand.gold)
         .foregroundStyle(Brand.text)
         .navigationTitle("牌桌")
         .refreshable { await refresh() }
@@ -778,25 +800,31 @@ struct ProfileScreen: View {
                 }
                 .padding(.vertical, 12)
             }
-            .listRowBackground(Brand.panel)
-            Section("我的账号") {
+            .brandPanel()
+            Section {
                 if loading && session.profile == nil { ProgressView("读取账号中…") }
                 if let error {
-                    Text("加载失败：\(error)").foregroundStyle(.red)
+                    Text("加载失败：\(error)").foregroundStyle(Brand.loss)
                     Button("重试") { Task { await refresh() } }
                 }
                 if let principal = session.profile?.principal {
-                    LabeledContent("昵称", value: principal.displayName)
-                    LabeledContent("账号类型", value: accountLabel(principal.type))
-                    LabeledContent("创建时间", value: localDate(principal.createdAt))
+                    LabeledContent {
+                        Text(principal.displayName).foregroundStyle(Brand.muted)
+                    } label: { Text("昵称").foregroundStyle(Brand.text) }
+                    LabeledContent {
+                        Text(accountLabel(principal.type)).foregroundStyle(Brand.muted)
+                    } label: { Text("账号类型").foregroundStyle(Brand.text) }
+                    LabeledContent {
+                        Text(localDate(principal.createdAt)).foregroundStyle(Brand.muted)
+                    } label: { Text("创建时间").foregroundStyle(Brand.text) }
                     if session.identity == .onlineGuest {
                         Text("临时访客会话已安全保存；不能开桌，也不承诺升级账户后自动继承战绩。")
                             .font(.footnote).foregroundStyle(Brand.muted)
                     }
                 }
-            }
-            .listRowBackground(Brand.panel)
-            Section("关于 / 诊断") {
+            } header: { BrandSectionHeader("我的账号") }
+            .brandPanel()
+            Section {
                 Button(checking ? "自检中…" : "引擎自检") {
                     Task {
                         checking = true
@@ -806,8 +834,8 @@ struct ProfileScreen: View {
                 }
                 .disabled(checking)
                 if let diagnostic { Text("诊断结果：\(diagnostic)") }
-            }
-            .listRowBackground(Brand.panel)
+            } header: { BrandSectionHeader("关于 / 诊断") }
+            .brandPanel()
             Section {
                 Button("扫描二维码 / 粘贴签到链接 / 房间码", action: onCheckIn)
                 Button("退出登录", role: .destructive) {
@@ -819,10 +847,11 @@ struct ProfileScreen: View {
                 }
                 .disabled(signingOut)
             }
-            .listRowBackground(Brand.panel)
+            .brandPanel()
         }
         .scrollContentBackground(.hidden)
         .background(Brand.background)
+        .tint(Brand.gold)
         .foregroundStyle(Brand.text)
         .navigationTitle("我的")
         .refreshable { await refresh() }

@@ -11,7 +11,7 @@ struct IchihimeNativeApp: App {
     @State private var lobbyPath: [String] = []
     @State private var historyPath: [String] = []
     @State private var removalNotice = false
-    @StateObject private var localStore = LocalMatchStore()
+    @StateObject private var localStore: LocalMatchStore
     @State private var useLocalDuringRestore = false
 
     private func leaveRevokedTable() {
@@ -22,6 +22,10 @@ struct IchihimeNativeApp: App {
     }
 
     init() {
+        let testStore = ProcessInfo.processInfo.arguments.contains("-UITestSeed")
+            ? FileManager.default.temporaryDirectory.appendingPathComponent("LocalUITour-\(UUID().uuidString).sqlite3")
+            : nil
+        _localStore = StateObject(wrappedValue: LocalMatchStore(location: testStore))
         let appearance = UINavigationBarAppearance()
         appearance.configureWithOpaqueBackground()
         appearance.backgroundColor = UIColor(red: 16 / 255, green: 28 / 255, blue: 40 / 255, alpha: 1)
@@ -34,6 +38,23 @@ struct IchihimeNativeApp: App {
         navigationBar.scrollEdgeAppearance = appearance
         navigationBar.compactAppearance = appearance
         navigationBar.compactScrollEdgeAppearance = appearance
+
+        let tabAppearance = UITabBarAppearance()
+        tabAppearance.configureWithOpaqueBackground()
+        tabAppearance.backgroundColor = UIColor(Brand.background)
+        let muted = UIColor(Brand.muted)
+        let gold = UIColor(Brand.gold)
+        func style(_ item: UITabBarItemAppearance) {
+            item.normal.iconColor = muted
+            item.normal.titleTextAttributes = [.foregroundColor: muted]
+            item.selected.iconColor = gold
+            item.selected.titleTextAttributes = [.foregroundColor: gold]
+        }
+        style(tabAppearance.stackedLayoutAppearance)
+        style(tabAppearance.inlineLayoutAppearance)
+        style(tabAppearance.compactInlineLayoutAppearance)
+        UITabBar.appearance().standardAppearance = tabAppearance
+        UITabBar.appearance().scrollEdgeAppearance = tabAppearance
     }
 
     var body: some Scene {
@@ -46,7 +67,11 @@ struct IchihimeNativeApp: App {
                             useLocalDuringRestore = true
                         }
                         .buttonStyle(.borderedProminent)
+                        .tint(Brand.gold)
+                        .foregroundStyle(Brand.background)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Brand.background)
                 } else if session.authenticated && !useLocalDuringRestore {
                     TabView(selection: $selectedTab) {
                         NavigationStack(path: $lobbyPath) {
@@ -79,6 +104,7 @@ struct IchihimeNativeApp: App {
                         .tabItem { Label("我的", systemImage: "person.crop.circle") }
                         .tag(2)
                     }
+                    .tint(Brand.gold)
                     .alert("你已被房主移出牌桌", isPresented: $removalNotice) {
                         Button("知道了", role: .cancel) {}
                     }
@@ -106,8 +132,10 @@ struct IchihimeNativeApp: App {
                                 .tabItem { Label("在线登录", systemImage: "person.crop.circle") }
                         }
                     }
+                    .tint(Brand.gold)
                 }
             }
+            .tint(Brand.gold)
             .task {
                 // CI/verification hook: `simctl launch ... -EngineSelfCheck` runs the
                 // bundled golden-fixture replay through the MobileEngine framework and

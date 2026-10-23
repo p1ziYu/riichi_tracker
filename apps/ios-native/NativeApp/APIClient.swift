@@ -46,7 +46,7 @@ private struct EncodableBody: Encodable {
 private struct EmptyBody: Encodable {}
 
 private final class TokenStore {
-    private let service = "\(Bundle.main.bundleIdentifier ?? "riichi.p1ziyu.com").auth-token"
+    private let service = "\(Bundle.main.bundleIdentifier ?? "riichi.p1ziyu.com").auth-token\(ProcessInfo.processInfo.arguments.contains("-UITestSeed") ? ".uitest" : "")"
     private let account = "session"
 
     private var query: [String: Any] {
@@ -134,6 +134,8 @@ final class APIClient {
         } else {
             origin = nil
         }
+        // UI tours never read or revoke the owner's real Keychain session.
+        if ProcessInfo.processInfo.arguments.contains("-UITestSeed") { store.clear() }
     }
 
     var hasStoredToken: Bool {
