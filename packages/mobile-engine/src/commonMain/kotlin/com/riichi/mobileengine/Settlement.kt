@@ -45,6 +45,7 @@ private fun calculateBasicPoints(
 }
 
 /** Decide whether a settled hand ends a ranked-sanma match. */
+@Throws(EngineException::class)
 fun isAutomaticMatchEnd(
     rawConfig: Map<String, Any?>,
     handState: HandState,
@@ -128,6 +129,7 @@ private fun computeTsumoPaymentsForWinner(
  * Dynamic boundary for callers carrying malformed values that a Boolean? cannot represent.
  * Normal callers use the fully typed overload below.
  */
+@Throws(EngineException::class)
 fun calculateSettlement(
     rulesSnapshot: RulesSnapshot,
     handState: HandState,
@@ -194,6 +196,7 @@ fun calculateSettlement(
 }
 
 /** Pure settlement: payment entries are recorded in the same order as the source engine. */
+@Throws(EngineException::class)
 fun calculateSettlement(
     rulesSnapshot: RulesSnapshot,
     handState: HandState,

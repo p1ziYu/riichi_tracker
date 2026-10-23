@@ -302,6 +302,7 @@ private object RuleAliases {
     val allowLowPointRiichi = listOf("allowLowPointRiichi")
 }
 
+@Throws(EngineException::class)
 fun normalizeRulesConfig(rawConfig: Map<String, Any?>, inferredPlayerCount: Int? = null): EngineRulesConfig {
     val templateKey = rawConfig["templateKey"] as? String
     val templateBase = templateKey?.let { RULESET_TEMPLATES[it] }
@@ -462,6 +463,7 @@ fun normalizeRulesConfig(rawConfig: Map<String, Any?>, inferredPlayerCount: Int?
 }
 
 /** At this boundary malformed JSON inputs can be represented without coercing null to an empty config. */
+@Throws(EngineException::class)
 fun normalizeRulesConfig(rawConfig: Any?, inferredPlayerCount: Int? = null): EngineRulesConfig {
     if (rawConfig is List<*>) return normalizeRulesConfig(emptyMap(), inferredPlayerCount)
     if (rawConfig !is Map<*, *>) throw EngineException("Invalid rulesSnapshot.config: must be an object.")

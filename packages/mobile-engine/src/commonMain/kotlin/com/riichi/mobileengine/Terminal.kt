@@ -67,6 +67,7 @@ private fun terminalEntries(list: List<*>, label: String): List<TerminalEntry> =
 private fun terminalJsRound(value: Double): Long = floor(value + 0.5).toLong()
 
 /** Calculates final ranking and integer-tenths scores, retaining the input seat order in perSeat. */
+@Throws(EngineException::class)
 fun calculateTerminalSettlement(
     finalPoints: TerminalPointsInput,
     rules: Any?,
@@ -74,6 +75,7 @@ fun calculateTerminalSettlement(
 ): TerminalSettlementOutput = calculateTerminalSettlementInternal(finalPoints, rules, options)
 
 /** Raw JSON input boundary: preserves malformed list entries and inline field types for validation. */
+@Throws(EngineException::class)
 fun calculateTerminalSettlement(
     finalPoints: Any?,
     rules: Any?,
@@ -81,6 +83,7 @@ fun calculateTerminalSettlement(
 ): TerminalSettlementOutput = calculateTerminalSettlementInternal(finalPoints, rules, options)
 
 /** Raw options boundary for JSON inputs whose invalid field types must reach TS-style validation. */
+@Throws(EngineException::class)
 fun calculateTerminalSettlement(
     finalPoints: Any?,
     rules: Any?,
