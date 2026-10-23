@@ -665,6 +665,72 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     return { matchId: match.id, ...invitation };
   });
 
+  // A signed, still-unused invitation permits a pre-join seat preview, not access to the full match.
+  app.get<{ Params: { id: string }; Querystring: { token?: string } }>(
+    '/api/matches/:id/check-in-seats',
+    async (req, reply) => {
+      const principal = await requirePrincipal(req, reply);
+      if (!principal) return;
+      const matchId = req.params.id;
+      const token = req.query.token;
+      if (!token || typeof token !== 'string') {
+        return reply.code(400).send({ error: 'missing_token', message: 'Check-in token is required' });
+      }
+      if (!verifyCheckInTokenSignature(token, matchId)) {
+        return reply.code(400).send({ error: 'invalid_token', message: 'Invalid or expired check-in token' });
+      }
+      const match = (await pool.query<{ id: string; player_count: number; state: string; rules_hash: string }>(
+        `SELECT id, player_count, state, rules_hash FROM app.matches WHERE id = $1 AND deleted_at IS NULL`,
+        [matchId],
+      )).rows[0];
+      if (!match) {
+        return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
+      }
+      if (match.state !== 'preparing') {
+        return reply.code(409).send({ error: 'match_already_started', message: 'Match is not in preparing state' });
+      }
+      const tokenHash = createHash('sha256').update(token).digest('hex');
+      const invitation = await pool.query(
+        `SELECT 1 FROM app.match_invitations
+         WHERE match_id = $1 AND scope = 'join' AND hmac_key_id = $2
+           AND revoked_at IS NULL AND expires_at > now()`,
+        [matchId, tokenHash],
+      );
+      if (!invitation.rowCount) {
+        return reply.code(400).send({
+          error: 'token_consumed_or_expired', message: 'Check-in token already used or expired',
+        });
+      }
+      const seats = await pool.query<{
+        seat_no: number; principal_id: string | null; display_name: string | null; has_check_in: boolean;
+      }>(
+        `SELECT ms.seat_no, mm.principal_id, p.display_name,
+                EXISTS (
+                  SELECT 1 FROM app.check_ins ci
+                  WHERE ci.seat_assignment_id = sa.id AND ci.invalidated_at IS NULL
+                    AND ci.rules_hash = $2
+                ) AS has_check_in
+         FROM app.match_seats ms
+         LEFT JOIN app.seat_assignments sa
+           ON sa.match_id = ms.match_id AND sa.seat_no = ms.seat_no AND sa.end_hand_no IS NULL
+         LEFT JOIN app.match_members mm
+           ON mm.id = sa.member_id AND mm.status = 'active'
+         LEFT JOIN app.principals p ON p.id = mm.principal_id
+         WHERE ms.match_id = $1 ORDER BY ms.seat_no`,
+        [matchId, match.rules_hash],
+      );
+      return {
+        match: { id: match.id, playerCount: match.player_count, status: match.state },
+        seats: seats.rows.map((seat) => ({
+          seatNo: seat.seat_no,
+          principalId: seat.principal_id,
+          displayName: seat.display_name,
+          status: seat.has_check_in ? 'checked_in' : seat.principal_id ? 'assigned' : 'empty',
+        })),
+      };
+    },
+  );
+
   // GET /api/matches/:id -> { match, seats:[{seatNo, principalId, displayName, points, status}], currentHand, scoreboard:[{seatNo, points}], checkedIn: number }
   app.get<{ Params: { id: string } }>('/api/matches/:id', async (req, reply) => {
     const principal = await requirePrincipal(req, reply);
@@ -1252,16 +1318,16 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     return issueCheckInToken(matchId, principal.id);
   });
 
-  // POST /api/matches/:id/check-ins { token, alias? } -> { seat: { seatNo }, grantId }
+  // POST /api/matches/:id/check-ins { token, alias?, seatNo? } -> { seat: { seatNo }, grantId }
   app.post<{
     Params: { id: string };
-    Body: { token?: string; alias?: string };
+    Body: { token?: string; alias?: string; seatNo?: number };
   }>('/api/matches/:id/check-ins', async (req, reply) => {
     const principal = await requirePrincipal(req, reply);
     if (!principal) return;
 
     const matchId = req.params.id;
-    const { token, alias } = req.body ?? {};
+    const { token, alias, seatNo: requestedSeatNo } = req.body ?? {};
     if (!token || typeof token !== 'string') {
       return reply.code(400).send({ error: 'missing_token', message: 'Check-in token is required' });
     }
@@ -1313,65 +1379,98 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         return reply.code(403).send({ error: 'owner_auto_check_in', message: 'Owner presence is confirmed on seat claim' });
       }
 
-      // A token alone never grants a guest a seat: approval is required first.
-      const approvedSaRes = await client.query<{
-        seat_assignment_id: string;
-        seat_no: number;
-        member_id: string;
-      }>(
-        `SELECT
-           sa.id AS seat_assignment_id,
-           sa.seat_no,
-           mm.id AS member_id
-         FROM app.seat_assignments sa
-         JOIN app.match_members mm
-           ON mm.id = sa.member_id
-          AND mm.match_id = sa.match_id
-         WHERE sa.match_id = $1
-           AND mm.principal_id = $2
-           AND mm.status = 'active'
-           AND mm.role = 'participant'
-           AND sa.end_hand_no IS NULL
-           AND sa.confirmed_by IS NOT NULL
-         FOR UPDATE OF sa`,
-        [matchId, principal.id],
-      );
-      const approvedSa = approvedSaRes.rows[0];
-      if (!approvedSa) {
-        await client.query('ROLLBACK');
-        return reply.code(403).send({
-          error: 'check_in_not_approved',
-          message: 'Caller does not have an approved seat assignment for this match',
-        });
+      // Existing checked-in participants may retry with any valid signed token without consuming it.
+      const existing = (await client.query<{ member_id: string; seat_no: number; grant_id: string | null }>(
+        `SELECT mm.id AS member_id, sa.seat_no, mag.id AS grant_id
+         FROM app.match_members mm
+         JOIN app.seat_assignments sa
+           ON sa.match_id = mm.match_id AND sa.member_id = mm.id AND sa.end_hand_no IS NULL
+         JOIN app.check_ins ci
+           ON ci.seat_assignment_id = sa.id AND ci.member_id = mm.id
+             AND ci.invalidated_at IS NULL AND ci.rules_hash = $3
+         LEFT JOIN app.member_access_grants mag
+           ON mag.member_id = mm.id AND mag.principal_id = $2 AND mag.revoked_at IS NULL
+         WHERE mm.match_id = $1 AND mm.principal_id = $2
+           AND mm.status = 'active' AND mm.role = 'participant'`,
+        [matchId, principal.id, match.rules_hash],
+      )).rows[0];
+      if (existing) {
+        let grantId = existing.grant_id;
+        if (!grantId) {
+          grantId = (await client.query<{ id: string }>(
+            `INSERT INTO app.member_access_grants (member_id, principal_id)
+             VALUES ($1, $2) RETURNING id`,
+            [existing.member_id, principal.id],
+          )).rows[0].id;
+        }
+        await client.query('COMMIT');
+        return { seat: { seatNo: existing.seat_no }, grantId };
       }
 
-      // Atomically consume the hashed single-use check-in token
+      if (requestedSeatNo !== undefined &&
+          (!Number.isInteger(requestedSeatNo) || requestedSeatNo < 0 || requestedSeatNo >= match.player_count)) {
+        await client.query('ROLLBACK');
+        return reply.code(400).send({ error: 'invalid_seat', message: 'Invalid seatNo' });
+      }
+      const occupied = await client.query<{ id: string; seat_no: number; member_id: string }>(
+        `SELECT id, seat_no, member_id FROM app.seat_assignments
+         WHERE match_id = $1 AND end_hand_no IS NULL ORDER BY seat_no`,
+        [matchId],
+      );
+      const member = (await client.query<{ id: string }>(
+        `SELECT id FROM app.match_members
+         WHERE match_id = $1 AND principal_id = $2 AND status = 'active' AND role = 'participant'`,
+        [matchId, principal.id],
+      )).rows[0];
+      const currentSeat = member && occupied.rows.find((seat) => seat.member_id === member.id);
+      if (!currentSeat && occupied.rows.length >= match.player_count) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({ error: 'match_full', message: 'All seats are occupied' });
+      }
+      if (requestedSeatNo !== undefined &&
+          occupied.rows.some((seat) => seat.seat_no === requestedSeatNo && seat.member_id !== member?.id)) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({ error: 'seat_taken', message: `Seat ${requestedSeatNo} is already taken` });
+      }
+      if (currentSeat && requestedSeatNo !== undefined && requestedSeatNo !== currentSeat.seat_no) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({ error: 'member_already_seated', message: 'Member already occupies another seat' });
+      }
+      let seatNo = currentSeat?.seat_no ?? requestedSeatNo ?? 0;
+      if (!currentSeat && requestedSeatNo === undefined) {
+        while (occupied.rows.some((seat) => seat.seat_no === seatNo)) seatNo++;
+      }
+
+      // Verify the actual invitation before mutating the guest binding, membership or seat.
       const consumeRes = await client.query<{ id: string }>(
         `UPDATE app.match_invitations
          SET revoked_at = now()
-         WHERE match_id = $1
-           AND hmac_key_id = $2
-           AND revoked_at IS NULL
-           AND expires_at > now()
+         WHERE match_id = $1 AND scope = 'join' AND hmac_key_id = $2
+           AND revoked_at IS NULL AND expires_at > now()
          RETURNING id`,
         [matchId, tokenHash],
       );
-      if (consumeRes.rowCount === 0) {
+      if (!consumeRes.rowCount) {
         await client.query('ROLLBACK');
         return reply.code(400).send({ error: 'token_consumed_or_expired', message: 'Check-in token already used or expired' });
       }
-
-      // F3: Bind guest session only after approved seat assignment + valid check-in token
       if (pRow.kind === 'guest') {
         const bindStatus = await bindGuestToMatch(principal.id, matchId, client);
         if (bindStatus === 'already_bound_other_match') {
           await client.query('ROLLBACK');
           return reply.code(403).send({
-            error: 'guest_already_bound',
-            message: 'Guest session is already bound to another match',
+            error: 'guest_already_bound', message: 'Guest session is already bound to another match',
           });
         }
       }
+      const memberId = (await client.query<{ id: string }>(
+        `INSERT INTO app.match_members (match_id, principal_id, role, status)
+         VALUES ($1, $2, 'participant', 'active')
+         ON CONFLICT (match_id, principal_id)
+         DO UPDATE SET role = 'participant', status = 'active', removed_at = NULL, hidden_at = NULL
+         RETURNING id`,
+        [matchId, principal.id],
+      )).rows[0].id;
 
       if (typeof alias === 'string' && alias.trim().length > 0) {
         await client.query(
@@ -1380,16 +1479,27 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         );
       }
 
-      const { seat_assignment_id: seatAssignmentId, seat_no: seatNo, member_id: memberId } = approvedSa;
+      const seatAssignmentId = currentSeat?.id ?? (await client.query<{ id: string }>(
+        `INSERT INTO app.seat_assignments (match_id, seat_no, member_id, start_hand_no, confirmed_by)
+         VALUES ($1, $2, $3, 0, $4) RETURNING id`,
+        [matchId, seatNo, memberId, principal.id],
+      )).rows[0].id;
 
-      // Invalidate any prior active check-in on this seat assignment, then insert new check_ins row
-      // F1: Never write host_confirmed_* on behalf of the owner.
+      if (currentSeat) {
+        await client.query(
+          `UPDATE app.seat_assignments SET confirmed_by = $1
+           WHERE id = $2 AND confirmed_by IS NULL`,
+          [principal.id, seatAssignmentId],
+        );
+      }
+
+      // Re-confirm an existing assignment without ever duplicating its active check-in.
       await client.query(
-        `UPDATE app.check_ins
-         SET invalidated_at = now()
+        `UPDATE app.check_ins SET invalidated_at = now()
          WHERE seat_assignment_id = $1 AND invalidated_at IS NULL`,
         [seatAssignmentId],
       );
+
       await client.query(
         `INSERT INTO app.check_ins (
            match_id,
@@ -1403,24 +1513,17 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         [matchId, memberId, seatAssignmentId, match.rules_hash],
       );
 
-      // Ensure member_access_grants row
-      const existingGrant = await client.query<{ id: string }>(
-        `SELECT id FROM app.member_access_grants
-         WHERE member_id = $1 AND principal_id = $2 AND revoked_at IS NULL`,
+      const grantId = (await client.query<{ id: string }>(
+        `WITH existing AS (
+           SELECT id FROM app.member_access_grants
+           WHERE member_id = $1 AND principal_id = $2 AND revoked_at IS NULL
+         ), inserted AS (
+           INSERT INTO app.member_access_grants (member_id, principal_id)
+           SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM existing)
+           RETURNING id
+         ) SELECT id FROM existing UNION ALL SELECT id FROM inserted`,
         [memberId, principal.id],
-      );
-      let grantId: string;
-      if (existingGrant.rows[0]) {
-        grantId = existingGrant.rows[0].id;
-      } else {
-        const grantInsert = await client.query<{ id: string }>(
-          `INSERT INTO app.member_access_grants (member_id, principal_id)
-           VALUES ($1, $2)
-           RETURNING id`,
-          [memberId, principal.id],
-        );
-        grantId = grantInsert.rows[0].id;
-      }
+      )).rows[0].id;
 
       await client.query('COMMIT');
 
@@ -1442,6 +1545,196 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
       client.release();
     }
   });
+
+  // Move to an empty seat or swap two occupied seats before the match starts.
+  app.post<{ Params: { id: string }; Body: { fromSeatNo: number; toSeatNo: number } }>(
+    '/api/matches/:id/seats/reassign',
+    async (req, reply) => {
+      const principal = await requirePrincipal(req, reply);
+      if (!principal) return;
+      const matchId = req.params.id;
+      const { fromSeatNo, toSeatNo } = req.body ?? {};
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const match = (await client.query<{
+          owner_principal_id: string; state: string; player_count: number; rules_hash: string;
+        }>(
+          `SELECT owner_principal_id, state, player_count, rules_hash FROM app.matches
+           WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`,
+          [matchId],
+        )).rows[0];
+        if (!match) {
+          await client.query('ROLLBACK');
+          return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
+        }
+        if (match.owner_principal_id !== principal.id) {
+          await client.query('ROLLBACK');
+          return reply.code(403).send({ error: 'forbidden', message: 'Only the match owner can reassign seats' });
+        }
+        const owner = (await client.query<{ status: string }>(
+          `SELECT mm.status FROM app.match_members mm JOIN app.principals p ON p.id = mm.principal_id
+           WHERE mm.match_id = $1 AND mm.principal_id = $2 AND p.status = 'active'`,
+          [matchId, principal.id],
+        )).rows[0];
+        if (owner?.status !== 'active') {
+          await client.query('ROLLBACK');
+          return reply.code(403).send({ error: 'forbidden', message: 'Owner membership is not active' });
+        }
+        if (match.state !== 'preparing') {
+          await client.query('ROLLBACK');
+          return reply.code(409).send({ error: 'match_already_started', message: 'Match is not in preparing state' });
+        }
+        if (![fromSeatNo, toSeatNo].every((n) =>
+          typeof n === 'number' && Number.isInteger(n) && n >= 0 && n < match.player_count)) {
+          await client.query('ROLLBACK');
+          return reply.code(400).send({ error: 'invalid_seat', message: 'Invalid seatNo' });
+        }
+        const assignments = await client.query<{
+          id: string; seat_no: number; member_id: string; method: 'host_confirm' | 'qr_scan' | null;
+        }>(
+          `SELECT sa.id, sa.seat_no, sa.member_id, ci.method
+           FROM app.seat_assignments sa
+           JOIN app.match_members mm ON mm.id = sa.member_id AND mm.status = 'active'
+           LEFT JOIN app.check_ins ci
+             ON ci.seat_assignment_id = sa.id AND ci.invalidated_at IS NULL
+           WHERE sa.match_id = $1 AND sa.end_hand_no IS NULL
+             AND sa.seat_no IN ($2, $3)`,
+          [matchId, fromSeatNo, toSeatNo],
+        );
+        const from = assignments.rows.find((row) => row.seat_no === fromSeatNo);
+        const to = assignments.rows.find((row) => row.seat_no === toSeatNo);
+        if (!from) {
+          await client.query('ROLLBACK');
+          return reply.code(409).send({ error: 'seat_empty', message: 'Source seat is empty' });
+        }
+        if (fromSeatNo === toSeatNo) {
+          await client.query('COMMIT');
+          return { fromSeatNo, toSeatNo, swapped: false };
+        }
+        for (const assignment of [from, to]) {
+          if (assignment?.method) {
+            await client.query(
+              `UPDATE app.check_ins SET invalidated_at = now()
+               WHERE seat_assignment_id = $1 AND invalidated_at IS NULL`,
+              [assignment.id],
+            );
+          }
+        }
+        if (to) {
+          // The exclusion constraint is immediate: temporarily make the source
+          // interval empty, move the target, then reopen the same source ID.
+          await client.query(
+            `UPDATE app.seat_assignments SET end_hand_no = start_hand_no WHERE id = $1`,
+            [from.id],
+          );
+          await client.query(
+            `UPDATE app.seat_assignments SET seat_no = $1 WHERE id = $2`,
+            [fromSeatNo, to.id],
+          );
+          await client.query(
+            `UPDATE app.seat_assignments SET seat_no = $1, end_hand_no = NULL WHERE id = $2`,
+            [toSeatNo, from.id],
+          );
+        } else {
+          await client.query(
+            `UPDATE app.seat_assignments SET seat_no = $1 WHERE id = $2`,
+            [toSeatNo, from.id],
+          );
+        }
+        for (const assignment of [from, to]) {
+          if (assignment?.method) {
+            await client.query(
+              `INSERT INTO app.check_ins (match_id, member_id, seat_assignment_id, rules_hash, method)
+               VALUES ($1, $2, $3, $4, $5)`,
+              [matchId, assignment.member_id, assignment.id, match.rules_hash, assignment.method],
+            );
+          }
+        }
+        await client.query('COMMIT');
+        broadcastMatchEvent(matchId, 'seat_claimed', { matchId, fromSeatNo, toSeatNo, swapped: Boolean(to) });
+        return { fromSeatNo, toSeatNo, swapped: Boolean(to) };
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  // POST /api/matches/:id/members/:principalId/remove {} -> { removed: true }
+  app.post<{ Params: { id: string; principalId: string } }>(
+    '/api/matches/:id/members/:principalId/remove',
+    async (req, reply) => {
+      const principal = await requirePrincipal(req, reply);
+      if (!principal) return;
+      const { id: matchId, principalId } = req.params;
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const match = (await client.query<{ owner_principal_id: string; state: string }>(
+          `SELECT owner_principal_id, state FROM app.matches
+           WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`,
+          [matchId],
+        )).rows[0];
+        if (!match) {
+          await client.query('ROLLBACK');
+          return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
+        }
+        if (match.owner_principal_id !== principal.id) {
+          await client.query('ROLLBACK');
+          return reply.code(403).send({ error: 'forbidden', message: 'Only the match owner can remove members' });
+        }
+        if (match.state !== 'preparing') {
+          await client.query('ROLLBACK');
+          return reply.code(409).send({ error: 'match_already_started', message: 'Match is not in preparing state' });
+        }
+        if (principalId === principal.id) {
+          await client.query('ROLLBACK');
+          return reply.code(409).send({ error: 'owner_must_delete', message: 'Match owner cannot be removed' });
+        }
+        const member = (await client.query<{ id: string; status: string }>(
+          `SELECT id, status FROM app.match_members
+           WHERE match_id = $1 AND principal_id = $2 FOR UPDATE`,
+          [matchId, principalId],
+        )).rows[0];
+        if (!member || member.status !== 'active') {
+          await client.query('ROLLBACK');
+          return reply.code(404).send({ error: 'member_not_found', message: 'Active member not found' });
+        }
+        await client.query(
+          `UPDATE app.match_members
+           SET status = 'removed', removed_at = now(), hidden_at = now()
+           WHERE id = $1`,
+          [member.id],
+        );
+        await client.query(
+          `UPDATE app.check_ins SET invalidated_at = now()
+           WHERE match_id = $1 AND member_id = $2 AND invalidated_at IS NULL`,
+          [matchId, member.id],
+        );
+        await client.query(
+          `UPDATE app.seat_assignments SET end_hand_no = start_hand_no
+           WHERE match_id = $1 AND member_id = $2 AND end_hand_no IS NULL`,
+          [matchId, member.id],
+        );
+        await client.query(
+          `UPDATE app.member_access_grants SET revoked_at = now()
+           WHERE member_id = $1 AND revoked_at IS NULL`,
+          [member.id],
+        );
+        await client.query('COMMIT');
+        broadcastMatchEvent(matchId, 'seat_claimed', { matchId, principalId, removed: true });
+        return { removed: true };
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    },
+  );
 
   // POST /api/matches/:id/seats/finalize { dealerSeatNo? } -> { seats, dealerSeatNo }
   app.post<{ Params: { id: string }; Body: { dealerSeatNo?: number } }>('/api/matches/:id/seats/finalize', async (req, reply) => {
@@ -1793,7 +2086,14 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
         [matchId, member.id],
       );
 
+      await client.query(
+        `UPDATE app.member_access_grants SET revoked_at = now()
+         WHERE member_id = $1 AND revoked_at IS NULL`,
+        [member.id],
+      );
+
       await client.query('COMMIT');
+      broadcastMatchEvent(matchId, 'seat_claimed', { matchId, principalId: principal.id, left: true });
 
       return { left: true };
     } catch (err) {
