@@ -16,6 +16,7 @@ import WizardSteps from './WizardSteps';
 import RulesAdjustment from './RulesAdjustment';
 import Segmented from './Segmented';
 import { routeFromExternalUrl } from './deepLinks';
+import { checkInRoute, isValidJoinCode, joinCodeError, normalizeJoinCode, resolveJoinCode } from './joinCode';
 import './style.css';
 
 type Principal = { id: string; type: 'account' | 'guest'; displayName: string };
@@ -215,8 +216,49 @@ function LocalMatchList({ lobby = false }: { lobby?: boolean }) {
   })}</div> : <div className="empty">暂无本地对局。<Link to="/create">开一桌 →</Link></div>)}</>;
 }
 
+function JoinCodeEntry() {
+  const navigate = useNavigate();
+  const [code, setCode] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function join(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const normalized = normalizeJoinCode(code);
+    if (!isValidJoinCode(normalized)) {
+      setError('请输入 6 位有效房间码');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const match = await resolveJoinCode(normalized);
+      navigate(checkInRoute(match));
+    } catch (cause) {
+      setError(joinCodeError(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <section className="panel join-code-entry" aria-label="使用房间码加入牌局">
+    <h2>输入房间码，加入牌局</h2>
+    <p className="muted">向房主索取 6 位房间码，进入玩家签到页。</p>
+    <form onSubmit={(event) => void join(event)} noValidate>
+      <label htmlFor="join-code-input">房间码</label>
+      <div className="join-code-fields">
+        <input id="join-code-input" value={code} maxLength={6} inputMode="text" autoCapitalize="characters" autoComplete="off" spellCheck={false}
+          placeholder="输入 6 位房间码" aria-invalid={!!error} aria-describedby={error ? 'join-code-error' : undefined}
+          onChange={(event) => { setCode(normalizeJoinCode(event.target.value).slice(0, 6)); setError(''); }} disabled={busy} />
+        <button className="primary" type="submit" disabled={busy}>{busy ? '正在查找…' : '加入牌局'}</button>
+      </div>
+      {error && <p id="join-code-error" className="join-code-error" role="alert">{error}</p>}
+    </form>
+  </section>;
+}
+
 function Home({ guest }: { guest: boolean }) {
-  return <main className="page"><section className="hero"><div><p className="eyebrow">一姬 / ICHIHIME · 线下日麻记分</p><h1>落座，即开局。</h1><p>从规则到结算，给同桌每一分一个清楚的去处。</p><div className="hero-actions"><Link className="button primary" to="/create">开桌 <span>↗</span></Link></div></div><div className="hero-object" aria-hidden="true"><span>一</span><span>萬</span><small>東 一 局</small></div></section><div className="section-heading"><span>桌边入口</span><small>01 / 02</small></div><div className="entry-grid"><Link to="/create" className="entry"><b>01</b><h2>开桌</h2><p>选规则，调数值，预览支付。</p><span>建立牌局 →</span></Link><Link to="/history" className="entry"><b>02</b><h2>战绩</h2><p>对局历史与成绩入口。</p><span>查看战绩 →</span></Link></div><div className="section-heading" id="战绩"><span>{guest ? '本地牌局' : '战绩'}</span><Link to="/history">查看全部 →</Link></div>{guest ? <LocalMatchList lobby /> : <MatchList />}</main>;
+  return <main className="page"><section className="hero"><div><p className="eyebrow">一姬 / ICHIHIME · 线下日麻记分</p><h1>落座，即开局。</h1><p>从规则到结算，给同桌每一分一个清楚的去处。</p><div className="hero-actions"><Link className="button primary" to="/create">开桌 <span>↗</span></Link></div></div><div className="hero-object" aria-hidden="true"><span>一</span><span>萬</span><small>東 一 局</small></div></section><JoinCodeEntry /><div className="section-heading"><span>桌边入口</span><small>01 / 02</small></div><div className="entry-grid"><Link to="/create" className="entry"><b>01</b><h2>开桌</h2><p>选规则，调数值，预览支付。</p><span>建立牌局 →</span></Link><Link to="/history" className="entry"><b>02</b><h2>战绩</h2><p>对局历史与成绩入口。</p><span>查看战绩 →</span></Link></div><div className="section-heading" id="战绩"><span>{guest ? '本地牌局' : '战绩'}</span><Link to="/history">查看全部 →</Link></div>{guest ? <LocalMatchList lobby /> : <MatchList />}</main>;
 }
 
 function checkInReturnTo(value: string | null): string {

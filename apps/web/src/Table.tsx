@@ -34,7 +34,7 @@ type CurrentHand = {
 type Score = { seatNo: number; points: number };
 type CheckIn = { seatNo?: number; memberId?: string; checkedIn?: boolean; isCheckedIn?: boolean; status?: string };
 type MatchState = {
-  match: { id: string; name?: string; ownerPrincipalId?: string; status: string; playerCount?: number; handsPlayed?: number; version?: Revision; settlementConfirmed?: boolean; rulesSnapshot?: Record<string, unknown>; rulesetVersionId?: string };
+  match: { id: string; name?: string; ownerPrincipalId?: string; status: string; joinCode?: string | null; playerCount?: number; handsPlayed?: number; version?: Revision; settlementConfirmed?: boolean; rulesSnapshot?: Record<string, unknown>; rulesetVersionId?: string };
   seats: Seat[];
   currentHand: CurrentHand | null;
   scoreboard: Score[] | Record<string, number>;
@@ -134,6 +134,34 @@ export function FinalizeDealerBlock({
   );
 }
 
+function JoinCodeBlock({ code, copyStatus, onCopy }: { code: string; copyStatus: string; onCopy: () => void }) {
+  return <div className="table-join-code">
+    <span>房间码</span>
+    <strong aria-label={`房间码 ${code}`}>{code}</strong>
+    <small>朋友可在首页输入房间码，进入签到页。</small>
+    <button type="button" onClick={onCopy}>复制房间码</button>
+    {copyStatus && <small role="status">{copyStatus}</small>}
+  </div>;
+}
+
+async function copyText(value: string, fallbackHint: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const field = document.createElement('textarea');
+  field.value = value;
+  field.style.position = 'fixed';
+  field.style.opacity = '0';
+  document.body.appendChild(field);
+  try {
+    field.select();
+    if (!document.execCommand('copy')) throw new Error(fallbackHint);
+  } finally {
+    field.remove();
+  }
+}
+
 export default function Table() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -162,6 +190,7 @@ export default function Table() {
   const [qrCode, setQrCode] = useState<{ url: string; image: string } | null>(null);
   const [qrError, setQrError] = useState('');
   const [copyStatus, setCopyStatus] = useState('');
+  const [joinCodeCopyStatus, setJoinCodeCopyStatus] = useState('');
   const [dialog, setDialog] = useState(false);
   const [kind, setKind] = useState<'ron' | 'tsumo' | 'ryuukyoku' | 'nagashi_mangan'>('ron');
   const [winner, setWinner] = useState(0);
@@ -195,6 +224,7 @@ export default function Table() {
     setIdentity(null);
     setDealerSeatNo(null);
     setToken(null);
+    setJoinCodeCopyStatus('');
     setDialog(false);
     setDraftPreview(null);
     setTerminalPreview(null);
@@ -457,24 +487,19 @@ export default function Table() {
   const copyCheckIn = async () => {
     if (!checkInUrl) return;
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(checkInUrl);
-      } else {
-        const field = document.createElement('textarea');
-        field.value = checkInUrl;
-        field.style.position = 'fixed';
-        field.style.opacity = '0';
-        document.body.appendChild(field);
-        try {
-          field.select();
-          if (!document.execCommand('copy')) throw new Error('请长按签到链接复制');
-        } finally {
-          field.remove();
-        }
-      }
+      await copyText(checkInUrl, '请长按签到链接复制');
       setCopyStatus('链接已复制');
     } catch (error) {
       setCopyStatus(`复制失败：${errorText(error)}`);
+    }
+  };
+  const copyJoinCode = async () => {
+    if (!state?.match.joinCode) return;
+    try {
+      await copyText(state.match.joinCode, '请长按房间码复制');
+      setJoinCodeCopyStatus('房间码已复制');
+    } catch (error) {
+      setJoinCodeCopyStatus(`复制失败：${errorText(error)}`);
     }
   };
 
@@ -513,6 +538,7 @@ export default function Table() {
             busy={busy}
             onSelectDealer={setDealerSeatNo}
           />
+          {state.match.joinCode && <JoinCodeBlock code={state.match.joinCode} copyStatus={joinCodeCopyStatus} onCopy={() => void copyJoinCode()} />}
           <div className="table-controls table-controls-finalize">
             <button type="button" disabled={busy} onClick={() => void action(async () => {
               setToken(null);
@@ -526,7 +552,7 @@ export default function Table() {
         </>}
         {isOwner && ['preparing', 'lobby'].includes(state.match.status) && token?.id === id &&
           !checkInUrl && <p className="notice" role="status">签到链接已使用或过期，请重新生成。</p>}
-        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && checkInUrl && <div className="table-invite"><div className="table-qr">{qrCode?.url === checkInUrl ? <img src={qrCode.image} width="256" height="256" alt="扫描二维码打开签到链接" /> : <span role="status">{qrError ? '二维码生成失败，请使用下方链接' : '正在生成签到二维码…'}</span>}</div><div className="table-invite-details"><p>玩家签到链接（房主免签到）：</p><small>每个链接仅供一位已获座位的玩家使用，签到后请为下一位重新生成。</small><a href={checkInUrl}>{checkInUrl}</a>{token?.expiresAt && <small>截止 {token.expiresAt}</small>}<button type="button" onClick={() => void copyCheckIn()}>复制签到链接</button>{copyStatus && <small role="status">{copyStatus}</small>}</div></div>}
+        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && checkInUrl && <div className="table-invite"><div className="table-qr">{qrCode?.url === checkInUrl ? <img src={qrCode.image} width="256" height="256" alt="扫描二维码打开签到链接" /> : <span role="status">{qrError ? '二维码生成失败，请使用下方链接' : '正在生成签到二维码…'}</span>}</div><div className="table-invite-details">{state.match.joinCode && <JoinCodeBlock code={state.match.joinCode} copyStatus={joinCodeCopyStatus} onCopy={() => void copyJoinCode()} />}<p>玩家签到链接（房主免签到）：</p><small>每个链接仅供一位已获座位的玩家使用，签到后请为下一位重新生成。</small><a href={checkInUrl}>{checkInUrl}</a>{token?.expiresAt && <small>截止 {token.expiresAt}</small>}<button type="button" onClick={() => void copyCheckIn()}>复制签到链接</button>{copyStatus && <small role="status">{copyStatus}</small>}</div></div>}
       </section>
       <div className="table-layout"><section className="felt" aria-label="牌桌座位"><div className="felt-lines" aria-hidden="true" /><div className="seat-grid">{seats.map((seat) => {
         const inHand = handSeats.find((entry) => entry.seatNo === seat.seatNo);

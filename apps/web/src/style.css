@@ -262,3 +262,25 @@ h1,h2{letter-spacing:.015em}
 .rules-adjustment .rule-number small{display:block}
 .riichi-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px}
 .seat .riichi-actions .riichi{min-width:0;padding:6px!important;white-space:nowrap}
+
+.join-code-entry{margin-top:18px;border-radius:16px;background:linear-gradient(115deg,#203947,#1c2942);box-shadow:0 12px 28px #07131d52}
+.join-code-entry h2{margin-bottom:6px}
+.join-code-entry .muted{margin-bottom:16px}
+.join-code-entry form{display:block}
+.join-code-entry label{margin-bottom:8px}
+.join-code-fields{display:flex;align-items:stretch;flex-wrap:wrap;gap:10px}
+.join-code-fields input:not([type=checkbox]){flex:1 1 210px;max-width:310px;min-width:0;min-height:48px;border-radius:10px;text-transform:uppercase;letter-spacing:.24em;font-weight:800}
+.join-code-fields button{min-width:120px;min-height:48px;border-radius:10px}
+.join-code-error{margin:10px 0 0;color:#ffc1c1;font-size:.88rem}
+.table-join-code{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;padding:14px;margin:12px 0;background:#15303d;border:1px solid #c4a66a8c;border-radius:12px}
+.table-join-code>span{color:#e4d3a9;font-weight:700}
+.table-join-code strong{font-size:clamp(1.45rem,4vw,2rem);letter-spacing:.2em;font-variant-numeric:tabular-nums;color:#f4e9d0;white-space:nowrap}
+.table-join-code small{width:100%;color:#b9cbd0;line-height:1.5}
+.table-join-code button{min-height:44px;border-radius:9px}
+.table-invite-details .table-join-code{width:100%;margin:0 0 8px}
+@media(max-width:600px){
+  .join-code-entry{padding:18px}
+  .join-code-fields input:not([type=checkbox]){max-width:none}
+  .join-code-fields button{flex:1 1 120px}
+  .table-join-code{width:100%}
+}
