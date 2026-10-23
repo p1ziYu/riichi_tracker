@@ -178,6 +178,7 @@ export default function Table() {
   const [identity, setIdentity] = useState<{ id: string; principalId: string } | null>(null);
   const [templateNames, setTemplateNames] = useState<Record<string, string>>({});
   const [dealerSeatNo, setDealerSeatNo] = useState<number | null>(null);
+  const [seatTargets, setSeatTargets] = useState<Record<number, string>>({});
   useEffect(() => {
     let alive = true;
     api<{ versionId: string; name: string }[]>('/api/rulesets/templates').then((templates) => {
@@ -223,6 +224,7 @@ export default function Table() {
     let alive = true;
     setIdentity(null);
     setDealerSeatNo(null);
+    setSeatTargets({});
     setToken(null);
     setJoinCodeCopyStatus('');
     setDialog(false);
@@ -529,6 +531,34 @@ export default function Table() {
               setDealerSeatNo(null);
               await refresh();
             })}>{seat.principalId ? '房主确认本座' : '房主选此座'}</button>}
+          {isOwner && state.match.status === 'preparing' && seat.principalId && <>
+            <div className="seat-reassign">
+              <select aria-label={`将${seatLabel(seat)}移至座位`} value={seatTargets[seat.seatNo] ?? ''} disabled={busy}
+                onChange={(event) => setSeatTargets((current) => ({ ...current, [seat.seatNo]: event.target.value }))}>
+                <option value="">选择目标座位</option>
+                {seats.filter((target) => target.seatNo !== seat.seatNo).map((target) =>
+                  <option value={target.seatNo} key={target.seatNo}>座位 {target.seatNo + 1} · {target.principalId ? `与${seatLabel(target)}交换` : '空座'}</option>)}
+              </select>
+              <button type="button" disabled={busy || !seatTargets[seat.seatNo]}
+                onClick={() => void action(async () => {
+                  await post(`${base}/seats/reassign`, { fromSeatNo: seat.seatNo, toSeatNo: Number(seatTargets[seat.seatNo]) });
+                  setSeatTargets({});
+                  setDealerSeatNo(null);
+                  await refresh();
+                })}>移动 / 交换</button>
+            </div>
+            {seat.principalId !== state.match.ownerPrincipalId &&
+              <button type="button" className="text-button danger" disabled={busy}
+                onClick={() => {
+                  if (!window.confirm(`确定将${seatLabel(seat)}移出牌桌？该座位将空出。`)) return;
+                  void action(async () => {
+                    await post(`${base}/members/${encodeURIComponent(seat.principalId!)}/remove`, {});
+                    setSeatTargets({});
+                    setDealerSeatNo(null);
+                    await refresh();
+                  });
+                }}>移出玩家</button>}
+          </>}
           {isOwner && ['preparing', 'lobby'].includes(state.match.status) && seat.principalId &&
             <button type="button" className="text-button" aria-pressed={dealerSeatNo === seat.seatNo} disabled={busy} onClick={() => setDealerSeatNo(seat.seatNo)}>{dealerSeatNo === seat.seatNo ? '起家 · 东家' : '设为起家'}</button>}
         </div>)}</div>
@@ -552,7 +582,7 @@ export default function Table() {
         </>}
         {isOwner && ['preparing', 'lobby'].includes(state.match.status) && token?.id === id &&
           !checkInUrl && <p className="notice" role="status">签到链接已使用或过期，请重新生成。</p>}
-        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && checkInUrl && <div className="table-invite"><div className="table-qr">{qrCode?.url === checkInUrl ? <img src={qrCode.image} width="256" height="256" alt="扫描二维码打开签到链接" /> : <span role="status">{qrError ? '二维码生成失败，请使用下方链接' : '正在生成签到二维码…'}</span>}</div><div className="table-invite-details">{state.match.joinCode && <JoinCodeBlock code={state.match.joinCode} copyStatus={joinCodeCopyStatus} onCopy={() => void copyJoinCode()} />}<p>玩家签到链接（房主免签到）：</p><small>每个链接仅供一位已获座位的玩家使用，签到后请为下一位重新生成。</small><a href={checkInUrl}>{checkInUrl}</a>{token?.expiresAt && <small>截止 {token.expiresAt}</small>}<button type="button" onClick={() => void copyCheckIn()}>复制签到链接</button>{copyStatus && <small role="status">{copyStatus}</small>}</div></div>}
+        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && checkInUrl && <div className="table-invite"><div className="table-qr">{qrCode?.url === checkInUrl ? <img src={qrCode.image} width="256" height="256" alt="扫描二维码打开签到链接" /> : <span role="status">{qrError ? '二维码生成失败，请使用下方链接' : '正在生成签到二维码…'}</span>}</div><div className="table-invite-details">{state.match.joinCode && <JoinCodeBlock code={state.match.joinCode} copyStatus={joinCodeCopyStatus} onCopy={() => void copyJoinCode()} />}<p>玩家入座链接（房主免签到）：</p><small>每个链接仅供一位玩家使用，可直接选择空座或自动分配。加入后请为下一位重新生成。</small><a href={checkInUrl}>{checkInUrl}</a>{token?.expiresAt && <small>截止 {token.expiresAt}</small>}<button type="button" onClick={() => void copyCheckIn()}>复制入座链接</button>{copyStatus && <small role="status">{copyStatus}</small>}</div></div>}
       </section>
       <div className="table-layout"><section className="felt" aria-label="牌桌座位"><div className="felt-lines" aria-hidden="true" /><div className="seat-grid">{seats.map((seat) => {
         const inHand = handSeats.find((entry) => entry.seatNo === seat.seatNo);

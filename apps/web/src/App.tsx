@@ -17,6 +17,8 @@ import RulesAdjustment from './RulesAdjustment';
 import Segmented from './Segmented';
 import { routeFromExternalUrl } from './deepLinks';
 import { checkInRoute, isValidJoinCode, joinCodeError, normalizeJoinCode, resolveJoinCode } from './joinCode';
+import { checkInBody, checkInError } from './checkInSeats';
+import type { CheckInRoom } from './checkInSeats';
 import './style.css';
 
 type Principal = { id: string; type: 'account' | 'guest'; displayName: string };
@@ -285,7 +287,7 @@ function Login({ onAuthenticated }: { onAuthenticated: (principal: Principal) =>
     } catch (cause) { setError(errorText(cause)); }
     finally { setBusy(false); }
   }
-  return <main className="page narrow"><p className="eyebrow">ACCOUNT / 账户</p><h1>登录一姬</h1><section className="panel"><Segmented label="登录方式" value={mode} options={[{ value: 'login', label: '邮箱登录' }, { value: 'register', label: '注册账户' }]} onChange={setMode} /><form onSubmit={(event) => { event.preventDefault(); void enter(mode === 'login' ? '/api/auth/sign-in/email' : '/api/auth/sign-up/email', mode === 'login' ? { email, password } : { email, password, name }); }}>{mode === 'register' && <label>昵称<input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required /></label>}<label>邮箱<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" placeholder="name@example.com" required /></label><label>密码<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required /></label><button className="primary" type="submit" disabled={busy}>{mode === 'login' ? '登录' : '注册并登录'}</button></form><p className="note">无需邮箱？访客签到需由桌主预先批准座位，并使用获批准的同一身份。</p><button type="button" disabled={busy} onClick={() => void enter('/api/auth/sign-in/anonymous', {})}>访客进入</button>{error && <div className="notice invalid" role="alert">{error}</div>}</section></main>;
+  return <main className="page narrow"><p className="eyebrow">ACCOUNT / 账户</p><h1>登录一姬</h1><section className="panel"><Segmented label="登录方式" value={mode} options={[{ value: 'login', label: '邮箱登录' }, { value: 'register', label: '注册账户' }]} onChange={setMode} /><form onSubmit={(event) => { event.preventDefault(); void enter(mode === 'login' ? '/api/auth/sign-in/email' : '/api/auth/sign-up/email', mode === 'login' ? { email, password } : { email, password, name }); }}>{mode === 'register' && <label>昵称<input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required /></label>}<label>邮箱<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" placeholder="name@example.com" required /></label><label>密码<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required /></label><button className="primary" type="submit" disabled={busy}>{mode === 'login' ? '登录' : '注册并登录'}</button></form><p className="note">无需邮箱？选择访客进入，使用房间码或签到链接直接选择座位加入牌桌。</p><button type="button" disabled={busy} onClick={() => void enter('/api/auth/sign-in/anonymous', {})}>访客进入</button>{error && <div className="notice invalid" role="alert">{error}</div>}</section></main>;
 }
 
 function Payments({ output }: { output: SettlementOutput }) {
@@ -399,46 +401,104 @@ function Create({ guest }: { guest: boolean }) {
   </main>;
 }
 
+function CheckInPage({ matchId, token }: { matchId: string; token: string | null }) {
+  const [room, setRoom] = useState<CheckInRoom | null>(null);
+  const [chosenSeatNo, setChosenSeatNo] = useState<number | null>(null);
+  const [alias, setAlias] = useState('');
+  const [joinedSeatNo, setJoinedSeatNo] = useState<number | null>(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(!!token);
+  const [busy, setBusy] = useState(false);
+  const base = `/api/matches/${encodeURIComponent(matchId)}`;
+  const requestRef = useRef(0);
+  const refreshSeats = useCallback(async () => {
+    if (!token) return false;
+    const request = ++requestRef.current;
+    setLoading(true);
+    try {
+      const next = await api<CheckInRoom>(`${base}/check-in-seats?token=${encodeURIComponent(token)}`);
+      if (request !== requestRef.current) return false;
+      setRoom(next);
+      setChosenSeatNo((previous) => previous !== null && next.seats.some((seat) => seat.seatNo === previous && !seat.principalId) ? previous : null);
+      setError('');
+      return true;
+    } catch (cause) {
+      if (request === requestRef.current) setError(checkInError(cause));
+      return false;
+    } finally {
+      if (request === requestRef.current) setLoading(false);
+    }
+  }, [base, token]);
+  useEffect(() => {
+    void refreshSeats();
+    return () => { ++requestRef.current; };
+  }, [refreshSeats]);
+
+  async function join(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!token || !room || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await post<{ seat: { seatNo: number }; grantId: string }>(`${base}/check-ins`,
+        checkInBody(token, alias, chosenSeatNo));
+      const cleaned = new URL(window.location.href);
+      cleaned.searchParams.delete('token');
+      window.history.replaceState(window.history.state, '', `${cleaned.pathname}${cleaned.search}${cleaned.hash}`);
+      setJoinedSeatNo(result.seat.seatNo);
+    } catch (cause) {
+      setError(checkInError(cause));
+      if (cause instanceof ApiError && cause.code === 'seat_taken') {
+        setChosenSeatNo(null);
+        if (await refreshSeats()) setError(checkInError(cause));
+      }
+    } finally { setBusy(false); }
+  }
+
+  const available = room?.seats.filter((seat) => !seat.principalId).length ?? 0;
+  return <main className="page narrow check-in-page">
+    <p className="eyebrow">CHECK IN / 签到</p><h1>选择座位 · 直接加入</h1>
+    <section className="panel">
+      {joinedSeatNo !== null ? <>
+        <h2>已加入 · 座位 {joinedSeatNo + 1}</h2>
+        <p className="muted">已入座，等待房主确认座次并开局。</p>
+        <Link className="button primary" to={`/table/${matchId}`}>查看牌桌 →</Link>
+      </> : <>
+        {!token && <div className="notice invalid" role="alert">签到链接缺少令牌，请重新扫码或输入房间码。</div>}
+        {loading && <p className="muted" role="status">正在读取座位…</p>}
+        {error && <div className="notice invalid" role="alert">{error}</div>}
+        {token && error && !room && !loading && <button type="button" onClick={() => void refreshSeats()}>重新读取座位</button>}
+        {room && !loading && <>
+          {room.match.status !== 'preparing' ? <p className="notice invalid" role="alert">牌局已开始，无法加入。</p> : <>
+            <p className="muted">{room.match.playerCount} 人牌桌 · {available ? `剩余 ${available} 个座位` : '座位已满，暂时无法加入'}</p>
+            <form onSubmit={(event) => void join(event)}>
+              <fieldset className="check-in-seats" disabled={busy || available === 0}>
+                <legend>请选择入座方式</legend>
+                <label className="check-in-seat">
+                  <input type="radio" name="check-in-seat" checked={chosenSeatNo === null} onChange={() => setChosenSeatNo(null)} />
+                  <span><strong>自动分配</strong><small>自动选择最靠前的空座</small></span>
+                </label>
+                {[...room.seats].sort((a, b) => a.seatNo - b.seatNo).map((seat) => <label className={`check-in-seat${seat.principalId ? ' occupied' : ''}`} key={seat.seatNo}>
+                  <input type="radio" name="check-in-seat" value={seat.seatNo} checked={chosenSeatNo === seat.seatNo} disabled={!!seat.principalId} onChange={() => setChosenSeatNo(seat.seatNo)} />
+                  <span><strong>座位 {seat.seatNo + 1}</strong><small>{seat.principalId ? seat.displayName || '已入座' : '空座 · 可选择'}</small></span>
+                </label>)}
+              </fieldset>
+              <label className="check-in-alias">本桌昵称（可选）<input value={alias} onChange={(event) => setAlias(event.target.value)} maxLength={80} placeholder="不填写则使用当前昵称" /></label>
+              <button className="primary" type="submit" disabled={busy || available === 0}>{busy ? '正在加入…' : '确认加入牌桌'}</button>
+              <button type="button" className="text-button" disabled={busy} onClick={() => void refreshSeats()}>刷新座位</button>
+            </form>
+          </>}
+        </>}
+      </>}
+    </section>
+  </main>;
+}
+
 function CheckIn() {
   const { matchId } = useParams();
   const [params] = useSearchParams();
   const token = params.get('token');
-  const [seat, setSeat] = useState<number | null>(null);
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  const submitted = useRef<string | null>(null);
-  async function checkIn() {
-    if (!token || !matchId) return;
-    setBusy(true);
-    setError('');
-    try {
-      const result = await post<{ seat: { seatNo: number }; grantId: string }>(`/api/matches/${encodeURIComponent(matchId)}/check-ins`, { token });
-      const cleaned = new URL(window.location.href);
-      cleaned.searchParams.delete('token');
-      window.history.replaceState(window.history.state, '', `${cleaned.pathname}${cleaned.search}${cleaned.hash}`);
-      setSeat(result.seat.seatNo);
-    } catch (cause) {
-      setError(cause instanceof ApiError && cause.code === 'check_in_not_approved'
-        ? '桌主尚未批准您的座位。请确认使用获批准的账户，待桌主确认后使用有效签到链接重试。'
-        : cause instanceof ApiError && [400, 404, 410, 422].includes(cause.status)
-          ? `签到令牌无效或已过期：${errorText(cause)}` : errorText(cause));
-    }
-    finally { setBusy(false); }
-  }
-  useEffect(() => {
-    if (!token || !matchId || submitted.current === `${matchId}:${token}`) return;
-    submitted.current = `${matchId}:${token}`;
-    void checkIn();
-  }, [matchId, token]);
-  return <main className="page narrow">
-    <p className="eyebrow">CHECK IN / 签到</p><h1>确认入座</h1>
-    <section className="panel">
-      {!token && <div className="notice invalid" role="alert">签到链接缺少令牌，请重新扫码。</div>}
-      {busy && <p className="muted">正在签到…</p>}
-      {seat !== null && <><h2>已签到</h2><p>分配座位：{winds[seat] ?? seat + 1}家 · 座位 {seat + 1}</p><Link className="button primary" to={`/table/${matchId}`}>查看牌桌 →</Link></>}
-      {error && <><div className="notice invalid" role="alert">签到失败：{error}</div><button type="button" disabled={busy} onClick={() => void checkIn()}>重试签到</button></>}
-    </section>
-  </main>;
+  return <CheckInPage key={`${matchId}:${token}`} matchId={matchId ?? ''} token={token} />;
 }
 
 function Protected({ principal, children }: { principal: Principal | null; children: React.ReactNode }) {

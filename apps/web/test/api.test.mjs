@@ -58,15 +58,15 @@ test('an older unauthorized request cannot erase a newly issued login token', as
   assert.equal(tokens.has(tokenKey), false);
 });
 
-test('a seat-approval rejection preserves the login and exposes its machine-readable reason', async () => {
+test('a seat collision preserves the login and exposes its machine-readable reason', async () => {
   const tokens = environment();
   tokens.set(tokenKey, 'valid-session');
   globalThis.fetch = async () => new Response(JSON.stringify({
-    error: 'check_in_not_approved',
-    message: 'Caller does not have an approved seat assignment for this match',
-  }), { status: 403 });
+    error: 'seat_taken',
+    message: 'Seat already occupied',
+  }), { status: 409 });
   await assert.rejects(api('/api/matches/one/check-ins', { method: 'POST', body: '{}' }),
-    (error) => error.status === 403 && error.code === 'check_in_not_approved');
+    (error) => error.status === 409 && error.code === 'seat_taken');
   assert.equal(tokens.get(tokenKey), 'valid-session');
 });
 

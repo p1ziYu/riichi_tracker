@@ -6,12 +6,13 @@
 - [视觉参考与设计方向](docs/视觉参考与设计方向.md)：雀魂官方截图与具体借鉴方式。
 - [已确认需求](PRODUCT.md)：便于后续开发保持需求一致。
 
-当前流程：桌主开桌后作为参赛成员自行选座，确认座位即自动到场、免令牌签到；其他参与者提交入桌申请并由桌主批准座位，再用一次性令牌签到；全员到场后桌主可指定起家（东家）或由服务端随机选择，随后确认座次、录入局结果、终局确认成绩。观战者和未签到的成员只读。
-当前前端仅展示已获批准成员的一次性二维码签到；尚未提供桌主查看、批准入桌申请的界面。未获批准的扫码者无法直接入桌。`https://riichi.p1ziyu.com/checkin/{matchId}?token=...` 的二维码及签到链接在已安装的原生应用中通过 Universal Links / App Links 打开；浏览器登录态与原生应用登录态不共享。iOS 的 `apps/web/public/.well-known/apple-app-site-association` 中 `REPLACE_TEAM_ID` 必须替换为实际 Apple Team ID 并重新部署后，Universal Links 才能生效。Android 的 `assetlinks.json` 使用本仓库生成的调试 APK 证书指纹；使用其他签名密钥发布时必须将对应指纹加入该文件并重新部署。
+当前流程：桌主开桌后作为参赛成员自行选座并自动签到；持有一次性签到链接或六位房间码的访客可直接选择空座（或自动分配最靠前的空座），一次提交即成为成员并签到，无需桌主批准。桌主在开局前可移动或交换座位、移出访客，指定起家（东家）或由服务端随机选择；全员到场后确认座次并开局。已离开或被移出的玩家需要新的有效令牌才能重新加入。
+
+`GET /api/matches/:id/check-in-seats?token=...` 使用未消费的有效签到令牌返回 `{match:{id,playerCount,status},seats:[{seatNo,principalId,displayName,status}]}`，允许尚未入桌的已登录访客查看空座。`POST /api/matches/:id/check-ins` 接受 `{token,alias?,seatNo?}`，返回 `{seat:{seatNo},grantId}`；重复签到的有效成员返回原座位与授权而不消费新令牌。桌主开局前使用 `POST /api/matches/:id/seats/reassign {fromSeatNo,toSeatNo}` 移座或交换，使用 `POST /api/matches/:id/members/:principalId/remove {}` 移出非桌主成员。旧入桌申请接口保留兼容性，但 Web 不再调用。`https://riichi.p1ziyu.com/checkin/{matchId}?token=...` 的二维码及签到链接在已安装的原生应用中通过 Universal Links / App Links 打开；浏览器登录态与原生应用登录态不共享。iOS 的 `apps/web/public/.well-known/apple-app-site-association` 中 `REPLACE_TEAM_ID` 必须替换为实际 Apple Team ID 并重新部署后，Universal Links 才能生效。Android 的 `assetlinks.json` 使用本仓库生成的调试 APK 证书指纹；使用其他签名密钥发布时必须将对应指纹加入该文件并重新部署。
 
 `apps/api` 提供 Better Auth 登录、只读规则模板、牌桌、签到、记分和 WebSocket 同步。创建牌桌时可在选定模板版本上提交 `rulesOverride`（仅本桌生效）；服务端验证规则、生成归属桌主的不可变临时规则版本并绑定快照与哈希，其他账户不能引用该版本。未调整时直接使用模板版本；原有 `config` 创建入口仍兼容旧的 `startPoints`、本场及流局罚点别名。
 
-`apps/api` 的 API 在启动时先创建 `public` 中的 Better Auth 表，再初始化 Better Auth 的 schema 检查；业务表在 `app`，数据库迁移 001–012 仍须手工执行。通过 `pnpm --filter @riichi/api build`、`pnpm --filter @riichi/api test` 和 `pnpm --filter @riichi/web build` 校验。API E2E 只允许显式设置 `DATABASE_URL` 为独立 PostgreSQL 测试库（库名含 `test`、`e2e`、`disp` 或 `tmp`，且不能是 `riichi` 或 `apps/api/.env` 配置的库）；未设置或指向其他库时测试入口在任何数据库连接前拒绝运行。先用该库的 `DATABASE_URL` 执行 `pnpm --filter @riichi/api exec tsx src/migrate.ts`，再用相同的 URL 执行 API 测试。
+`apps/api` 的 API 在启动时先创建 `public` 中的 Better Auth 表，再初始化 Better Auth 的 schema 检查；业务表在 `app`，数据库迁移 001–013 仍须手工执行。本次直接入桌没有新增迁移。通过 `pnpm -r build`、`pnpm --filter @riichi/api test` 和 `pnpm --filter @riichi/web test` 校验。API E2E 只允许显式设置 `DATABASE_URL` 为独立 PostgreSQL 测试库（库名含 `test`、`e2e`、`disp` 或 `tmp`，且不能是 `riichi` 或 `apps/api/.env` 配置的库）；未设置或指向其他库时测试入口在任何数据库连接前拒绝运行。先用该库的 `DATABASE_URL` 执行 `pnpm --filter @riichi/api exec tsx src/migrate.ts`，再用相同的 URL 执行 API 测试。
 每局每座立直标记最多宣言 2 次、取消 1 次（宣言→取消→再宣言后锁定）；只计未标记与已标记之间的转换，不计已标记时的类型修改。此限制固定，不随规则模板变化；需重新标记时由桌主作废并重开本局。`GET /api/matches/:id` 的 `currentHand.seats[].riichiChangeUsage` 提供已用 `{declares,cancels}`；超额更新返回 HTTP 409、`error: riichi_change_budget_exceeded`，标记及 `markRevision` 均不变。
 原生应用向服务端提交 Bearer 会话令牌，明确提供 Bearer 时不会回退到 Cookie 身份；401 会清理对应的本地令牌，退出登录即使网络失败也会清理本地令牌。离线退出无法立即撤销服务器端会话，重新联网前旧令牌仍可能有效。WebSocket 在发出每条事件前重新检查会话和桌内权限，空闲连接不会主动收到撤销通知。
 
