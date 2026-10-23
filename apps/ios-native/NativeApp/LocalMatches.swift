@@ -331,27 +331,32 @@ struct LocalFailure: LocalizedError {
         try json(EngineBridgeCheck.bundledTemplate(key))
     }
     func create(template: LocalTemplate, rules: [String: JSONValue], name: String, names: [String], dealer: Int) throws -> LocalMatch {
-        var requested = try Self.object(rules)
-        requested.removeValue(forKey: "oka") // read-only value follows the edited start/return points
-        let config = try EngineBridgeCheck.normalizedRules(requested)
         let baseRules = try Self.templateRules(template.id)
-        guard let count = config["playerCount"] as? Int, count == (template.id.contains("_3p") ? 3 : 4),
-              config["templateKey"] as? String == baseRules["templateKey"]?.string,
-              names.count == count, names.allSatisfy({ $0.count <= 40 }), (0..<count).contains(dealer) else {
+        guard let count = storedInt(baseRules["playerCount"]), let templateKey = baseRules["templateKey"]?.string else {
             throw LocalFailure(message: "本地人数、姓名或起家座位无效")
         }
-        let start = config["startingPoints"] as? Int ?? 0
+        var requested = try Self.object(rules)
+        requested["templateKey"] = templateKey
+        requested["playerCount"] = count
+        requested.removeValue(forKey: "oka") // read-only value follows the edited start/return points
+        let config = try Self.json(EngineBridgeCheck.normalizedRules(requested))
+        let tableName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard names.count == count, names.allSatisfy({ $0.count <= 40 }),
+              (0..<count).contains(dealer), !tableName.isEmpty else {
+            throw LocalFailure(message: "本地人数、姓名或起家座位无效")
+        }
+        let start = storedInt(config["startingPoints"]) ?? 0
         guard start > 0 else { throw LocalFailure(message: "起始点数无效") }
         let now = ISO8601DateFormatter().string(from: Date())
         let next = LocalNextHand(roundWind: "E", roundNumber: 1, dealerSeatNo: dealer, honba: 0, riichiPool: 0)
         let hand = LocalHand(handId: UUID().uuidString, roundWind: next.roundWind, roundNumber: 1,
                              dealerSeatNo: dealer, honba: 0, riichiPool: 0, markRevision: 0, resultRevision: 0,
                              seats: (0..<count).map { LocalHandSeat(seatNo: $0, points: start, isRiichi: false, declares: 0, cancels: 0) })
-        let match = LocalMatch(id: "local-\(UUID().uuidString)", name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? template.name : name,
+        let match = LocalMatch(id: "local-\(UUID().uuidString)", name: tableName,
                                createdAt: now, updatedAt: now, status: "active", seedKey: template.id,
                                templateName: template.name, reviewStatus: template.reviewStatus,
-                               rulesHash: try Self.rulesDigest(Self.json(config)), startingDealerSeatNo: dealer,
-                               engineVersion: EngineBridgeCheck.version, rules: try Self.json(config),
+                               rulesHash: try Self.rulesDigest(config), startingDealerSeatNo: dealer,
+                               engineVersion: EngineBridgeCheck.version, rules: config,
                                baseRules: baseRules,
                                seats: (0..<count).map { LocalSeat(seatNo: $0, displayName: names[$0].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "玩家 \($0 + 1)" : names[$0].trimmingCharacters(in: .whitespacesAndNewlines)) },
                                points: Array(repeating: start, count: count), currentHand: hand, draft: nil, nextHand: next,
