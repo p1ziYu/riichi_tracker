@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { betterAuth } from 'better-auth';
+import { betterAuth, type Auth, type BetterAuthOptions } from 'better-auth';
 import { anonymous, bearer } from 'better-auth/plugins';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { pool } from './db.js';
@@ -166,7 +166,7 @@ export async function ensurePrincipalForAuthUser(user: {
   return row;
 }
 
-export const auth = betterAuth({
+const authOptions = {
   database: pool,
   secret: process.env.BETTER_AUTH_SECRET,
   baseURL: process.env.BETTER_AUTH_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3101}`,
@@ -227,7 +227,13 @@ export const auth = betterAuth({
       },
     },
   },
-});
+} satisfies BetterAuthOptions;
+
+let auth: Auth<typeof authOptions> | undefined;
+
+export function initializeAuth(): Auth<typeof authOptions> {
+  return auth ??= betterAuth(authOptions);
+}
 
 export function toWebHeaders(req: FastifyRequest): Headers {
   const headers = new Headers();
@@ -249,7 +255,7 @@ export function toWebHeaders(req: FastifyRequest): Headers {
 
 export async function resolvePrincipal(req: FastifyRequest): Promise<ResolvedPrincipal | null> {
   const headers = toWebHeaders(req);
-  const session = await auth.api.getSession({ headers });
+  const session = await initializeAuth().api.getSession({ headers });
   if (!session?.user || !session?.session) {
     return null;
   }
@@ -303,7 +309,7 @@ export function registerAuthRoutes(app: FastifyInstance): void {
       ...(body !== undefined ? { body } : {}),
     });
 
-    const response = await auth.handler(webReq);
+    const response = await initializeAuth().handler(webReq);
     reply.status(response.status);
 
     const setCookies = response.headers.getSetCookie?.() ?? [];

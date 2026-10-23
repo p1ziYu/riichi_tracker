@@ -5,8 +5,7 @@ const { Pool } = pg;
 
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // Better Auth introspects the first schema; its tables live in public.
-  options: '-c search_path=public,app',
+  options: '-c search_path=app,public',
 });
 
 export async function ensureAuthSchema(): Promise<void> {

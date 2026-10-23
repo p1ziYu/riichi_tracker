@@ -2,7 +2,7 @@ import './env.js';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import Fastify from 'fastify';
-import { registerAuthRoutes } from './auth.js';
+import { initializeAuth, registerAuthRoutes } from './auth.js';
 import { ensureAuthSchema, pool } from './db.js';
 import { registerHandsRoutes } from './routes/hands.js';
 import { registerMatchesRoutes } from './routes/matches.js';
@@ -18,6 +18,10 @@ const ALLOWED_CORS_ORIGINS: Record<string, true> = {
 };
 
 export async function buildApp() {
+  // Better Auth checks the schema as soon as it initializes; create its tables first.
+  await ensureAuthSchema();
+  initializeAuth();
+
   const app = Fastify({ logger: true });
 
   await app.register(cors, {
@@ -118,8 +122,7 @@ const isMain =
 
 if (isMain) {
   const port = Number(process.env.PORT ?? 3101);
-  ensureAuthSchema()
-    .then(() => buildApp())
+  buildApp()
     .then((app) =>
       app.listen({ port, host: '127.0.0.1' }).then(() => {
         app.log.info(`riichi-api listening on 127.0.0.1:${port}`);
