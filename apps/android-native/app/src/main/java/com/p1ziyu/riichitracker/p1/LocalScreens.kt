@@ -9,6 +9,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
@@ -32,6 +33,7 @@ import androidx.compose.ui.unit.dp
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun LocalListScreen(state: LocalUiState, model: LocalViewModel, history: Boolean,
     onCreate: () -> Unit, onHistory: () -> Unit, onLobby: () -> Unit,
     onOpen: (String) -> Unit, onOnline: () -> Unit) {
@@ -54,15 +56,33 @@ import androidx.compose.ui.unit.dp
         if (!state.loading && state.error == null && matches.isEmpty()) Text("暂无本地牌局", color = Brand.muted)
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             items(matches, key = { it.id }) { match ->
-                BrandPanel(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(match.name, color = Brand.goldText, style = MaterialTheme.typography.titleLarge)
-                        Text("${match.templateName} · ${reviewLabel(match.reviewStatus)} · ${match.seats.size} 麻", color = Brand.text)
-                        val changes = remember(match.rules, match.seedKey) { match.customizedRules() }
-                        Text("自定义：${if (changes.isEmpty()) "无（按模板）" else changes.joinToString("、")}", color = Brand.muted)
-                        Text("${if (match.status == "active") "进行中" else "已结束"} · ${localMatchTime(match.updatedAt)} · ${match.results.size} 局", color = Brand.muted)
-                        TextButton(onClick = { onOpen(match.id) }) { Text(if (history) "查看结算与历史" else "继续对局") }
-                        OutlinedButton(onClick = { deleting = match.id; confirmDelete = false }, enabled = !state.busy) { Text("删除整桌") }
+                // iosfix6 item 5: swipe left reveals 删除; the swipe only
+                // opens the existing two-step confirm dialog, never deletes.
+                val dismissState = rememberSwipeToDismissBoxState(
+                    confirmValueChange = { value ->
+                        if (value == SwipeToDismissBoxValue.EndToStart) {
+                            deleting = match.id; confirmDelete = false
+                            false
+                        } else true
+                    })
+                SwipeToDismissBox(state = dismissState,
+                    backgroundContent = {
+                        Box(Modifier.fillMaxSize().background(Brand.loss.copy(alpha = 0.25f)).padding(horizontal = 16.dp),
+                            contentAlignment = Alignment.CenterEnd) {
+                            Text("删除", color = Brand.loss, style = MaterialTheme.typography.titleMedium)
+                        }
+                    },
+                    enableDismissFromStartToEnd = false) {
+                    BrandPanel(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(match.name, color = Brand.goldText, style = MaterialTheme.typography.titleLarge)
+                            Text("${match.templateName} · ${reviewLabel(match.reviewStatus)} · ${match.seats.size} 麻", color = Brand.text)
+                            val changes = remember(match.rules, match.seedKey) { match.customizedRules() }
+                            Text("自定义：${if (changes.isEmpty()) "无（按模板）" else changes.joinToString("、")}", color = Brand.muted)
+                            Text("${if (match.status == "active") "进行中" else "已结束"} · ${localMatchTime(match.updatedAt)} · ${match.results.size} 局", color = Brand.muted)
+                            TextButton(onClick = { onOpen(match.id) }) { Text(if (history) "查看结算与历史" else "继续对局") }
+                            OutlinedButton(onClick = { deleting = match.id; confirmDelete = false }, enabled = !state.busy) { Text("删除整桌") }
+                        }
                     }
                 }
             }
@@ -177,7 +197,13 @@ private fun LocalMatch.asTable(): TableSnapshot = TableSnapshot(
         dismissButton = { TextButton(onClick = { finishStage = 0 }) { Text("取消") } })
     if (match != null) editingSeat?.let { seat ->
         AlertDialog(onDismissRequest = { editingSeat = null }, title = { Text("修改 ${seat + 1} 号位姓名") },
-            text = { OutlinedTextField(newName, { if (it.length <= 40) newName = it }, label = { Text("1–40 字") }) },
+            text = { val renameFocus = androidx.compose.ui.platform.LocalFocusManager.current
+                OutlinedTextField(newName, { if (it.length <= 40) newName = it }, label = { Text("1–40 字") },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        imeAction = androidx.compose.ui.text.input.ImeAction.Done),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                        onDone = { renameFocus.clearFocus() })) },
             confirmButton = { TextButton(onClick = { model.rename(seat, newName); editingSeat = null }, enabled = !state.busy && newName.isNotBlank()) { Text("保存") } },
             dismissButton = { TextButton(onClick = { editingSeat = null }) { Text("取消") } })
     }

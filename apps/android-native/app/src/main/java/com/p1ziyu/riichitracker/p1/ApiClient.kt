@@ -24,14 +24,18 @@ class ApiClient(private val store: TokenStore, val client: OkHttpClient = OkHttp
 
     override suspend fun get(path: String): String = call(path)
     override suspend fun post(path: String, body: String): String = call(path, body)
-    private suspend fun call(path: String, body: String? = null): String = withContext(Dispatchers.IO) {
+    // iosfix6 item 5: DELETE for owner preparing rooms; hide/unhide go
+    // through post() like every other write.
+    suspend fun delete(path: String): String = call(path, method = "DELETE")
+    private suspend fun call(path: String, body: String? = null, method: String? = null): String = withContext(Dispatchers.IO) {
         val token = store.load()
         val builder = Request.Builder().url("$origin$path")
         // Better Auth checks Origin on native auth writes as well as browser requests.
         if (path.startsWith("/api/auth/") && body != null)
             builder.header("Origin", "https://riichi.p1ziyu.com")
         if (token != null) builder.header("Authorization", "Bearer $token")
-        if (body == null) builder.get()
+        if (method == "DELETE") builder.delete()
+        else if (body == null) builder.get()
         else builder.post(body.toRequestBody("application/json".toMediaType()))
         try {
             client.newCall(builder.build()).execute().use { response ->

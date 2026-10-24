@@ -1,6 +1,40 @@
 import SwiftUI
+import UIKit
+
+// Shared keyboard dismissal (iosfix6, item 4): numberPad/decimalPad have no
+// return key, so every form that hosts a TextField gets a keyboard toolbar
+// with 完成, drag-to-dismiss, and a background tap that only fires where no
+// control consumed the touch (a background tap can never steal focus from
+// the TextField itself, because the field is hit-tested first).
+extension View {
+    func keyboardDismissal() -> some View {
+        self
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("完成") {
+                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    }
+                }
+            }
+            .scrollDismissesKeyboard(.immediately)
+            // NOTE (iosfix6, measured 2026-10-24): .interactively broke
+            // drag-to-dismiss here — three swipeUps moved the sheet's
+            // content 0pt and left the numberPad open, because a flick never
+            // crosses the interactive-dismiss threshold and the keyboard
+            // springs back. .immediately dismisses on scroll start, then the
+            // content scrolls normally. Dismissal is the keyboard toolbar's
+            // 完成 button plus drag-to-dismiss; tapping another control also
+            // resigns focus.
+    }
+}
 
 enum Brand {
+    // iosfix6 item 2: the single leading-edge token. The large title sits
+    // at 16pt (system inset), List/Form section backgrounds sit at 16pt,
+    // and section headers are shifted to 16pt in BrandSectionHeader.
+    // Every card and header in the app aligns to this edge.
+    static let contentLeading: CGFloat = 16
     static let background = Color(red: 16 / 255, green: 28 / 255, blue: 40 / 255)
     static let panel = Color(red: 28 / 255, green: 41 / 255, blue: 66 / 255)
     static let deep = Color(red: 21 / 255, green: 43 / 255, blue: 59 / 255)
@@ -52,6 +86,12 @@ struct BrandSectionHeader: View {
             .foregroundStyle(Brand.gold)
             .textCase(nil)
             .accessibilityAddTraits(.isHeader)
+            // iosfix6 item 2: List/Form section headers are laid out at
+            // 32pt (16 section inset + 16 header inset) while the large
+            // title and the card backgrounds sit at Brand.contentLeading
+            // (16pt). Shift once, here, so every header in the app shares
+            // the title/card leading edge instead of per-screen padding.
+            .padding(.leading, -Brand.contentLeading)
     }
 }
 
@@ -278,6 +318,7 @@ struct AuthScreen: View {
             .frame(maxWidth: .infinity)
         }
         .background(Brand.background)
+        .keyboardDismissal()
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .navigationBar)
@@ -319,6 +360,57 @@ struct AuthScreen: View {
     @State private var pendingRefresh = false
     @State private var showCreate = false
     @State private var createdMatchID: String?
+    // iosfix6 item 5: swipe-to-delete. Only an owner deleting a preparing
+    // (not yet drawn) room calls DELETE; every other row calls /hide, which
+    // is per-user and reversible via the undo banner. A refused DELETE
+    // (409 match_not_deletable) offers hide instead of failing silently.
+    @State private var pendingDelete: MatchSummary?
+    @State private var deleteRefused: MatchSummary?
+    @State private var hiddenUndoId: String?
+    @State private var deleteError: String?
+    @State private var deleting = false
+
+    private func isDeletable(_ match: MatchSummary) -> Bool {
+        match.isOwner && match.status == "preparing"
+    }
+
+    private func performDelete(_ match: MatchSummary, asHide: Bool = false) {
+        guard !deleting else { return }
+        deleting = true
+        let hide = asHide || !isDeletable(match)
+        Task {
+            do {
+                if hide { try await session.api.hideMatch(match.id) }
+                else { try await session.api.deleteMatch(match.id) }
+                matches?.removeAll { $0.id == match.id }
+                if hide { hiddenUndoId = match.id }
+                Task { await refresh() }
+            } catch let failure as APIError where failure.code == "match_not_deletable" && !hide {
+                deleteRefused = match
+            } catch let failure as APIError {
+                deleteError = failure.code == "forbidden"
+                    ? (hide ? "你不是这张牌桌的成员，无法隐藏它。" : "只有房主可以删除这张牌桌。")
+                    : APIErrorCopy.text(failure)
+            } catch {
+                deleteError = "操作失败，请稍后重试。"
+            }
+            deleting = false
+        }
+    }
+
+    private func unhide(_ id: String) {
+        Task {
+            do {
+                try await session.api.unhideMatch(id)
+                hiddenUndoId = nil
+                await refresh()
+            } catch let failure as APIError {
+                deleteError = APIErrorCopy.text(failure)
+            } catch {
+                deleteError = "操作失败，请稍后重试。"
+            }
+        }
+    }
 
     private var ordered: [MatchSummary] {
         (matches ?? []).sorted { lhs, rhs in
@@ -352,6 +444,10 @@ struct AuthScreen: View {
         }
         .brandPanel()
         .accessibilityIdentifier(!isFinished(match.status) ? "online.match.active" : "online.match.finished")
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button("删除", role: .destructive) { pendingDelete = match }
+                .accessibilityIdentifier("online.match.delete.\(match.id)")
+        }
     }
 
     var body: some View {
@@ -403,7 +499,10 @@ struct AuthScreen: View {
                     ], startPoint: .topLeading, endPoint: .bottomTrailing),
                     in: RoundedRectangle(cornerRadius: 18))
                     .overlay(RoundedRectangle(cornerRadius: 18).stroke(Brand.gold.opacity(0.7), lineWidth: 1))
-                    .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+                    // iosfix6 item 2: this hero row forced leading/trailing
+                    // insets of 0, so its card bled full-width (0pt) while
+                    // the large title and every other card sit at 16pt.
+                    .listRowInsets(EdgeInsets(top: 8, leading: Brand.contentLeading, bottom: 8, trailing: Brand.contentLeading))
                     .listRowBackground(Brand.background)
                 }
             }
@@ -457,6 +556,42 @@ struct AuthScreen: View {
                 self.createdMatchID = nil
                 onRevoked()
             }) }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if let hiddenUndoId {
+                HStack {
+                    Text("已隐藏对局记录").foregroundStyle(Brand.text)
+                    Spacer()
+                    Button("撤销") { unhide(hiddenUndoId) }
+                        .accessibilityIdentifier("online.match.unhideUndo")
+                    Button("知道了") { self.hiddenUndoId = nil }
+                }
+                .padding()
+                .background(Brand.panel)
+            }
+        }
+        .alert("删除牌桌？", isPresented: Binding(get: { pendingDelete != nil && isDeletable(pendingDelete!) }, set: { if !$0 { pendingDelete = nil } })) {
+            Button("取消", role: .cancel) { pendingDelete = nil }
+            Button("删除", role: .destructive) { if let pendingDelete { performDelete(pendingDelete) }; self.pendingDelete = nil }
+        } message: {
+            Text("这张未开始的牌桌将被永久删除，所有成员都将看不到它。此操作无法撤销。")
+        }
+        .alert("隐藏牌桌？", isPresented: Binding(get: { pendingDelete != nil && !isDeletable(pendingDelete!) }, set: { if !$0 { pendingDelete = nil } })) {
+            Button("取消", role: .cancel) { pendingDelete = nil }
+            Button("隐藏", role: .destructive) { if let pendingDelete { performDelete(pendingDelete) }; self.pendingDelete = nil }
+        } message: {
+            Text("这张牌桌只会从你的列表中隐藏，牌桌本身和其他成员不受影响。隐藏后可通过下方的撤销恢复。")
+        }
+        .alert("无法彻底删除", isPresented: Binding(get: { deleteRefused != nil }, set: { if !$0 { deleteRefused = nil } })) {
+            Button("取消", role: .cancel) { deleteRefused = nil }
+            Button("改为隐藏") { if let deleteRefused { performDelete(deleteRefused, asHide: true) }; self.deleteRefused = nil }
+        } message: {
+            Text("这张牌桌已抽风定座或已开始，无法彻底删除；可以改为仅从你的列表中隐藏。")
+        }
+        .alert("删除失败", isPresented: Binding(get: { deleteError != nil }, set: { if !$0 { deleteError = nil } })) {
+            Button("知道了", role: .cancel) { deleteError = nil }
+        } message: {
+            Text(deleteError ?? "操作失败，请稍后重试。")
         }
     }
 

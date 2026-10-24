@@ -39,6 +39,8 @@ enum APIErrorCopy {
         case "join_code_not_found": return "房间码不正确，或牌桌已结束。"
         case "incomplete_check_ins": return "成员尚未全部就座，无法开局。"
         case "match_not_found": return "牌桌不存在或已被删除。"
+        case "match_not_deletable": return "这张牌桌已抽风定座或已开始，无法彻底删除。"
+        case "owner_must_delete": return "房主不能退出牌桌，请使用删除。"
         default: return "操作失败，请稍后重试。"
         }
     }
@@ -191,6 +193,22 @@ final class APIClient {
 
     func signInGuest() async throws {
         _ = try await request("/api/auth/sign-in/anonymous", method: "POST", body: EmptyBody())
+    }
+
+    // iosfix6 item 5: owner-only DELETE for preparing rooms; /hide for
+    // everyone else and every other state; /unhide backs the undo banner.
+    // Responses are decoded only for status — callers map APIError.code
+    // through APIErrorCopy and never render the raw server message.
+    func deleteMatch(_ id: String) async throws {
+        _ = try await request("/api/matches/\(id)", method: "DELETE")
+    }
+
+    func hideMatch(_ id: String) async throws {
+        _ = try await request("/api/matches/\(id)/hide", method: "POST", body: EmptyBody())
+    }
+
+    func unhideMatch(_ id: String) async throws {
+        _ = try await request("/api/matches/\(id)/unhide", method: "POST", body: EmptyBody())
     }
 
     func signOut() async -> Bool {

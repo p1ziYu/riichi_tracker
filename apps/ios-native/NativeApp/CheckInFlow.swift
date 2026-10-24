@@ -213,6 +213,7 @@ struct CheckInScreen: View {
         .background(Brand.background)
         .tint(Brand.gold)
         .navigationTitle("签到")
+        .keyboardDismissal()
         .task(id: destinationKey) {
             preview = nil
             previewKey = nil

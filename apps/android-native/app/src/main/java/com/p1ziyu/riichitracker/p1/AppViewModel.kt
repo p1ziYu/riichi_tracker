@@ -30,6 +30,12 @@ private val TABLE_REFRESH_EVENTS = setOf("member_joined", "seats_drawn", "seat_c
     "check_in", "seats_finalized", "hand_started", "marks_changed", "hand_settled", "match_finished",
     "settlement_confirmed")
 enum class SessionMode { RESTORING, SIGNED_OUT, ACCOUNT, ONLINE_GUEST, LOCAL_ONLY }
+
+// iosfix6 item 5: the DELETE-vs-hide decision, kept as a pure function so
+// unit tests pin it: only an owner deleting a preparing (not yet drawn)
+// room may call DELETE; everything else hides per-user.
+internal fun isDeletableMatch(match: MatchSummary): Boolean =
+    match.isOwner && match.status == "preparing"
 data class PendingResult(val matchId: String, val handId: String, val body: String)
 data class BoundPreview(val handId: String, val revision: Long, val input: String, val output: PaymentPreview)
 data class BoundTerminal(val version: Long, val output: SettlementPreview)
@@ -50,6 +56,11 @@ data class AppState(
     val marksChangedSincePreview: Boolean = false,
     val pendingResult: PendingResult? = null, val createdMatchId: String? = null,
     val revokedTableId: String? = null, val accessNotice: String? = null,
+    // iosfix6 item 5: 409-refused DELETE awaiting a hide fallback, and the
+    // hidden row awaiting an undo tap. Kept in state (not the composable)
+    // so a recomposition or list reload cannot lose them.
+    val deleteRefusedId: String? = null, val hiddenUndoId: String? = null,
+    val deleteError: String? = null,
 )
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
@@ -176,6 +187,52 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) { if (at == generation) state.value = state.value.copy(listError = "读取模板失败：${error(e)}") }
         }
     }
+
+    // iosfix6 item 5: swipe-to-delete. Only an owner deleting a preparing
+    // (not yet drawn) room calls DELETE; every other row calls /hide, which
+    // is per-user and reversible via the undo banner. A refused DELETE
+    // (409 match_not_deletable) surfaces as deleteRefusedId so the UI can
+    // offer hide instead; raw server messages never reach the UI.
+    fun deleteOrHide(match: MatchSummary, asHide: Boolean = false) {
+        if (state.value.busy) return
+        viewModelScope.launch {
+            state.value = state.value.copy(busy = true, deleteError = null)
+            try {
+                val hide = asHide || !isDeletableMatch(match)
+                if (hide) api.post("/api/matches/${match.id}/hide") else api.delete("/api/matches/${match.id}")
+                state.value = state.value.copy(
+                    matches = state.value.matches?.filterNot { it.id == match.id },
+                    hiddenUndoId = if (hide) match.id else null, busy = false)
+                loadList()
+            } catch (e: ApiFailure) {
+                state.value = if (e.code == "match_not_deletable" && !asHide) {
+                    state.value.copy(deleteRefusedId = match.id, busy = false)
+                } else if (e.code == "forbidden") {
+                    state.value.copy(deleteError = "你不是这张牌桌的成员，无法隐藏它。", busy = false)
+                } else {
+                    state.value.copy(deleteError = e.chineseMessage(), busy = false)
+                }
+            } catch (e: Exception) {
+                state.value = state.value.copy(deleteError = "操作失败，请稍后重试。", busy = false)
+            }
+        }
+    }
+
+    fun unhideMatch(id: String) {
+        viewModelScope.launch {
+            try {
+                api.post("/api/matches/$id/unhide")
+                state.value = state.value.copy(hiddenUndoId = null)
+                loadList()
+            } catch (e: Exception) {
+                state.value = state.value.copy(deleteError = e.chineseMessage())
+            }
+        }
+    }
+
+    fun clearDeleteRefused() { state.value = state.value.copy(deleteRefusedId = null) }
+    fun clearHiddenUndo() { state.value = state.value.copy(hiddenUndoId = null) }
+    fun clearDeleteError() { state.value = state.value.copy(deleteError = null) }
 
     fun loadProfile() {
         viewModelScope.launch {

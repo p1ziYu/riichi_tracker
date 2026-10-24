@@ -8,6 +8,7 @@ import kotlinx.serialization.json.jsonPrimitive
     val id: String, val status: String, val playerCount: Int, val createdAt: String,
     val updatedAt: String? = null, val rulesSnapshot: JsonObject? = null,
     val rulesetVersionId: String? = null, val isOwner: Boolean = false,
+    val hidden: Boolean = false,
 )
 @Serializable data class TemplateDto(
     val versionId: String, val name: String, val scope: String,

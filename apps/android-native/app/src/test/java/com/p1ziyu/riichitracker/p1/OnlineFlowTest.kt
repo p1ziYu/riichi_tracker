@@ -24,6 +24,22 @@ class OnlineFlowTest {
         }
     }
 
+    @Test fun presetChipValuesLandInRulesAndDeleteDecision() {
+        // iosfix6 item 3 (Android): preset taps are plain state updates in
+        // Compose (no List-row collapse); pin that a preset value sticks.
+        val rules = OnlineRules(templates.first { it.kind == "4p" })
+        rules.update("startingPoints", "30000")
+        assertEquals("30000", rules.values["startingPoints"])
+        rules.setUma(listOf(15.0, 5.0, -5.0, -15.0))
+        assertEquals("[15.0,5.0,-5.0,-15.0]", rules.values["uma"])
+        // iosfix6 item 5: DELETE only for owner + preparing.
+        val base = MatchSummary("m", "preparing", 4, "2026-10-24T00:00:00Z", isOwner = true)
+        assertTrue(isDeletableMatch(base))
+        assertFalse(isDeletableMatch(base.copy(isOwner = false)))
+        assertFalse(isDeletableMatch(base.copy(status = "active")))
+        assertFalse(isDeletableMatch(base.copy(status = "finished")))
+    }
+
     @Test fun pointAndUmaValidationNeverSerializesIncompleteInput() {
         val rules = OnlineRules(templates.first { it.kind == "3p" })
         rules.update("startingPoints", "")

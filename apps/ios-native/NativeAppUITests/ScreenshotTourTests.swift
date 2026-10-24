@@ -25,9 +25,37 @@ final class ScreenshotTourTests: XCTestCase {
     private func scrollTo(_ element: XCUIElement, in app: XCUIApplication,
                           file: StaticString = #filePath, line: UInt = #line) {
         dismissPasswordPromptIfPresent(in: app)
-        for _ in 0..<12 where !element.isHittable {
+        // Scroll until the element is hittable. Two measured traps shape
+        // this loop (both 2026-10-24):
+        // 1. A plain app.swipeUp() starts its gesture low enough to land on
+        //    the numberPad when it is up, and the keyboard swallows it:
+        //    three such swipes moved the sheet 0pt, while one content-area
+        //    swipe dismisses the keyboard and scrolls. So while the
+        //    keyboard is up, only a content-area drag is used.
+        // 2. A FIXED drag start stalls forever once the scroll position
+        //    puts a drag-capturing row (Toggle/Picker) under that point:
+        //    the 3-player rules form froze at the same spot for 20 straight
+        //    drags. Varying the start x across iterations breaks the stall,
+        //    because a capturing row cannot cover every start point.
+        // Form rows virtualize, so a button below the fold is absent from
+        // the hierarchy until it is scrolled into view — hence the
+        // generous iteration budget (the 3P form needs ~16 drags).
+        var attempt = 0
+        for _ in 0..<40 where !element.isHittable {
+            attempt += 1
             if app.buttons["Not Now"].exists { app.buttons["Not Now"].tap(); Thread.sleep(forTimeInterval: 1) }
-            else { app.swipeUp() }
+            else if app.keyboards.firstMatch.exists {
+                let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.46))
+                let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.23))
+                start.press(forDuration: 0.1, thenDragTo: end)
+            } else if attempt % 4 == 0 {
+                app.swipeUp()
+            } else {
+                let x: CGFloat = [0.5, 0.25, 0.75][attempt % 3]
+                let start = app.coordinate(withNormalizedOffset: CGVector(dx: x, dy: 0.46))
+                let end = app.coordinate(withNormalizedOffset: CGVector(dx: x, dy: 0.23))
+                start.press(forDuration: 0.1, thenDragTo: end)
+            }
         }
         XCTAssertTrue(element.isHittable, "Missing visible UI control: \(element.identifier)", file: file, line: line)
     }
@@ -91,6 +119,211 @@ final class ScreenshotTourTests: XCTestCase {
             if notNow.exists { notNow.tap(); return true }
             return false
         }
+    }
+
+    // iosfix6 repro (item 3): preset chips in the local wizard must fill the
+    // numeric field. Run against the baseline first: a dead tap fails here.
+    func testLocalPresetChipsFillFields() {
+        let app = launch(["-UITestSeed"])
+        if app.tabBars.buttons["本地"].waitForExistence(timeout: 3) {
+            tab("本地", in: app)
+        } else {
+            tab("本地牌桌", in: app)
+        }
+        XCTAssertTrue(app.buttons["离线开桌"].waitForExistence(timeout: timeout))
+        tap(app.buttons["离线开桌"])
+        XCTAssertTrue(app.buttons["local.template.house_4p"].waitForExistence(timeout: timeout))
+        tap(app.buttons["local.template.house_4p"])
+        tap(app.buttons["local.wizard.nextRules"])
+        XCTAssertTrue(app.staticTexts["起点与成绩"].waitForExistence(timeout: timeout))
+        let startField = app.textFields.element(boundBy: 0)
+        XCTAssertTrue(startField.waitForExistence(timeout: timeout))
+        XCTAssertEqual(startField.value as? String, "25000", "House 4P template must start at 25000")
+        // Identifiers pin each chip (label queries once resolved the 30000
+        // chip to the right element yet still filled 35000 — the Form-row
+        // collapse — so labels alone cannot guard this regression).
+        scrollTo(app.buttons["local.wizard.preset.startingPoints.30000"], in: app)
+        tap(app.buttons["local.wizard.preset.startingPoints.30000"])
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertEqual(startField.value as? String, "30000", "Tapping the 30000 chip did not fill the starting-points field")
+        // Second path: numberPad open, then dismiss via the keyboard
+        // toolbar's 完成 (iosfix6 item 4), then tap a chip.
+        startField.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        // Item 4 proof: the numberPad is up AND the toolbar's 完成 control
+        // is on screen at the same time.
+        capture("fix6-keypad-toolbar", in: app)
+        // The keyboard toolbar's input-accessory button is exposed at app
+        // level, not under the keyboards element (verified by tree dump).
+        let doneButton = app.buttons["完成"].firstMatch
+        XCTAssertTrue(doneButton.waitForExistence(timeout: 5), "Keyboard toolbar 完成 button missing")
+        doneButton.tap()
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "完成 did not dismiss the keyboard")
+        tap(app.buttons["local.wizard.preset.startingPoints.35000"])
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertEqual(startField.value as? String, "35000", "Tapping a chip after dismissing the keyboard did not fill the field")
+        // Third path: tapping back down must also dispatch per-chip.
+        tap(app.buttons["local.wizard.preset.startingPoints.25000"])
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertEqual(startField.value as? String, "25000", "Tapping the 25000 chip did not restore the field")
+        capture("tour-local-preset-chip", in: app)
+    }
+
+
+    // iosfix6 item 1 (local picker): tapping a template must mark it
+    // selected — checkmark + 已选 + gold tint — in the same row.
+    func testLocalPickerShowsSelection() {
+        let app = launch(["-UITestSeed"])
+        if app.tabBars.buttons["本地"].waitForExistence(timeout: 3) {
+            tab("本地", in: app)
+        } else {
+            tab("本地牌桌", in: app)
+        }
+        XCTAssertTrue(app.buttons["离线开桌"].waitForExistence(timeout: timeout))
+        tap(app.buttons["离线开桌"])
+        XCTAssertTrue(app.buttons["local.template.house_4p"].waitForExistence(timeout: timeout))
+        tap(app.buttons["local.template.house_4p"])
+        XCTAssertTrue(app.staticTexts["已选"].waitForExistence(timeout: timeout),
+                      "Selected template row must show 已选")
+        XCTAssertTrue(app.buttons["local.wizard.nextRules"].isEnabled,
+                      "下一步 must enable once a template is selected")
+        capture("fix6-picker-selected", in: app)
+    }
+
+    // iosfix6 item 5 (local rows): swipe-left reveals 删除, the two-step
+    // confirm deletes, and the row is gone from the list afterwards.
+    func testLocalSwipeDelete() {
+        let app = launch(["-UITestSeed"])
+        if app.tabBars.buttons["本地"].waitForExistence(timeout: 3) {
+            tab("本地", in: app)
+        } else {
+            tab("本地牌桌", in: app)
+        }
+        XCTAssertTrue(app.buttons["离线开桌"].waitForExistence(timeout: timeout))
+        func createTable(template: String) {
+            tap(app.buttons["离线开桌"])
+            XCTAssertTrue(app.buttons[template].waitForExistence(timeout: timeout))
+            tap(app.buttons[template])
+            tap(app.buttons["local.wizard.nextRules"])
+            XCTAssertTrue(app.staticTexts["起点与成绩"].waitForExistence(timeout: timeout))
+            scrollToAndTap(app.buttons["local.wizard.nextNames"], in: app)
+            XCTAssertTrue(app.textFields["牌桌名称"].waitForExistence(timeout: timeout))
+            tap(app.buttons["local.wizard.create"])
+            XCTAssertTrue(app.staticTexts["座位与点数"].waitForExistence(timeout: 30))
+            returnToLocalLobby(in: app)
+        }
+        createTable(template: "local.template.house_4p")
+        createTable(template: "local.template.house_3p")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "四麻家规")).firstMatch.waitForExistence(timeout: timeout))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "三麻家规")).firstMatch.waitForExistence(timeout: timeout))
+        let fourRow = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "四麻家规")).firstMatch
+        fourRow.swipeLeft()
+        let deleteButton = app.buttons["删除"].firstMatch
+        XCTAssertTrue(deleteButton.waitForExistence(timeout: timeout), "Swipe-left must reveal 删除")
+        capture("fix6-local-swipe", in: app)
+        deleteButton.tap()
+        XCTAssertTrue(app.buttons["继续确认"].waitForExistence(timeout: timeout))
+        capture("fix6-local-delete-dialog", in: app)
+        tap(app.buttons["继续确认"])
+        XCTAssertTrue(app.buttons["不可恢复地删除"].waitForExistence(timeout: timeout))
+        tap(app.buttons["不可恢复地删除"])
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "四麻家规")).firstMatch.exists,
+                       "Deleted local table must leave the list")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "三麻家规")).firstMatch.exists,
+                      "Other local tables must survive the delete")
+        capture("fix6-local-after-delete", in: app)
+    }
+
+    // iosfix6 item 5 (online rows, disposable backend only): swipe-left on
+    // a preparing owner row, confirm 删除, and the row leaves the list.
+    // Runs ONLY against a disposable API (UITEST_DISPOSABLE=1) with two
+    // seeded preparing matches: this test deletes one, the swipe-dialog
+    // test below cancels on the other.
+    func testDisposableOnlineDelete() throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(environment["UITEST_DISPOSABLE"] == "1", "Requires disposable API (UITEST_DISPOSABLE=1)")
+        let email = environment["UITEST_EMAIL"] ?? ""
+        let password = environment["UITEST_PASSWORD"] ?? ""
+        try XCTSkipUnless(!email.isEmpty && !password.isEmpty, "Set UITEST_EMAIL and UITEST_PASSWORD for disposable online test")
+        let app = launch(["-UITestSeed"])
+        installPromptMonitor()
+        showSignedOutAuth(in: app)
+        let emailField = app.textFields["邮箱"]
+        let passwordField = app.secureTextFields["密码"]
+        tap(emailField)
+        emailField.typeText(email)
+        tap(passwordField)
+        passwordField.typeText(password)
+        tap(app.buttons["登录"])
+        XCTAssertTrue(app.buttons["开桌 ↗"].waitForExistence(timeout: timeout), "Disposable account did not enter the signed-in lobby")
+        dismissPasswordPromptIfPresent(in: app)
+        let rows = app.buttons.matching(NSPredicate(format: "identifier == %@", "online.match.active"))
+        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: timeout), "Lobby matches did not load")
+        XCTAssertEqual(rows.count, 2, "Disposable backend must seed two preparing matches")
+        let row = rows.firstMatch
+        scrollTo(row, in: app)
+        Thread.sleep(forTimeInterval: 1)
+        row.swipeLeft()
+        if !app.buttons["删除"].firstMatch.waitForExistence(timeout: 5) {
+            // A swipe issued while the list is still settling can miss the
+            // row (seen once: Invalid frame dimension warning, no action
+            // revealed). One retry on the settled row is enough.
+            row.swipeLeft()
+        }
+        let deleteButton = app.buttons["删除"].firstMatch
+        XCTAssertTrue(deleteButton.waitForExistence(timeout: timeout), "Swipe-left must reveal 删除 on an online row")
+        capture("fix6-online-swipe", in: app)
+        deleteButton.tap()
+        XCTAssertTrue(app.alerts["删除牌桌？"].waitForExistence(timeout: timeout),
+                      "Preparing owner row must offer real DELETE, not hide")
+        capture("fix6-online-delete-dialog", in: app)
+        tap(app.alerts["删除牌桌？"].buttons["删除"])
+        Thread.sleep(forTimeInterval: 2)
+        XCTAssertEqual(rows.count, 1, "Deleted online match must leave the list")
+        XCTAssertTrue(rows.firstMatch.exists, "The other seeded match must survive")
+        capture("fix6-online-after-delete", in: app)
+    }
+
+    // iosfix6 item 5 (online rows): swipe-left reveals 删除 and the Chinese
+    // confirm dialog. The dialog is cancelled here on purpose: deleting a
+    // shared seeded fixture would break the seeded table tour that runs
+    // after this test in the same backend.
+    func testSeededOnlineSwipeDialog() throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(environment["UITEST_SEEDED"] == "1", "Requires disposable seeded online backend (UITEST_SEEDED=1)")
+        let email = environment["UITEST_EMAIL"] ?? ""
+        let password = environment["UITEST_PASSWORD"] ?? ""
+        try XCTSkipUnless(!email.isEmpty && !password.isEmpty, "Set UITEST_EMAIL and UITEST_PASSWORD for seeded online tour")
+        let app = launch(["-UITestSeed"])
+        installPromptMonitor()
+        showSignedOutAuth(in: app)
+        let emailField = app.textFields["邮箱"]
+        let passwordField = app.secureTextFields["密码"]
+        tap(emailField)
+        emailField.typeText(email)
+        tap(passwordField)
+        passwordField.typeText(password)
+        tap(app.buttons["登录"])
+        XCTAssertTrue(app.buttons["开桌 ↗"].waitForExistence(timeout: timeout), "Seeded account did not enter the signed-in lobby")
+        dismissPasswordPromptIfPresent(in: app)
+        XCTAssertTrue(app.buttons["online.match.active"].firstMatch.waitForExistence(timeout: timeout), "Lobby matches did not load")
+        let row = app.buttons["online.match.active"].firstMatch
+        scrollTo(row, in: app)
+        Thread.sleep(forTimeInterval: 1)
+        row.swipeLeft()
+        if !app.buttons["删除"].firstMatch.waitForExistence(timeout: 5) {
+            row.swipeLeft()
+        }
+        let deleteButton = app.buttons["删除"].firstMatch
+        XCTAssertTrue(deleteButton.waitForExistence(timeout: timeout), "Swipe-left must reveal 删除 on an online row")
+        capture("fix6-online-swipe", in: app)
+        deleteButton.tap()
+        XCTAssertTrue(app.buttons["取消"].waitForExistence(timeout: timeout), "Online delete must ask in Chinese before acting")
+        capture("fix6-online-delete-dialog", in: app)
+        tap(app.buttons["取消"])
+        XCTAssertTrue(app.buttons["online.match.active"].firstMatch.exists, "Cancelling must leave the row in place")
     }
 
     func testAuthTour() {

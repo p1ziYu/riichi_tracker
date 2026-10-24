@@ -52,6 +52,10 @@ fun CreateScreen(templates: List<TemplateDto>, busy: Boolean, serverError: Strin
             Text("选择规则模板 · 切换模板将丢弃之前的调整", color = Brand.text)
             if (error != null) Text(error!!, color = MaterialTheme.colorScheme.error)
             templates.filter { it.scope == "system" }.forEach { template ->
+                // iosfix6 item 1: the currently selected template (visible
+                // when returning to this step) gets a checkmark, a gold
+                // border, a gold tint, and a 已选 label — same as iOS.
+                val isSelected = rules?.template?.versionId == template.versionId
                 OutlinedButton(onClick = {
                     if (rules != null && rules.template.versionId != template.versionId && rules.changed > 0)
                         changeWarning = template
@@ -59,8 +63,13 @@ fun CreateScreen(templates: List<TemplateDto>, busy: Boolean, serverError: Strin
                         try { selected = OnlineRules(template); step = 1; error = null }
                         catch (e: Exception) { error = e.message }
                     }
-                }, modifier = Modifier.fillMaxWidth()) {
-                    Text("${template.name} · ${template.kind ?: "规则"} · ${reviewLabel(template.reviewStatus)}", softWrap = true)
+                }, modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = if (isSelected) Brand.gold.copy(alpha = 0.18f) else androidx.compose.ui.graphics.Color.Transparent,
+                        contentColor = if (isSelected) Brand.goldText else Brand.text),
+                    border = androidx.compose.foundation.BorderStroke(
+                        if (isSelected) 1.5.dp else 1.dp, if (isSelected) Brand.gold else Brand.hairline)) {
+                    Text("${if (isSelected) "✓ " else ""}${template.name} · ${template.kind ?: "规则"} · ${reviewLabel(template.reviewStatus)}${if (isSelected) " · 已选" else ""}", softWrap = true)
                 }
             }
             if (templates.isEmpty()) Text("尚未取得服务端模板，请返回大厅刷新", color = Brand.text)
@@ -86,7 +95,7 @@ fun CreateScreen(templates: List<TemplateDto>, busy: Boolean, serverError: Strin
                                     } }
                                     repeat(rules.playerCount) { index ->
                                         RuleNumber("第${index + 1}位马点（十分位）", rules.values["uma.$index"]
-                                            ?: (rules.base["uma"] as JsonArray)[index].jsonPrimitive.content) {
+                                            ?: (rules.base["uma"] as JsonArray)[index].jsonPrimitive.content, decimal = true) {
                                             rules.update("uma.$index", it)
                                         }
                                     }
@@ -143,11 +152,20 @@ fun CreateScreen(templates: List<TemplateDto>, busy: Boolean, serverError: Strin
                 Text(if (onCreateLocal == null) "规则仅调整此桌；提交后服务端冻结规则快照。" else "规则仅调整此桌；创建后保存完整本地规则快照。", color = Brand.text)
                 Text("已自定义 ${rules.changed} 项 · ${rules.playerCount} 麻", color = Brand.text)
                 if (onCreateLocal != null) {
-                    OutlinedTextField(localName, { localName = it }, label = { Text("牌桌名称") }, modifier = Modifier.fillMaxWidth())
+                    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+                    OutlinedTextField(localName, { localName = it }, label = { Text("牌桌名称") }, modifier = Modifier.fillMaxWidth(),
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            imeAction = androidx.compose.ui.text.input.ImeAction.Done),
+                        keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                            onDone = { focusManager.clearFocus() }))
                     repeat(rules.playerCount) { seat ->
                         OutlinedTextField(playerNames[seat], { value ->
                             if (value.length <= 40) playerNames = playerNames.toMutableList().also { it[seat] = value }
-                        }, label = { Text("${seat + 1}号位玩家（最多 40 字）") }, modifier = Modifier.fillMaxWidth())
+                        }, label = { Text("${seat + 1}号位玩家（最多 40 字）") }, modifier = Modifier.fillMaxWidth(),
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                imeAction = androidx.compose.ui.text.input.ImeAction.Done),
+                            keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                                onDone = { focusManager.clearFocus() }))
                         OutlinedButton(onClick = { dealer = seat }) { Text("${if (dealer == seat) "●" else "○"} 指定 ${seat + 1}号位起家") }
                     }
                     Button(onClick = { onCreateLocal(rules, localName.trim(), playerNames.take(rules.playerCount), dealer) },
@@ -174,6 +192,19 @@ fun CreateScreen(templates: List<TemplateDto>, busy: Boolean, serverError: Strin
         dismissButton = { TextButton(onClick = { changeWarning = null }) { Text("保留当前") } }) }
 }
 
-@Composable private fun RuleNumber(label: String, value: String, update: (String) -> Unit) {
-    OutlinedTextField(value, update, modifier = Modifier.fillMaxWidth(), label = { Text(label) }, singleLine = true)
+// iosfix6 item 4: numeric fields previously opened the full text keyboard
+// with no Done action — the Android analogue of the iOS numberPad trap.
+// Number fields get a number keyboard, uma fields a decimal keyboard, and
+// Done always clears focus (dismissing the IME).
+// decimal precedes update so existing trailing-lambda call sites keep
+// binding their lambda to update.
+@Composable private fun RuleNumber(label: String, value: String, decimal: Boolean = false, update: (String) -> Unit) {
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    OutlinedTextField(value, update, modifier = Modifier.fillMaxWidth(), label = { Text(label) }, singleLine = true,
+        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+            keyboardType = if (decimal) androidx.compose.ui.text.input.KeyboardType.Decimal
+                else androidx.compose.ui.text.input.KeyboardType.Number,
+            imeAction = androidx.compose.ui.text.input.ImeAction.Done),
+        keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+            onDone = { focusManager.clearFocus() }))
 }

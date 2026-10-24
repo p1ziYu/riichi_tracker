@@ -53,6 +53,14 @@ struct MatchSummary: Codable, Identifiable {
     let updatedAt: String?
     let rulesSnapshot: [String: JSONValue]?
     let rulesetVersionId: String?
+    // Served by GET /api/matches?mine=1; defaulted so older fixtures that
+    // omit them still decode. isOwner decides DELETE-vs-hide (iosfix6).
+    // MUST be var: Swift's synthesized Decodable skips `let` properties
+    // with defaults ("immutable property will not be decoded"), so `let`
+    // silently pinned isOwner to false and DELETE was unreachable —
+    // caught by the disposable-backend delete test 2026-10-24.
+    var isOwner: Bool = false
+    var hidden: Bool = false
 }
 
 struct TemplateDTO: Codable, Identifiable {

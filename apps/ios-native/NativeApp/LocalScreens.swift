@@ -69,6 +69,10 @@ private extension View {
             }
                 .buttonStyle(.borderless).accessibilityLabel("删除整桌 \(match.name)")
         }.brandPanel()
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button("删除", role: .destructive) { deleteFirst = match.id }
+                .accessibilityIdentifier("local.match.delete.\(match.id)")
+        }
     }
 }
 
@@ -121,10 +125,26 @@ private extension View {
             if step == 0 {
                 Section {
                     ForEach(LocalTemplate.all) { template in
-                        Button("\(template.name) · \(template.reviewStatus)") {
+                        let isSelected = selected?.id == template.id
+                        Button {
                             if selected != nil && changes > 0 { confirming = template }
                             else { select(template) }
+                        } label: {
+                            HStack {
+                                Text("\(template.name) · \(template.reviewStatus)")
+                                Spacer()
+                                if isSelected {
+                                    VStack(spacing: 2) {
+                                        Image(systemName: "checkmark.circle.fill").foregroundStyle(Brand.gold)
+                                        Text("已选").font(Brand.font(.footnote)).foregroundStyle(Brand.gold)
+                                    }
+                                }
+                            }
+                            .padding(10)
+                            .background(isSelected ? Brand.gold.opacity(0.18) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected ? Brand.gold : Color.clear, lineWidth: 1.5))
                         }.brandPanel().accessibilityIdentifier("local.template.\(template.id)")
+                            .accessibilityAddTraits(isSelected ? .isSelected : [])
                     }
                 } header: { BrandSectionHeader("随包分发的四份模板") }
                 if selected != nil { Button("下一步：调整规则") { step = 1 }.brandPanel().accessibilityIdentifier("local.wizard.nextRules") }
@@ -143,7 +163,16 @@ private extension View {
                             point(pointKeys[index], pointLabels[index])
                             HStack {
                                 ForEach(index == 0 ? [25_000, 30_000, 35_000] : [30_000, 40_000], id: \.self) { value in
-                                    Button(value.formatted()) { setPoint(pointKeys[index], value) }.font(Brand.font(.footnote))
+                                    // iosfix6 item 3: same Form-row collapse
+                                    // as the online wizard — borderless
+                                    // restores per-chip dispatch.
+                                    Button(value.formatted()) { setPoint(pointKeys[index], value) }
+                                        .font(Brand.font(.footnote))
+                                        .buttonStyle(.borderless)
+                                        .padding(.vertical, 6)
+                                        .padding(.horizontal, 4)
+                                        .contentShape(Rectangle())
+                                        .accessibilityIdentifier("local.wizard.preset.\(pointKeys[index]).\(value)")
                                 }
                             }.brandPanel()
                         }
@@ -158,7 +187,9 @@ private extension View {
                         ForEach(count == 3 ? [[20, 0, -20], [30, 0, -30], [10, 0, -10], [0, 0, 0]] :
                                     [[20, 10, -10, -20], [15, 5, -5, -15], [30, 10, -10, -30], [10, 5, -5, -10], [0, 0, 0, 0]], id: \.self) { preset in
                             Button(preset.map(String.init).joined(separator: " / ")) { uma = preset.map(String.init); recalculate() }
+                                .buttonStyle(.borderless)
                                 .brandPanel()
+                                .accessibilityIdentifier("local.wizard.umaPreset.\(preset.map(String.init).joined(separator: "_"))")
                         }
                     } header: { BrandSectionHeader("起点与成绩") }
                     ForEach(groups, id: \.self) { group in
@@ -167,11 +198,14 @@ private extension View {
                                 ForEach(3..<6, id: \.self) { index in point(pointKeys[index], pointLabels[index]) }
                                 Text("罚符 1,500 点不可整百分摊，不支持。").foregroundStyle(Brand.muted).brandPanel()
                                 ForEach(count == 3 ? [0, 2000, 3000] : [0, 3000], id: \.self) { value in
-                                    Button("罚符 \(value)") { setPoint("notenPenaltyTotal", value) }.brandPanel()
+                                    Button("罚符 \(value)") { setPoint("notenPenaltyTotal", value) }
+                                        .buttonStyle(.borderless).brandPanel()
+                                        .accessibilityIdentifier("local.wizard.preset.notenPenaltyTotal.\(value)")
                                 }
                                 ForEach([100, 200], id: \.self) { value in
                                     Button("本场自摸每人 \(value) / 荣和 \(value * (count - 1))") { setPoint("honbaPerPayer", value) }
-                                        .brandPanel()
+                                        .buttonStyle(.borderless).brandPanel()
+                                        .accessibilityIdentifier("local.wizard.preset.honbaPerPayer.\(value)")
                                 }
                             }
                             ForEach(options.indices.filter { index in
@@ -228,6 +262,7 @@ private extension View {
         }
         .scrollContentBackground(.hidden).background(Brand.background).tint(Brand.gold).foregroundStyle(Brand.text)
         .navigationTitle("离线开桌")
+        .keyboardDismissal()
         .accessibilityIdentifier("local.wizard.step.\(step)")
         .alert("切换模板将丢弃当前调整", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } })) {
             Button("保留调整", role: .cancel) { confirming = nil }
@@ -554,6 +589,7 @@ private extension View {
         }
         .scrollContentBackground(.hidden).background(Brand.background).tint(Brand.gold).foregroundStyle(Brand.text)
         .navigationTitle("本地本局结算")
+        .keyboardDismissal()
         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
         .onAppear {
             if match.draft?.handId == hand.handId, let saved = match.draft?.value { draft = saved }

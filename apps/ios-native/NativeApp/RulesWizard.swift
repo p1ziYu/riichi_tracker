@@ -77,18 +77,32 @@ struct RulesWizard: View {
                 Section {
                     if templates.isEmpty { ProgressView("读取模板中…").brandPanel() }
                     ForEach(templates.filter { $0.scope != "mine" }) { template in
+                        let isSelected = selected?.versionId == template.versionId
                         Button {
                             if selected != nil && !changed.isEmpty { confirmTemplate = template }
                             else { choose(template) }
                         } label: {
-                            VStack(alignment: .leading) {
-                                Text(template.name)
-                                Text("\(template.scope == "system" ? "系统" : "参考") · \(reviewLabel(template.reviewStatus))")
-                                    .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(template.name)
+                                    Text("\(template.scope == "system" ? "系统" : "参考") · \(reviewLabel(template.reviewStatus))")
+                                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+                                }
+                                Spacer()
+                                if isSelected {
+                                    VStack(spacing: 2) {
+                                        Image(systemName: "checkmark.circle.fill").foregroundStyle(Brand.gold)
+                                        Text("已选").font(Brand.font(.footnote)).foregroundStyle(Brand.gold)
+                                    }
+                                }
                             }
+                            .padding(10)
+                            .background(isSelected ? Brand.gold.opacity(0.18) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected ? Brand.gold : Color.clear, lineWidth: 1.5))
                         }
                         .brandPanel()
                         .accessibilityIdentifier("rulesWizard.template.\(template.versionId)")
+                        .accessibilityAddTraits(isSelected ? .isSelected : [])
                     }
                 } header: { BrandSectionHeader("选择系统规则模板") }
                 if selected != nil { Button("下一步：调整规则") { step = 1 }.brandPanel() }
@@ -110,7 +124,19 @@ struct RulesWizard: View {
                         pointInput(key, label: pointLabels[index])
                         HStack {
                             ForEach(key == "startingPoints" ? [25_000, 30_000, 35_000] : [30_000, 40_000], id: \.self) { preset in
-                                Button(preset.formatted()) { setPoint(key, preset) }.font(Brand.font(.footnote))
+                                // iosfix6 item 3: several default-style Buttons
+                                // sharing one Form row collapse into a single
+                                // row action (measured: every tap fired the
+                                // last chip, 35000). Borderless restores
+                                // per-button dispatch; padding enlarges the
+                                // 42x18 tap target.
+                                Button(preset.formatted()) { setPoint(key, preset) }
+                                    .font(Brand.font(.footnote))
+                                    .buttonStyle(.borderless)
+                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 4)
+                                    .contentShape(Rectangle())
+                                    .accessibilityIdentifier("rulesWizard.preset.\(key).\(preset)")
                             }
                         }
                         .brandPanel()
@@ -128,7 +154,9 @@ struct RulesWizard: View {
                         Button(preset.map { String($0) }.joined(separator: " / ")) {
                             umaText = preset.map { String($0) }; recalculate()
                         }
+                        .buttonStyle(.borderless)
                         .brandPanel()
+                        .accessibilityIdentifier("rulesWizard.umaPreset.\(preset.map { String($0) }.joined(separator: "_"))")
                     }
                 } header: { BrandSectionHeader("起点与成绩") }
                 ForEach(groups, id: \.self) { group in
@@ -140,10 +168,14 @@ struct RulesWizard: View {
                             Text("罚符 1,500 点无法按所有听牌人数以整百分摊，不支持。")
                                 .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
                             ForEach(count == 3 ? [0, 2000, 3000] : [0, 3000], id: \.self) { value in
-                                Button("罚符 \(value)") { setPoint("notenPenaltyTotal", value) }.brandPanel()
+                                Button("罚符 \(value)") { setPoint("notenPenaltyTotal", value) }
+                                    .buttonStyle(.borderless).brandPanel()
+                                    .accessibilityIdentifier("rulesWizard.preset.notenPenaltyTotal.\(value)")
                             }
                             ForEach([100, 200], id: \.self) { value in
-                                Button("本场自摸每人 \(value) / 荣和 \(value * (count - 1))") { setPoint("honbaPerPayer", value) }.brandPanel()
+                                Button("本场自摸每人 \(value) / 荣和 \(value * (count - 1))") { setPoint("honbaPerPayer", value) }
+                                    .buttonStyle(.borderless).brandPanel()
+                                    .accessibilityIdentifier("rulesWizard.preset.honbaPerPayer.\(value)")
                             }
                         }
                         ForEach(fields.filter { $0.group == group && visible($0.key) }) { field in
@@ -195,6 +227,7 @@ struct RulesWizard: View {
         .background(Brand.background)
         .tint(Brand.gold)
         .navigationTitle("开桌")
+        .keyboardDismissal()
         .task { await load() }
         .alert("切换模板将丢弃当前调整", isPresented: Binding(get: { confirmTemplate != nil }, set: { if !$0 { confirmTemplate = nil } })) {
             Button("丢弃并切换", role: .destructive) { if let confirmTemplate { choose(confirmTemplate) }; confirmTemplate = nil }

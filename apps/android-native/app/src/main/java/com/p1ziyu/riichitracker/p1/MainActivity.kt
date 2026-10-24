@@ -137,12 +137,24 @@ private fun MainContent(model: AppViewModel, state: AppState, onPasteLink: () ->
             composable<Lobby> {
                 MatchListScreen(true, state.matches, state.templates, state.listLoading, state.listError,
                     state.listLoading, model::loadList, { nav.navigate(Table(it)) }, { nav.navigate(History) },
-                    { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName)
+                    { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName,
+                    onDeleteMatch = model::deleteOrHide, hiddenUndoId = state.hiddenUndoId,
+                    onUnhideMatch = model::unhideMatch, onDismissUndo = model::clearHiddenUndo,
+                    deleteRefusedMatch = state.matches?.firstOrNull { it.id == state.deleteRefusedId },
+                    onHideRefusedMatch = { model.deleteOrHide(it, asHide = true) },
+                    onDismissRefused = model::clearDeleteRefused, deleteError = state.deleteError,
+                    onDismissDeleteError = model::clearDeleteError)
             }
             composable<History> {
                 MatchListScreen(false, state.matches, state.templates, state.listLoading, state.listError,
                     state.listLoading, model::loadList, { nav.navigate(Table(it)) }, { nav.navigate(History) },
-                    { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName)
+                    { nav.navigate(Create) }, onPasteLink, state.session, state.profile?.principal?.displayName,
+                    onDeleteMatch = model::deleteOrHide, hiddenUndoId = state.hiddenUndoId,
+                    onUnhideMatch = model::unhideMatch, onDismissUndo = model::clearHiddenUndo,
+                    deleteRefusedMatch = state.matches?.firstOrNull { it.id == state.deleteRefusedId },
+                    onHideRefusedMatch = { model.deleteOrHide(it, asHide = true) },
+                    onDismissRefused = model::clearDeleteRefused, deleteError = state.deleteError,
+                    onDismissDeleteError = model::clearDeleteError)
             }
             composable<Create> {
                 CreateScreen(state.templates, state.busy, state.actionError, model::createMatch,

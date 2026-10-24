@@ -25,6 +25,8 @@ fun apiFailureMessage(error: ApiFailure): String = when (error.code) {
     "join_code_not_found" -> "房间码不正确，或牌桌已结束。"
     "incomplete_check_ins" -> "成员尚未全部就座，无法开局。"
     "match_not_found" -> "牌桌不存在或已被删除。"
+    "match_not_deletable" -> "这张牌桌已抽风定座或已开始，无法彻底删除。"
+    "owner_must_delete" -> "房主不能退出牌桌，请使用删除。"
     else -> "操作失败，请稍后重试。"
 }
 

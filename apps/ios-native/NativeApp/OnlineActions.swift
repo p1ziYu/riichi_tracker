@@ -921,6 +921,7 @@ private struct ResultEntry: View {
         .background(Brand.background)
         .tint(Brand.gold)
         .navigationTitle("本局结算")
+        .keyboardDismissal()
         .toolbar { ToolbarItem(placement: .cancellationAction) {
             Button("关闭") {
                 if submitted || preview != nil || draft != initialDraft { confirmClose = true }

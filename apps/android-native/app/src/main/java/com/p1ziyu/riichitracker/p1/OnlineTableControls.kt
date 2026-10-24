@@ -1,11 +1,16 @@
 package com.p1ziyu.riichitracker.p1
 
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import kotlinx.serialization.json.*
@@ -171,6 +176,7 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
     }
     val cap = ronWinnerLimit(table.match.rulesSnapshot, table.match.playerCount)
     val validated = validateResultDraft(draft, table, hand)
+    val focusManager = LocalFocusManager.current
     val input = validated.input
     val preview = state.preview?.takeIf { input != null && it.matches(hand, input) }
     AlertDialog(onDismissRequest = { if (!state.busy) onDismiss() },
@@ -228,24 +234,33 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
                         })
                         Text("显式役满（向服务器仍发送番 1、符 30）", color = Brand.text)
                     }
+                    // iosfix6 item 4: these numeric fields opened the full
+                    // text keyboard with no Done action; give them a number
+                    // keyboard whose Done dismisses the IME.
+                    val numberKeys = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done)
+                    val doneKeys = KeyboardActions(onDone = { focusManager.clearFocus() })
                     if (!winner.yakuman) {
                         OutlinedTextField(winner.han, { change(winner.copy(han = it)) },
-                            label = { Text("番（1–130）") },
+                            label = { Text("番（1–130）") }, singleLine = true,
+                            keyboardOptions = numberKeys, keyboardActions = doneKeys,
                             isError = "winners.$index.han" in validated.errors)
                         validated.errors["winners.$index.han"]?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                         OutlinedTextField(winner.fu, { change(winner.copy(fu = it)) },
-                            label = { Text("符（20–140）") },
+                            label = { Text("符（20–140）") }, singleLine = true,
+                            keyboardOptions = numberKeys, keyboardActions = doneKeys,
                             isError = "winners.$index.fu" in validated.errors)
                         validated.errors["winners.$index.fu"]?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                     } else {
                         val ordinaryCap = if (table.match.rulesSnapshot?.get("compositeYakuman")?.jsonPrimitive?.booleanOrNull == true) 10 else 1
                         OutlinedTextField(winner.yakumanCount, { change(winner.copy(yakumanCount = it)) },
-                            label = { Text("普通役满数（0–$ordinaryCap）") },
+                            label = { Text("普通役满数（0–$ordinaryCap）") }, singleLine = true,
+                            keyboardOptions = numberKeys, keyboardActions = doneKeys,
                             isError = "winners.$index.yakumanCount" in validated.errors)
                         validated.errors["winners.$index.yakumanCount"]?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                         if (table.match.rulesSnapshot?.get("doubleYakuman")?.jsonPrimitive?.booleanOrNull == true) {
                             OutlinedTextField(winner.doubleYakumanCount, { change(winner.copy(doubleYakumanCount = it)) },
-                                label = { Text("特殊双倍役满数（0–10）") },
+                                label = { Text("特殊双倍役满数（0–10）") }, singleLine = true,
+                                keyboardOptions = numberKeys, keyboardActions = doneKeys,
                                 isError = "winners.$index.doubleYakumanCount" in validated.errors)
                             validated.errors["winners.$index.doubleYakumanCount"]?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                         }

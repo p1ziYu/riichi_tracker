@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -34,6 +35,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -44,7 +48,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -104,12 +110,18 @@ fun AuthScreen(
                     if (register) Button(onClick = { onModeChange(true) }, enabled = !busy) { Text("注册账户") }
                     else OutlinedButton(onClick = { onModeChange(true) }, enabled = !busy) { Text("注册账户") }
                 }
+                // iosfix6 item 4: Done on the last field dismisses the IME.
+                val authFocus = LocalFocusManager.current
+                val authDone = KeyboardActions(onDone = { authFocus.clearFocus() })
                 if (register) OutlinedTextField(name, { name = it }, label = { Text("昵称") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth())
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = authDone)
                 OutlinedTextField(email, { email = it }, label = { Text("邮箱") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email), modifier = Modifier.fillMaxWidth())
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next),
+                    modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(password, { password = it }, label = { Text("密码") }, singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+                    visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = authDone)
                 if (error != null) Text(error, color = MaterialTheme.colorScheme.error)
                 Button(onClick = { onSubmit(email.trim(), password, if (register) name.trim() else null) },
                     enabled = !busy && email.isNotBlank() && password.isNotBlank() && (!register || name.isNotBlank())) {
@@ -184,41 +196,110 @@ fun MatchListScreen(
     onJoin: () -> Unit,
     session: SessionMode,
     principalName: String?,
+    // iosfix6 item 5: swipe-to-delete wiring. Defaults keep existing
+    // call sites compiling; MainActivity passes the ViewModel functions.
+    onDeleteMatch: (MatchSummary) -> Unit = {},
+    hiddenUndoId: String? = null,
+    onUnhideMatch: (String) -> Unit = {},
+    onDismissUndo: () -> Unit = {},
+    deleteRefusedMatch: MatchSummary? = null,
+    onHideRefusedMatch: (MatchSummary) -> Unit = {},
+    onDismissRefused: () -> Unit = {},
+    deleteError: String? = null,
+    onDismissDeleteError: () -> Unit = {},
 ) {
     val finished = finishedOwnMatches(matches.orEmpty())
     val live = matches.orEmpty().filterNot { isFinishedMatch(it.status) }.sortedByDescending { it.createdAt }
-    PullToRefreshBox(isRefreshing = refreshing, onRefresh = onRefresh, modifier = Modifier.fillMaxSize().background(Brand.background)) {
-        LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (lobby) {
-                item { LobbyHero(onCreate, onJoin) }
-                item {
-                    Text("在线身份 · ${principalName?.takeIf { it.isNotBlank() } ?: if (session == SessionMode.ACCOUNT) "账户" else "临时访客"} · ${if (session == SessionMode.ACCOUNT) "账户" else "访客"}", color = Brand.goldText)
-                    Caption("加入牌桌：扫码或输入房间码，加入后等待桌主抽风定座。")
+    var pendingDelete by remember { mutableStateOf<MatchSummary?>(null) }
+    // One wrapper per row: swiping left reveals 删除; the swipe itself
+    // never deletes — confirmValueChange snaps the row back and opens the
+    // confirm dialog, so a stray swipe cannot destroy anything.
+    @Composable
+    fun DeletableRow(match: MatchSummary) {
+        val dismissState = rememberSwipeToDismissBoxState(
+            confirmValueChange = { value ->
+                if (value == SwipeToDismissBoxValue.EndToStart) {
+                    pendingDelete = match
+                    false
+                } else true
+            })
+        SwipeToDismissBox(state = dismissState,
+            backgroundContent = {
+                Box(Modifier.fillMaxSize().background(Brand.loss.copy(alpha = 0.25f)).padding(horizontal = 16.dp),
+                    contentAlignment = Alignment.CenterEnd) {
+                    Text("删除", color = Brand.loss, style = MaterialTheme.typography.titleMedium)
                 }
-                if (loading && matches == null) item { CircularProgressIndicator() }
-                if (error != null) item { Text("加载失败：$error", color = MaterialTheme.colorScheme.error); TextButton(onClick = onRefresh) { Text("重试") } }
-                if (!loading && matches != null && live.isEmpty()) item { Caption("暂无正在进行的牌桌，下拉刷新试试") }
-                items(live, key = { "live:${it.id}" }) { MatchRow(it, templates, onOpen) }
-                item {
-                    BrandPanel(Modifier.fillMaxWidth().clickable(onClick = onHistory)) {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            SectionTitle("战绩")
-                            Caption("对局历史与成绩入口 · 已结束 ${finished.size} 桌")
-                            Text("查看战绩 →", color = Brand.goldText)
+            },
+            enableDismissFromStartToEnd = false) {
+            MatchRow(match, templates, onOpen)
+        }
+    }
+    Box(Modifier.fillMaxSize().background(Brand.background)) {
+        PullToRefreshBox(isRefreshing = refreshing, onRefresh = onRefresh, modifier = Modifier.fillMaxSize()) {
+            LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (lobby) {
+                    item { LobbyHero(onCreate, onJoin) }
+                    item {
+                        Text("在线身份 · ${principalName?.takeIf { it.isNotBlank() } ?: if (session == SessionMode.ACCOUNT) "账户" else "临时访客"} · ${if (session == SessionMode.ACCOUNT) "账户" else "访客"}", color = Brand.goldText)
+                        Caption("加入牌桌：扫码或输入房间码，加入后等待桌主抽风定座。")
+                    }
+                    if (loading && matches == null) item { CircularProgressIndicator() }
+                    if (error != null) item { Text("加载失败：$error", color = MaterialTheme.colorScheme.error); TextButton(onClick = onRefresh) { Text("重试") } }
+                    if (!loading && matches != null && live.isEmpty()) item { Caption("暂无正在进行的牌桌，下拉刷新试试") }
+                    items(live, key = { "live:${it.id}" }) { DeletableRow(it) }
+                    item {
+                        BrandPanel(Modifier.fillMaxWidth().clickable(onClick = onHistory)) {
+                            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                SectionTitle("战绩")
+                                Caption("对局历史与成绩入口 · 已结束 ${finished.size} 桌")
+                                Text("查看战绩 →", color = Brand.goldText)
+                            }
                         }
                     }
+                    items(finished.take(2), key = { "teaser:${it.id}" }) { DeletableRow(it) }
+                } else {
+                    val history = ownHistoryMatches(matches.orEmpty())
+                    item { Heading("战绩") }
+                    item { Caption("自己的对局记录 · 下拉刷新") }
+                    if (loading && matches == null) item { CircularProgressIndicator() }
+                    if (error != null) item { Text("加载失败：$error", color = MaterialTheme.colorScheme.error); TextButton(onClick = onRefresh) { Text("重试") } }
+                    if (!loading && matches != null && history.isEmpty()) item { Caption("暂无对局记录。") }
+                    items(history, key = { it.id }) { DeletableRow(it) }
                 }
-                items(finished.take(2), key = { "teaser:${it.id}" }) { MatchRow(it, templates, onOpen) }
-            } else {
-                val history = ownHistoryMatches(matches.orEmpty())
-                item { Heading("战绩") }
-                item { Caption("自己的对局记录 · 下拉刷新") }
-                if (loading && matches == null) item { CircularProgressIndicator() }
-                if (error != null) item { Text("加载失败：$error", color = MaterialTheme.colorScheme.error); TextButton(onClick = onRefresh) { Text("重试") } }
-                if (!loading && matches != null && history.isEmpty()) item { Caption("暂无对局记录。") }
-                items(history, key = { it.id }) { MatchRow(it, templates, onOpen) }
             }
         }
+        if (hiddenUndoId != null) {
+            Row(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Brand.panel).padding(14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("已隐藏对局记录", color = Brand.text)
+                Row {
+                    TextButton(onClick = { onUnhideMatch(hiddenUndoId) }) { Text("撤销") }
+                    TextButton(onClick = onDismissUndo) { Text("知道了") }
+                }
+            }
+        }
+    }
+    pendingDelete?.let { match ->
+        val deletable = isDeletableMatch(match)
+        AlertDialog(onDismissRequest = { pendingDelete = null },
+            title = { Text(if (deletable) "删除牌桌？" else "隐藏牌桌？") },
+            text = { Text(if (deletable) "这张未开始的牌桌将被永久删除，所有成员都将看不到它。此操作无法撤销。"
+                else "这张牌桌只会从你的列表中隐藏，牌桌本身和其他成员不受影响。隐藏后可通过下方的撤销恢复。") },
+            confirmButton = { TextButton(onClick = { onDeleteMatch(match); pendingDelete = null }) {
+                Text(if (deletable) "删除" else "隐藏") } },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } })
+    }
+    deleteRefusedMatch?.let { match ->
+        AlertDialog(onDismissRequest = onDismissRefused,
+            title = { Text("无法彻底删除") },
+            text = { Text("这张牌桌已抽风定座或已开始，无法彻底删除；可以改为仅从你的列表中隐藏。") },
+            confirmButton = { TextButton(onClick = { onHideRefusedMatch(match); onDismissRefused() }) { Text("改为隐藏") } },
+            dismissButton = { TextButton(onClick = onDismissRefused) { Text("取消") } })
+    }
+    deleteError?.let { message ->
+        AlertDialog(onDismissRequest = onDismissDeleteError,
+            title = { Text("删除失败") }, text = { Text(message) },
+            confirmButton = { TextButton(onClick = onDismissDeleteError) { Text("知道了") } })
     }
 }
 
@@ -448,6 +529,9 @@ fun CheckInScreen(initial: String?, state: AppState, model: AppViewModel, onClos
             model.previewJoin(current)
         }
     }
+    // iosfix6 item 4: Done dismisses the IME on every field here.
+    val checkInFocus = androidx.compose.ui.platform.LocalFocusManager.current
+    val doneKeys = androidx.compose.foundation.text.KeyboardActions(onDone = { checkInFocus.clearFocus() })
     Column(Modifier.fillMaxSize().background(Brand.background).verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)) {
         BrandLockup()
@@ -460,9 +544,13 @@ fun CheckInScreen(initial: String?, state: AppState, model: AppViewModel, onClos
             }
             OutlinedTextField(input, { input = it; resolved = null },
                 label = { Text("粘贴完整 HTTPS 签到链接") },
-                visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+                visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Done),
+                keyboardActions = doneKeys)
             OutlinedTextField(code, { code = it.trim().uppercase(java.util.Locale.ROOT) },
-                label = { Text("六位房间码") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                label = { Text("六位房间码") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Done),
+                keyboardActions = doneKeys)
             Button(onClick = {
                 resolved = null; input = ""
                 model.byCode(code) { result -> resolved = result }
@@ -495,7 +583,9 @@ fun CheckInScreen(initial: String?, state: AppState, model: AppViewModel, onClos
                     if (preview.match.status != "preparing")
                         Text("牌局已开始，无法加入。", color = MaterialTheme.colorScheme.error)
                     OutlinedTextField(alias, { alias = it }, label = { Text("显示昵称（选填）") },
-                        modifier = Modifier.fillMaxWidth(), singleLine = true)
+                        modifier = Modifier.fillMaxWidth(), singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Done),
+                        keyboardActions = doneKeys)
                     Button(onClick = { link?.let { model.checkIn(it, alias) } },
                         enabled = !state.busy && preview.seating.memberCount < preview.match.playerCount &&
                             preview.match.status == "preparing") { Text("加入牌桌") }
