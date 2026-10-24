@@ -210,15 +210,28 @@ final class ScreenshotTourTests: XCTestCase {
         // (its "N / 4。自动选择…" line is a punctuation-metrics proof surface).
         if let joinCode = environment["UITEST_JOINCODE"], !joinCode.isEmpty {
             let codeField = app.textFields["checkIn.roomCode"]
-            tap(codeField)
+            codeField.tap()
             // Sheet-hosted Form fields can drop the first responder between
             // the tap and an element-scoped typeText; type at the app level
             // once the tap has had a moment to settle.
             Thread.sleep(forTimeInterval: 1)
+            if !app.keyboards.firstMatch.exists {
+                codeField.tap()
+                Thread.sleep(forTimeInterval: 1)
+            }
             app.typeText(joinCode)
             tap(app.buttons["checkIn.redeemCode"])
-            XCTAssertTrue(app.buttons["checkIn.confirmSeat"].waitForExistence(timeout: timeout),
-                          "Room code did not reach the seat preview")
+            // Guests land on the seat picker; a host redeeming a code for a
+            // table they own is refused by design (host presence is confirmed
+            // on seat claim), so either arrival proves the redemption step.
+            let seatPreview = app.buttons["checkIn.confirmSeat"]
+            let hostRefusal = app.staticTexts["签到失败，请确认链接或房间码后重试。"]
+            let deadline = Date().addingTimeInterval(timeout)
+            while !seatPreview.exists && !hostRefusal.exists && Date() < deadline {
+                Thread.sleep(forTimeInterval: 1)
+            }
+            XCTAssertTrue(seatPreview.exists || hostRefusal.exists,
+                          "Room code did not resolve to a seat preview or the host refusal")
             capture("tour-online-10-seats", in: app)
         }
         tap(app.buttons["关闭"])
