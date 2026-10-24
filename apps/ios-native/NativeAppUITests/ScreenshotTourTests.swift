@@ -160,6 +160,8 @@ final class ScreenshotTourTests: XCTestCase {
         capture("tour-local-09-lobby-rows", in: app)
     }
 
+    private var environment: [String: String] { ProcessInfo.processInfo.environment }
+
     func testSeededOnlineTour() throws {
         let environment = ProcessInfo.processInfo.environment
         try XCTSkipUnless(environment["UITEST_SEEDED"] == "1", "Requires disposable seeded online backend (UITEST_SEEDED=1)")
@@ -204,6 +206,17 @@ final class ScreenshotTourTests: XCTestCase {
         XCTAssertTrue(app.textFields["checkIn.roomCode"].waitForExistence(timeout: timeout),
                       "Lobby join entry did not present the check-in flow")
         capture("tour-online-09-join", in: app)
+        // With a seeded room code, the same flow reaches the seat preview
+        // (its "N / 4。自动选择…" line is a punctuation-metrics proof surface).
+        if let joinCode = environment["UITEST_JOINCODE"], !joinCode.isEmpty {
+            let codeField = app.textFields["checkIn.roomCode"]
+            tap(codeField)
+            codeField.typeText(joinCode)
+            tap(app.buttons["checkIn.redeemCode"])
+            XCTAssertTrue(app.buttons["checkIn.confirmSeat"].waitForExistence(timeout: timeout),
+                          "Room code did not reach the seat preview")
+            capture("tour-online-10-seats", in: app)
+        }
         tap(app.buttons["关闭"])
         XCTAssertFalse(app.textFields["checkIn.roomCode"].waitForExistence(timeout: 3), "Join sheet did not close")
 
