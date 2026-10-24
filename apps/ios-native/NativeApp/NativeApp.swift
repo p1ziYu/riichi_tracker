@@ -26,9 +26,14 @@ struct IchihimeNativeApp: App {
             ? FileManager.default.temporaryDirectory.appendingPathComponent("LocalUITour-\(UUID().uuidString).sqlite3")
             : nil
         _localStore = StateObject(wrappedValue: LocalMatchStore(location: testStore))
+        // Nav titles: ivory text only. Do NOT give this proxy appearance an
+        // opaque background: on iOS 27, configureWithOpaqueBackground() +
+        // backgroundColor makes SwiftUI reserve an oversized empty bar zone
+        // whose title never composites (the "dead band" defect, 2026-10-23).
+        // The screens paint Brand.background themselves, so a transparent
+        // bar blends seamlessly.
         let appearance = UINavigationBarAppearance()
-        appearance.configureWithOpaqueBackground()
-        appearance.backgroundColor = UIColor(red: 16 / 255, green: 28 / 255, blue: 40 / 255, alpha: 1)
+        appearance.configureWithTransparentBackground()
         let titleColor = UIColor(red: 245 / 255, green: 245 / 255, blue: 239 / 255, alpha: 1)
         appearance.titleTextAttributes = [.foregroundColor: titleColor]
         appearance.largeTitleTextAttributes = [.foregroundColor: titleColor]
