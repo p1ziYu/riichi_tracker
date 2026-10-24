@@ -200,15 +200,18 @@ final class ScreenshotTourTests: XCTestCase {
         }
         XCTAssertTrue(app.buttons["online.wizard.open"].isHittable, "Could not dismiss the wizard sheet")
 
-        // The lobby's second primary action opens the existing join flow
-        // (room-code entry + QR scan) without leaving the lobby tab.
+        // The lobby's second primary action opens room-code entry and QR scan
+        // without leaving the lobby tab.
         tap(app.buttons["online.join.open"])
         XCTAssertTrue(app.textFields["checkIn.roomCode"].waitForExistence(timeout: timeout),
                       "Lobby join entry did not present the check-in flow")
         capture("tour-online-09-join", in: app)
-        // With a seeded room code, the same flow reaches the seat preview
-        // (its "N / 4。自动选择…" line is a punctuation-metrics proof surface).
-        if let joinCode = environment["UITEST_JOINCODE"], !joinCode.isEmpty {
+        // A code alone may point to an owner, full, or already-started room.
+        // Only a fixture explicitly reserved for this guest's undrawn room
+        // can exercise joining without assuming the backend's state.
+        if environment["UITEST_JOIN_GUEST_READY"] == "1" {
+            let joinCode = try XCTUnwrap(environment["UITEST_JOINCODE"].flatMap { $0.isEmpty ? nil : $0 },
+                                         "Guest-ready fixture requires UITEST_JOINCODE")
             let codeField = app.textFields["checkIn.roomCode"]
             codeField.tap()
             // Sheet-hosted Form fields can drop the first responder between
@@ -220,18 +223,34 @@ final class ScreenshotTourTests: XCTestCase {
                 Thread.sleep(forTimeInterval: 1)
             }
             app.typeText(joinCode)
-            // Dismiss the keyboard and scroll the form: the redeem button and
-            // the seat-preview rows only materialize once near the viewport.
             app.swipeUp()
             Thread.sleep(forTimeInterval: 1)
             tap(app.buttons["checkIn.redeemCode"])
-            let seatPreview = app.buttons["checkIn.confirmSeat"]
-            for _ in 0..<8 where !seatPreview.exists {
+            let join = app.buttons["checkIn.join"]
+            for _ in 0..<8 where !join.exists {
                 Thread.sleep(forTimeInterval: 2)
                 app.swipeUp()
             }
-            XCTAssertTrue(seatPreview.exists, "Room code did not reach the seat preview")
-            capture("tour-online-10-seats", in: app)
+            XCTAssertTrue(join.exists, "Guest-ready room code did not reach the join action")
+            let count = app.staticTexts.matching(
+                NSPredicate(format: "label MATCHES %@", "成员 [0-9]+/[0-9]+")).firstMatch
+            if !count.exists { app.swipeDown() }
+            XCTAssertTrue(count.waitForExistence(timeout: timeout), "Guest-ready room did not show its member count")
+            let parts = count.label.dropFirst("成员 ".count).split(separator: "/")
+            let joinedBefore = try XCTUnwrap(Int(parts.first ?? ""))
+            let capacity = try XCTUnwrap(Int(parts.last ?? ""))
+            XCTAssertGreaterThan(joinedBefore, 0)
+            XCTAssertLessThan(joinedBefore, capacity, "Guest-ready room must have a free membership slot")
+            XCTAssertTrue(join.isEnabled, "Guest-ready room must allow this account to join")
+            scrollToAndTap(join, in: app)
+            let waiting = app.staticTexts["已加入牌桌，等待房主抽风定座"]
+            XCTAssertTrue(waiting.waitForExistence(timeout: timeout),
+                          "Joining the room did not reach the waiting state")
+            let updatedCount = app.staticTexts["成员 \(joinedBefore + 1)/\(capacity)"]
+            if !updatedCount.exists { app.swipeDown() }
+            XCTAssertTrue(updatedCount.waitForExistence(timeout: timeout),
+                          "Room member count did not include the new guest")
+            capture("tour-online-10-waiting", in: app)
         }
         tap(app.buttons["关闭"])
         XCTAssertFalse(app.textFields["checkIn.roomCode"].waitForExistence(timeout: 3), "Join sheet did not close")

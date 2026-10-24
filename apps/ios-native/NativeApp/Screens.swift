@@ -112,7 +112,7 @@ private func isFinished(_ status: String) -> Bool {
 
 private func statusLabel(_ status: String) -> String {
     switch status.lowercased() {
-    case "preparing", "lobby": "等待座次确认"
+    case "preparing", "lobby": "等待抽风定座"
     case "active", "in_progress": "牌局进行中"
     case "finished", "completed", "settled": "牌局已结束"
     case "abandoned", "cancelled": "牌局已取消"
@@ -120,7 +120,7 @@ private func statusLabel(_ status: String) -> String {
     }
 }
 
-private func windLabel(_ wind: String?) -> String {
+func windLabel(_ wind: String?) -> String {
     switch wind {
     case "E": "东"
     case "S": "南"
@@ -260,7 +260,7 @@ struct AuthScreen: View {
                     }
                 }
                 .disabled(busy)
-                Text("访客扫码或输入房间码即可直接选座签到，不能开桌；本地模式不使用此身份。")
+                Text("访客扫码或输入房间码即可加入牌桌，等待房主抽风定座；不能开桌。本地模式不使用此身份。")
                     .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                 Text("本地无身份模式在“本地牌桌”标签中开桌；不登录、不创建访客、不上传。")
                     .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
@@ -392,7 +392,7 @@ struct AuthScreen: View {
                             .foregroundStyle(Brand.gold)
                             .accessibilityIdentifier("online.join.open")
                         }
-                        Text(session.canHost ? "选择模板、调整规则、预览支付后创建；加入牌桌可用房间码或扫码签到" : "访客不能开桌，可用「加入牌桌」扫码或输房间码入座")
+                        Text(session.canHost ? "选择模板、调整规则、预览支付后创建；加入牌桌可用房间码或扫码" : "访客不能开桌，可用「加入牌桌」扫码或输房间码加入")
                             .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                     }
                     .padding(20)
@@ -558,16 +558,23 @@ struct AuthScreen: View {
                     }
                     .brandPanel()
                 }
+                if currentSnapshot.match.status == "preparing" {
+                    OnlineTableActions(session: session, snapshot: currentSnapshot) { await refresh() }
+                }
                 Section {
                     ForEach(currentSnapshot.seats.sorted { $0.seatNo < $1.seatNo }, id: \.seatNo) { seat in
+                        let preparing = currentSnapshot.match.status == "preparing"
+                        let drawn = currentSnapshot.match.seatingDrawnAt != nil
+                        let drawnWind = preparing && drawn
+                            ? currentSnapshot.members.first { $0.seatNo == seat.seatNo }?.wind : nil
                         HStack(spacing: 12) {
-                            Text(windLabel(["E", "S", "W", "N"][seat.seatNo % 4]))
+                            Text(preparing && !drawn ? "·" : windLabel(drawnWind ?? ["E", "S", "W", "N"][seat.seatNo % 4]))
                                 .font(Brand.font(.headline))
                                 .foregroundStyle(Brand.ink)
                                 .frame(width: 30, height: 30)
                                 .background(Brand.cream, in: RoundedRectangle(cornerRadius: 6))
                             VStack(alignment: .leading, spacing: 5) {
-                                Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "空座")")
+                                Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "空座")\(preparing && drawn && seat.seatNo == currentSnapshot.match.dealerSeatNo ? " · 庄家" : "")")
                                     .font(Brand.font(.headline)).foregroundStyle(Brand.text)
                                 Text(seatLabel(seat.status))
                                     .font(Brand.font(.caption1)).foregroundStyle(Brand.muted)
@@ -620,7 +627,9 @@ struct AuthScreen: View {
                     } header: { BrandSectionHeader("最终排名") }
                     .brandPanel()
                 }
-                OnlineTableActions(session: session, snapshot: currentSnapshot) { await refresh() }
+                if currentSnapshot.match.status != "preparing" {
+                    OnlineTableActions(session: session, snapshot: currentSnapshot) { await refresh() }
+                }
             }
             Section {
                 Text("显示最早的已结算局摘要（最多 100 局），非完整牌谱回放；无后续分页或原始输入。")
@@ -738,7 +747,7 @@ struct AuthScreen: View {
                         if handleRevocation(status: failure.status) { return }
                         if OnlineCommandPolicy.mustClearVisibleTable(failure) { clearPrivateState() }
                     }
-                    self.error = "读取局记录失败：\(error.localizedDescription)"
+                    self.error = "读取局记录失败：\((error as? APIError).map(APIErrorCopy.text) ?? error.localizedDescription)"
                 }
             }
             guard current == requestGeneration, principalGeneration == session.generationID else { return }
@@ -752,7 +761,7 @@ struct AuthScreen: View {
                             if handleRevocation(status: failure.status) { return }
                             if OnlineCommandPolicy.mustClearVisibleTable(failure) { clearPrivateState() }
                         }
-                        self.error = "读取终局成绩失败：\(error.localizedDescription)"
+                        self.error = "读取终局成绩失败：\((error as? APIError).map(APIErrorCopy.text) ?? error.localizedDescription)"
                     }
                 }
             }
@@ -767,7 +776,7 @@ struct AuthScreen: View {
                 if handleRevocation(status: failure.status) { return }
                 if OnlineCommandPolicy.mustClearVisibleTable(failure) { clearPrivateState() }
             }
-            self.error = error.localizedDescription
+            self.error = (error as? APIError).map(APIErrorCopy.text) ?? error.localizedDescription
         }
     }
 

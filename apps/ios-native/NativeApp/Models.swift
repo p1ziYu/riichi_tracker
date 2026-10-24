@@ -76,6 +76,26 @@ struct MatchDTO: Codable {
     let rulesSnapshot: [String: JSONValue]?
     let rulesetVersionId: String?
     let createdAt: String?
+    let seatingDrawnAt: String?
+    let dealerSeatNo: Int?
+
+    init(id: String, status: String, ownerPrincipalId: String?, joinCode: String?,
+         settlementConfirmed: Bool?, version: Int?, playerCount: Int,
+         rulesSnapshot: [String: JSONValue]?, rulesetVersionId: String?, createdAt: String?,
+         seatingDrawnAt: String? = nil, dealerSeatNo: Int? = nil) {
+        self.id = id
+        self.status = status
+        self.ownerPrincipalId = ownerPrincipalId
+        self.joinCode = joinCode
+        self.settlementConfirmed = settlementConfirmed
+        self.version = version
+        self.playerCount = playerCount
+        self.rulesSnapshot = rulesSnapshot
+        self.rulesetVersionId = rulesetVersionId
+        self.createdAt = createdAt
+        self.seatingDrawnAt = seatingDrawnAt
+        self.dealerSeatNo = dealerSeatNo
+    }
 }
 
 struct SeatDTO: Codable, Identifiable {
@@ -111,10 +131,46 @@ struct CurrentHandDTO: Codable {
     let seats: [HandSeatDTO]
 }
 
+struct MatchMemberDTO: Codable, Identifiable {
+    let principalId: String
+    let displayName: String
+    let isOwner: Bool
+    let seatNo: Int?
+    let wind: String?
+
+    var id: String { principalId }
+}
+
 struct TableSnapshot: Codable {
     let match: MatchDTO
     let seats: [SeatDTO]
+    let members: [MatchMemberDTO]
     let currentHand: CurrentHandDTO?
+
+    private enum CodingKeys: String, CodingKey { case match, seats, currentHand, members }
+
+    init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        match = try fields.decode(MatchDTO.self, forKey: .match)
+        seats = try fields.decode([SeatDTO].self, forKey: .seats)
+        currentHand = try fields.decodeIfPresent(CurrentHandDTO.self, forKey: .currentHand)
+        members = try fields.decodeIfPresent([MatchMemberDTO].self, forKey: .members) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var fields = encoder.container(keyedBy: CodingKeys.self)
+        try fields.encode(match, forKey: .match)
+        try fields.encode(seats, forKey: .seats)
+        try fields.encodeIfPresent(currentHand, forKey: .currentHand)
+        try fields.encode(members, forKey: .members)
+    }
+
+    init(match: MatchDTO, seats: [SeatDTO], currentHand: CurrentHandDTO?, members: [MatchMemberDTO] = []) {
+        self.match = match
+        self.seats = seats
+        self.currentHand = currentHand
+        self.members = members
+    }
 }
 
 struct HandDeltaDTO: Codable {
@@ -196,6 +252,17 @@ struct CheckInSeatsDTO: Decodable {
         let playerCount: Int
         let status: String
     }
+    struct Caller: Decodable {
+        let principalId: String
+        let isOwner: Bool
+        let isMember: Bool
+    }
+    struct Seating: Decodable {
+        let drawn: Bool
+        let dealerSeatNo: Int?
+        let memberCount: Int
+        let seatedCount: Int
+    }
     struct Seat: Decodable {
         let seatNo: Int
         let principalId: String?
@@ -204,16 +271,30 @@ struct CheckInSeatsDTO: Decodable {
     }
 
     let match: Match
+    let caller: Caller
+    let members: [MatchMemberDTO]
+    let seating: Seating
     let seats: [Seat]
 
-    func seat(at number: Int) -> Seat? {
-        seats.first { $0.seatNo == number }
+    private enum CodingKeys: String, CodingKey { case match, caller, members, seating, seats }
+
+    init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        match = try fields.decode(Match.self, forKey: .match)
+        caller = try fields.decode(Caller.self, forKey: .caller)
+        members = try fields.decode([MatchMemberDTO].self, forKey: .members)
+        seating = try fields.decode(Seating.self, forKey: .seating)
+        seats = try fields.decodeIfPresent([Seat].self, forKey: .seats) ?? []
     }
 }
 
 struct CheckInResultDTO: Decodable {
-    struct Seat: Decodable { let seatNo: Int }
-    let seat: Seat
+    struct Member: Decodable {
+        let principalId: String
+        let displayName: String
+    }
+    let member: Member
+    let seated: Bool
     let grantId: String
 }
 

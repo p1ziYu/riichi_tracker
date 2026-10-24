@@ -4,7 +4,16 @@ import SwiftUI
 import CoreImage.CIFilterBuiltins
 import UIKit
 
-private struct SeatClaim: Encodable { let seatNo: Int }
+struct DrawSeatsResultDTO: Decodable {
+    struct Seat: Decodable {
+        let seatNo: Int
+        let principalId: String
+        let displayName: String
+        let wind: String
+    }
+    let seats: [Seat]
+    let dealerSeatNo: Int
+}
 struct ReassignSeatCommand: Encodable { let fromSeatNo: Int; let toSeatNo: Int }
 struct ReassignSeatResultDTO: Decodable { let fromSeatNo: Int; let toSeatNo: Int; let swapped: Bool }
 struct RemoveMemberResultDTO: Decodable { let removed: Bool }
@@ -70,7 +79,7 @@ private enum LegacyKeychainResultStore {
         _ = SecItemDelete(query(principal: principal, match: match) as CFDictionary)
     }
 }
-struct FinalizeSeats: Encodable { let dealerSeatNo: Int? }
+struct FinalizeSeats: Encodable { let dealerSeatNo: Int }
 struct MarkCommand: Encodable { let seatNo: Int; let riichi: Bool; let expectedMarkRevision: Int64 }
 private struct ResultPreviewCommand: Encodable { let resultInput: [String: JSONValue] }
 struct ResultCommand: Codable {
@@ -105,10 +114,14 @@ enum OnlineCommandPolicy {
     }
     static func wasRemoved(previous: TableSnapshot?, updated: TableSnapshot?,
                            status: Int?, principal: String?) -> Bool {
-        guard let previous = previous, let principal = principal, previous.match.status == "preparing",
+        guard let previous, let principal, previous.match.status == "preparing",
+              previous.members.contains(where: { $0.principalId == principal }) ||
               previous.seats.contains(where: { $0.principalId == principal }) else { return false }
         if status == 403 { return true }
-        return updated.map { !$0.seats.contains(where: { $0.principalId == principal }) } ?? false
+        return updated.map {
+            !$0.members.contains(where: { $0.principalId == principal }) &&
+                !$0.seats.contains(where: { $0.principalId == principal })
+        } ?? false
     }
     static func canResend(_ command: ResultCommand?, hand: CurrentHandDTO?, handID: String) -> Bool {
         guard let command = command, let hand = hand else { return false }
@@ -129,13 +142,6 @@ enum OnlineCommandPolicy {
         case "hand_already_settled":
             return "本局已由其他设备结算；请刷新牌桌核对服务端分数。"
         default: return error.localizedDescription
-        }
-    }
-    static func seatError(_ error: APIError) -> String? {
-        switch error.code {
-        case "seat_taken": return "座位已被占用，请刷新牌桌后重试。"
-        case "match_already_started": return "牌桌已经开局，无法再调整座次。"
-        default: return nil
         }
     }
     static func previewBinding(handID: String, revision: Int64, input: [String: JSONValue]) -> String? {
@@ -414,7 +420,7 @@ struct OnlineTableActions: View {
     @State private var dealer: Int?
     @State private var invitation: CheckInTokenDTO?
     @State private var invitationExpired = false
-    @State private var issuingCount = 0
+    @State private var issuingMembers: Set<String> = []
     @State private var showResult = false
     @State private var terminal: SettlementPreview?
     @State private var terminalVersion: Int?
@@ -445,10 +451,17 @@ struct OnlineTableActions: View {
     private var occupiedSeats: [SeatDTO] {
         snapshot.seats.filter { $0.principalId != nil }.sorted { $0.seatNo < $1.seatNo }
     }
+    private var drawn: Bool { snapshot.match.seatingDrawnAt != nil }
+    private var legacySeated: Bool {
+        !drawn && snapshot.seats.count == snapshot.match.playerCount &&
+            snapshot.seats.allSatisfy { $0.principalId != nil && $0.status == "checked_in" }
+    }
     private var invitationURL: String? {
         guard let invitation, !invitationExpired, snapshot.match.status == "preparing",
               let expires = InvitationClock.expiration(invitation.expiresAt), expires > Date(),
-              snapshot.seats.filter({ $0.status == "checked_in" }).count <= issuingCount else { return nil }
+              snapshot.members.count == issuingMembers.count,
+              snapshot.members.allSatisfy({ issuingMembers.contains($0.principalId) }),
+              snapshot.members.count < snapshot.match.playerCount else { return nil }
         var url = URLComponents(string: "https://riichi.p1ziyu.com/checkin/\(matchID)")!
         url.queryItems = [URLQueryItem(name: "token", value: invitation.token)]
         return url.url?.absoluteString
@@ -458,8 +471,12 @@ struct OnlineTableActions: View {
             if let error { Text(error).foregroundStyle(Brand.loss).brandPanel() }
             if !OnlineCommandPolicy.canWrite(snapshot, principal: session.principalID) &&
                 !OnlineCommandPolicy.canConfirmSettlement(snapshot, principal: session.principalID) &&
-                !(isOwner && snapshot.match.status == "preparing") {
-                Text("当前身份未签到入座，仅可只读查看牌桌；写入操作需由已签到玩家执行。")
+                !(isOwner && snapshot.match.status == "preparing") &&
+                !(snapshot.match.status == "preparing" &&
+                  snapshot.members.contains(where: { $0.principalId == session.principalID })) {
+                Text(snapshot.match.status == "preparing"
+                     ? "当前身份尚未加入牌桌，仅可只读查看；请通过邀请链接或房间码加入。"
+                     : "当前身份未签到入座，仅可只读查看牌桌；写入操作需由已签到玩家执行。")
                     .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
             }
             if let code = snapshot.match.joinCode, isOwner, snapshot.match.status == "preparing" {
@@ -513,14 +530,16 @@ struct OnlineTableActions: View {
             Button("移除", role: .destructive) {
                 guard let principal = memberToRemove else { return }
                 memberToRemove = nil
-                execute {
+                execute(seating: true) {
                     let result = try await session.api.removeMember(matchID: matchID, principalID: principal)
                     guard result.removed else { throw APIError(status: nil, message: "服务器未确认移除成员") }
                     fromSeat = nil; toSeat = nil; dealer = nil
                 }
             }
         } message: {
-            Text("移除 \(memberName) 将释放其座位；对方可使用新的有效凭证重新加入。")
+            Text(drawn
+                 ? "移除 \(memberName) 后将重置抽风结果和所有座位；人齐后需重新抽风。"
+                 : "移除 \(memberName) 后可邀请其他玩家加入。")
         }
         .sheet(isPresented: $showResult) {
             if let input = resultEntryInput {
@@ -611,98 +630,124 @@ struct OnlineTableActions: View {
         }
     }
     @ViewBuilder private var preparingControls: some View {
-            if isOwner && snapshot.match.status == "preparing" {
-                Text("访客通过签到链接或房间码直接选择空座入座；加入者会实时显示在下方。")
+        if snapshot.match.status == "preparing" {
+            Text("已加入成员 \(snapshot.members.count) / \(snapshot.match.playerCount)")
+                .font(Brand.font(.headline)).brandPanel()
+            ForEach(snapshot.members) { member in
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(member.displayName)\(member.isOwner ? " · 房主" : "")")
+                        if drawn, let seatNo = member.seatNo {
+                            Text("\(windLabel(member.wind)) · \(seatNo + 1) 号位\(member.wind == "E" ? " · 庄家（起家）" : "")")
+                                .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+                        } else if let seatNo = member.seatNo {
+                            Text("\(seatNo + 1) 号位 · 已入座")
+                                .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+                        } else {
+                            Text("等待抽风定座").font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+                        }
+                    }
+                    Spacer()
+                    if isOwner && !member.isOwner {
+                        Button("移除") {
+                            memberName = member.displayName
+                            memberToRemove = member.principalId
+                        }.disabled(busy)
+                    }
+                }.brandPanel()
+            }
+            if !isOwner && !drawn && snapshot.members.contains(where: { $0.principalId == session.principalID }) {
+                Text("已加入，等待房主抽风定座。")
                     .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
+            }
+            if isOwner {
+                if drawn {
+                    Text("起家：\(snapshot.members.first(where: { $0.wind == "E" })?.displayName ?? "东家")（抽风决定）")
+                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
+                } else if !legacySeated {
+                    Button("抽风定座") {
+                        execute(seating: true) {
+                            let _: DrawSeatsResultDTO = try await session.api.post("\(base)/seats/draw")
+                            fromSeat = nil; toSeat = nil; dealer = nil
+                        }
+                    }
+                    .disabled(busy || snapshot.members.count != snapshot.match.playerCount)
+                    .brandPanel()
+                    if snapshot.members.count < snapshot.match.playerCount {
+                        Text("还差 \(snapshot.match.playerCount - snapshot.members.count) 人")
+                            .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
+                    }
+                }
                 if !occupiedSeats.isEmpty {
-                    Group {
-                        Text("已加入成员 · 调整座次").font(Brand.font(.headline)).brandPanel()
+                    Picker("从座位", selection: $fromSeat) {
+                        Text("选择成员").tag(Int?.none)
                         ForEach(occupiedSeats) { seat in
-                            HStack {
-                                Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "未命名")")
-                                Spacer()
-                                if seat.principalId != snapshot.match.ownerPrincipalId, let principal = seat.principalId {
-                                    Button("移除") {
-                                        memberName = seat.displayName ?? "此成员"
-                                        memberToRemove = principal
-                                    }
-                                    .disabled(busy)
-                                }
-                            }
-                            .brandPanel()
+                            Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "未命名")").tag(Optional(seat.seatNo))
                         }
-                        Picker("从座位", selection: $fromSeat) {
-                            Text("选择成员").tag(Int?.none)
-                            ForEach(occupiedSeats) { seat in
-                                Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "未命名")").tag(Optional(seat.seatNo))
-                            }
-                        }.brandPanel()
-                        Picker("到座位", selection: $toSeat) {
-                            Text("选择目标").tag(Int?.none)
-                            ForEach(0..<snapshot.match.playerCount, id: \.self) { number in
-                                let occupant = snapshot.seats.first { $0.seatNo == number }
-                                Text("\(number + 1) 号位 · \(occupant?.displayName ?? "空座")").tag(Optional(number))
-                            }
-                        }.brandPanel()
-                        Button(snapshot.seats.contains { $0.seatNo == toSeat && $0.principalId != nil }
-                               ? "交换座位" : "移动到空座") {
-                            guard let fromSeat = fromSeat, let toSeat = toSeat, fromSeat != toSeat,
-                                  occupiedSeats.contains(where: { $0.seatNo == fromSeat }),
-                                  (0..<snapshot.match.playerCount).contains(toSeat) else { return }
-                            execute {
-                                do {
-                                    let _: ReassignSeatResultDTO = try await session.api.reassignSeat(matchID: matchID, from: fromSeat, to: toSeat)
-                                    self.fromSeat = nil
-                                    self.toSeat = nil
-                                    dealer = nil
-                                } catch let failure as APIError {
-                                    throw APIError(status: failure.status, code: failure.code,
-                                                   retryAfter: failure.retryAfter,
-                                                   message: OnlineCommandPolicy.seatError(failure) ?? failure.localizedDescription)
-                                }
-                            }
+                    }.brandPanel()
+                    Picker("到座位", selection: $toSeat) {
+                        Text("选择目标").tag(Int?.none)
+                        ForEach(0..<snapshot.match.playerCount, id: \.self) { number in
+                            let occupant = snapshot.seats.first { $0.seatNo == number }
+                            Text("\(number + 1) 号位 · \(occupant?.displayName ?? "空座")").tag(Optional(number))
                         }
-                        .disabled(busy || fromSeat == nil || toSeat == nil || fromSeat == toSeat ||
-                                  !occupiedSeats.contains(where: { $0.seatNo == fromSeat }))
-                        .brandPanel()
+                    }.brandPanel()
+                    Button(snapshot.seats.contains { $0.seatNo == toSeat && $0.principalId != nil }
+                           ? "交换座位" : "移动到空座") {
+                        guard let fromSeat, let toSeat, fromSeat != toSeat,
+                              occupiedSeats.contains(where: { $0.seatNo == fromSeat }),
+                              (0..<snapshot.match.playerCount).contains(toSeat) else { return }
+                        execute(seating: true) {
+                            let _: ReassignSeatResultDTO = try await session.api.reassignSeat(matchID: matchID, from: fromSeat, to: toSeat)
+                            self.fromSeat = nil
+                            self.toSeat = nil
+                            dealer = nil
+                        }
                     }
+                    .disabled(busy || fromSeat == nil || toSeat == nil || fromSeat == toSeat ||
+                              !occupiedSeats.contains(where: { $0.seatNo == fromSeat }))
+                    .brandPanel()
                 }
-                ForEach(snapshot.seats.sorted { $0.seatNo < $1.seatNo }) { seat in
-                    if seat.principalId == nil || (seat.principalId == session.principalID && seat.status != "checked_in") {
-                        Button("房主选择 \(seat.seatNo + 1) 号位") {
-                            execute {
-                                let _: [String: JSONValue] = try await session.api.post("\(base)/seats/claim", body: SeatClaim(seatNo: seat.seatNo))
-                                dealer = nil
-                            }
-                        }.disabled(busy).brandPanel()
-                    }
-                }
-                Button("生成单人签到链接（10 分钟）") {
-                    execute {
+                Button("生成玩家加入链接（10 分钟）") {
+                    execute(seating: true) {
                         invitation = nil
                         invitationExpired = false
-                        issuingCount = snapshot.seats.filter { $0.status == "checked_in" }.count
+                        issuingMembers = Set(snapshot.members.map(\.principalId))
                         invitation = try await session.api.post("\(base)/check-in-tokens")
                     }
-                }.disabled(busy).brandPanel()
+                }.disabled(busy || snapshot.members.count >= snapshot.match.playerCount).brandPanel()
                 if let invitationURL {
                     InvitationQR(link: invitationURL).brandPanel()
-                    Button("复制签到链接") { UIPasteboard.general.string = invitationURL }.brandPanel()
-                    Text("签入凭证仅供一人使用。请勿公开转发；使用或过期后需重新生成。")
+                    Button("复制加入链接") { UIPasteboard.general.string = invitationURL }.brandPanel()
+                    Text("加入凭证仅供一人使用；每位玩家加入后需重新生成。请勿公开转发。")
                         .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
                 }
-                Picker("指定起家（可选）", selection: $dealer) {
-                    Text("服务器随机").tag(Int?.none)
-                    ForEach(snapshot.seats) { seat in Text("\(seat.seatNo + 1) 号位").tag(Optional(seat.seatNo)) }
-                }.brandPanel()
-                Button("全员签到后确认座次") {
-                    execute {
-                        let _: [String: JSONValue] = try await session.api.post("\(base)/seats/finalize", body: FinalizeSeats(dealerSeatNo: dealer))
+                if legacySeated {
+                    Picker("指定起家（可选）", selection: $dealer) {
+                        Text("服务器随机").tag(Int?.none)
+                        ForEach(occupiedSeats) { seat in
+                            Text("\(seat.seatNo + 1) 号位").tag(Optional(seat.seatNo))
+                        }
+                    }.brandPanel()
+                }
+                Button(drawn ? "开局" : "确认座次并开局") {
+                    execute(seating: true) {
+                        if legacySeated, let dealer {
+                            let _: [String: JSONValue] = try await session.api.post("\(base)/seats/finalize",
+                                                                                    body: FinalizeSeats(dealerSeatNo: dealer))
+                        } else {
+                            let _: [String: JSONValue] = try await session.api.post("\(base)/seats/finalize")
+                        }
                     }
                 }
-                .disabled(busy || snapshot.seats.count != snapshot.match.playerCount || snapshot.seats.contains { $0.status != "checked_in" })
+                .disabled(busy || (!drawn && !legacySeated))
                 .brandPanel()
+                if !drawn && !legacySeated {
+                    Text("人齐后先抽风定座")
+                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
+                }
             }
+        }
     }
     @ViewBuilder private var handControls: some View {
             if OnlineCommandPolicy.canWrite(snapshot, principal: session.principalID) {
@@ -790,7 +835,7 @@ struct OnlineTableActions: View {
         reviewedHand = nil
         pendingCommand = nil
     }
-    private func execute(refresh: Bool = true, _ operation: @escaping () async throws -> Void) {
+    private func execute(refresh: Bool = true, seating: Bool = false, _ operation: @escaping () async throws -> Void) {
         guard !busy else { return }
         busy = true; error = nil
         Task {
@@ -800,7 +845,11 @@ struct OnlineTableActions: View {
                    OnlineCommandPolicy.refreshAfter(failure) || OnlineCommandPolicy.mustClearVisibleTable(failure) {
                     await onUpdated()
                 }
-                self.error = (error as? APIError).map(OnlineCommandPolicy.resultError) ?? error.localizedDescription
+                if let failure = error as? APIError {
+                    self.error = seating ? APIErrorCopy.text(failure) : OnlineCommandPolicy.resultError(failure)
+                } else {
+                    self.error = error.localizedDescription
+                }
             }
             busy = false
         }

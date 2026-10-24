@@ -43,13 +43,6 @@ final class JoinFlowTests: XCTestCase {
         return APIClient(transport: URLSession(configuration: configuration), bearerOverride: "test-bearer")
     }
 
-    func testDealerRandomOmittedAndExplicitZero() throws {
-        let random = try JSONSerialization.jsonObject(with: JSONEncoder().encode(FinalizeSeats(dealerSeatNo: nil))) as! [String: Any]
-        XCTAssertNil(random["dealerSeatNo"])
-        let explicit = try JSONSerialization.jsonObject(with: JSONEncoder().encode(FinalizeSeats(dealerSeatNo: 0))) as! [String: Int]
-        XCTAssertEqual(explicit["dealerSeatNo"], 0)
-    }
-
     func testMarkCASLimitsAndLowPoints() throws {
         let declare = HandSeatDTO(seatNo: 0, isRiichi: false, riichiChangeUsage: RiichiUsageDTO(declares: 1, cancels: 0))
         let exhausted = HandSeatDTO(seatNo: 0, isRiichi: false, riichiChangeUsage: RiichiUsageDTO(declares: 2, cancels: 0))
@@ -111,61 +104,74 @@ final class JoinFlowTests: XCTestCase {
         ] { XCTAssertNil(CheckInDestination(invalid), invalid) }
     }
 
-    func testPreviewOccupancyMapsZeroBasedSeatsAndMissingSlots() throws {
-        let preview = try JSONDecoder().decode(CheckInSeatsDTO.self, from: Data("""
+    func testCheckInSeatsSeparatesMembersFromUndrawnSeats() throws {
+        let room = try JSONDecoder().decode(CheckInSeatsDTO.self, from: Data("""
         {"match":{"id":"\(match)","playerCount":4,"status":"preparing"},
-         "seats":[{"seatNo":2,"principalId":"guest","displayName":"访客","status":"checked_in"},
-                  {"seatNo":0,"principalId":"owner","displayName":"桌主","status":"checked_in"}]}
+         "caller":{"principalId":"guest","isOwner":false,"isMember":true},
+         "members":[
+           {"principalId":"owner","displayName":"桌主","isOwner":true,"seatNo":null,"wind":null},
+           {"principalId":"guest","displayName":"访客","isOwner":false,"seatNo":null,"wind":null}],
+         "seating":{"drawn":false,"dealerSeatNo":null,"memberCount":2,"seatedCount":0},
+         "seats":[]}
         """.utf8))
-        XCTAssertEqual(preview.match.playerCount, 4)
-        XCTAssertEqual(preview.seat(at: 0)?.displayName, "桌主")
-        XCTAssertNil(preview.seat(at: 1)?.principalId)
-        XCTAssertEqual(preview.seat(at: 2)?.displayName, "访客")
-        XCTAssertNil(preview.seat(at: 3)?.principalId)
-        XCTAssertEqual(preview.seats.filter { $0.principalId != nil }.count, 2)
+        XCTAssertEqual(room.match.playerCount, 4)
+        XCTAssertEqual(room.match.status, "preparing")
+        XCTAssertEqual(room.caller.principalId, "guest")
+        XCTAssertFalse(room.caller.isOwner)
+        XCTAssertTrue(room.caller.isMember)
+        XCTAssertEqual(room.members.map(\.displayName), ["桌主", "访客"])
+        XCTAssertTrue(room.members[0].isOwner)
+        XCTAssertNil(room.members[0].seatNo)
+        XCTAssertNil(room.members[1].wind)
+        XCTAssertFalse(room.seating.drawn)
+        XCTAssertNil(room.seating.dealerSeatNo)
+        XCTAssertEqual(room.seating.memberCount, 2)
+        XCTAssertEqual(room.seating.seatedCount, 0)
+        XCTAssertTrue(room.seats.isEmpty)
     }
 
-    @MainActor func testDirectPreviewExplicitAndAutoCheckInAndIdempotentResponse() async throws {
+    @MainActor func testRoomPreviewAndJoinWithoutSeatClaim() async throws {
         var requests: [URLRequest] = []
         let client = client { request in
             requests.append(request)
             if request.httpMethod == "GET" {
                 return (200, [:], Data("""
                 {"match":{"id":"\(self.match)","playerCount":4,"status":"preparing"},
-                 "seats":[{"seatNo":0,"principalId":"owner","displayName":"桌主","status":"checked_in"}]}
+                 "caller":{"principalId":"guest","isOwner":false,"isMember":false},
+                 "members":[{"principalId":"owner","displayName":"桌主","isOwner":true,"seatNo":null,"wind":null}],
+                 "seating":{"drawn":false,"dealerSeatNo":null,"memberCount":1,"seatedCount":0},
+                 "seats":[]}
                 """.utf8))
             }
-            return (200, [:], Data(#"{"seat":{"seatNo":2},"grantId":"grant-1"}"#.utf8))
+            return (200, [:], Data(#"{"member":{"principalId":"guest","displayName":"访客"},"seated":false,"grantId":"grant-1"}"#.utf8))
         }
-        let preview = try await client.checkInSeats(matchID: match, token: "a&b +")
-        XCTAssertEqual(preview.seat(at: 0)?.displayName, "桌主")
-        let explicit = try await client.checkIn(matchID: match, command: CheckInCommand(token: "valid", seatNo: 2, alias: "访客"))
-        let auto = try await client.checkIn(matchID: match, command: CheckInCommand(token: "valid", seatNo: nil, alias: nil))
-        let repeated = try await client.checkIn(matchID: match, command: CheckInCommand(token: "valid", seatNo: 2, alias: "访客"))
-        XCTAssertEqual(explicit.seat.seatNo, 2)
-        XCTAssertEqual(explicit.grantId, "grant-1")
-        XCTAssertEqual(auto.seat.seatNo, explicit.seat.seatNo)
-        XCTAssertEqual(repeated.seat.seatNo, explicit.seat.seatNo)
-        XCTAssertEqual(repeated.grantId, explicit.grantId)
-        XCTAssertEqual(requests.map { $0.httpMethod }, ["GET", "POST", "POST", "POST"])
+        let room = try await client.checkInSeats(matchID: match, token: "a&b +")
+        XCTAssertEqual(room.caller.principalId, "guest")
+        XCTAssertFalse(room.caller.isMember)
+        XCTAssertEqual(room.members.map(\.principalId), ["owner"])
+        XCTAssertEqual(room.seating.memberCount, 1)
+        let joined = try await client.checkIn(matchID: match, command: CheckInCommand(token: "valid", alias: "访客"))
+        let repeated = try await client.checkIn(matchID: match, command: CheckInCommand(token: "valid", alias: "访客"))
+        XCTAssertEqual(joined.member.principalId, "guest")
+        XCTAssertEqual(joined.member.displayName, "访客")
+        XCTAssertFalse(joined.seated)
+        XCTAssertEqual(joined.grantId, "grant-1")
+        XCTAssertEqual(repeated.member.principalId, joined.member.principalId)
+        XCTAssertEqual(repeated.grantId, joined.grantId)
+        XCTAssertEqual(requests.map { $0.httpMethod }, ["GET", "POST", "POST"])
         XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer test-bearer" })
         XCTAssertEqual(requests.map { $0.url!.path }, [
             "/api/matches/\(match)/check-in-seats",
-            "/api/matches/\(match)/check-ins",
             "/api/matches/\(match)/check-ins",
             "/api/matches/\(match)/check-ins"
         ])
         XCTAssertEqual(URLComponents(url: requests[0].url!, resolvingAgainstBaseURL: false)?
             .queryItems?.first(where: { $0.name == "token" })?.value, "a&b +")
-        let explicitJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[1].httpBody!) as? [String: Any])
-        XCTAssertEqual(explicitJSON["token"] as? String, "valid")
-        XCTAssertEqual(explicitJSON["seatNo"] as? Int, 2)
-        XCTAssertEqual(explicitJSON["alias"] as? String, "访客")
-        XCTAssertEqual(requests[3].httpBody, requests[1].httpBody)
-        let autoJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[2].httpBody!) as? [String: Any])
-        XCTAssertEqual(autoJSON["token"] as? String, "valid")
-        XCTAssertNil(autoJSON["seatNo"])
-        XCTAssertNil(autoJSON["alias"])
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[1].httpBody!) as? [String: Any])
+        XCTAssertEqual(body["token"] as? String, "valid")
+        XCTAssertEqual(body["alias"] as? String, "访客")
+        XCTAssertNil(body["seatNo"])
+        XCTAssertEqual(requests[2].httpBody, requests[1].httpBody)
     }
 
     @MainActor func testCodeLookupReturnsShortLivedCheckInToken() async throws {
@@ -196,35 +202,36 @@ final class JoinFlowTests: XCTestCase {
             XCTFail("Rate-limited lookup must fail")
         } catch let error as APIError {
             XCTAssertEqual(error.retryAfter, 37)
-            XCTAssertEqual(JoinFlow.codeError(error), "房间码查询过于频繁，请在 37 秒后重试。")
+            XCTAssertEqual(APIErrorCopy.text(error), "尝试过于频繁，请稍后再试。")
         }
         do {
             let _: CheckInSeatsDTO = try await client.checkInSeats(matchID: match, token: "invalid")
             XCTFail("Invalid token must fail before joining")
         } catch let error as APIError {
-            XCTAssertTrue(JoinFlow.tokenExpired(error))
-            XCTAssertEqual(JoinFlow.joinError(error), "签到凭证无效或已过期。请重新输入房间码，或向桌主索取新的签到链接。")
+            XCTAssertEqual(error.code, "invalid_token")
+            XCTAssertEqual(APIErrorCopy.text(error), "签到链接无效或已过期，请房主重新分享链接，或使用房间码。")
         }
     }
 
-    @MainActor func testConsumedPreviewCanRecoverExistingCheckedInSeat() async throws {
+    @MainActor func testConsumedInviteCanRecoverExistingRoomMembership() async throws {
         var requests: [URLRequest] = []
         let client = client { request in
             requests.append(request)
             if request.httpMethod == "GET" {
                 return (400, [:], Data(#"{"error":"token_consumed_or_expired","message":"Consumed"}"#.utf8))
             }
-            return (200, [:], Data(#"{"seat":{"seatNo":1},"grantId":"existing-grant"}"#.utf8))
+            return (200, [:], Data(#"{"member":{"principalId":"guest","displayName":"访客"},"seated":false,"grantId":"existing-grant"}"#.utf8))
         }
         do {
             let _: CheckInSeatsDTO = try await client.checkInSeats(matchID: match, token: "signed-token")
-            XCTFail("Consumed invitation should not reveal the seat preview")
+            XCTFail("Consumed invitation should not reveal the room")
         } catch let error as APIError {
             XCTAssertEqual(error.code, "token_consumed_or_expired")
         }
         let result = try await client.checkIn(
-            matchID: match, command: CheckInCommand(token: "signed-token", seatNo: nil, alias: nil))
-        XCTAssertEqual(result.seat.seatNo, 1)
+            matchID: match, command: CheckInCommand(token: "signed-token", alias: nil))
+        XCTAssertEqual(result.member.principalId, "guest")
+        XCTAssertFalse(result.seated)
         XCTAssertEqual(result.grantId, "existing-grant")
         XCTAssertEqual(requests.map { $0.url!.path }, [
             "/api/matches/\(match)/check-in-seats", "/api/matches/\(match)/check-ins"
@@ -235,30 +242,61 @@ final class JoinFlowTests: XCTestCase {
         XCTAssertNil(body["alias"])
     }
 
-    @MainActor func testDirectJoinSeatTakenFullStartedAndExpiredErrors() async throws {
+    @MainActor func testJoinErrorCodesUseSharedSafeCopy() async throws {
         for (code, status, message) in [
-            ("seat_taken", 409, "座位已被占用，请重新选择空座。"),
-            ("match_full", 409, "牌桌已满，无法加入。"),
-            ("match_already_started", 409, "牌桌已经开局，无法加入。"),
-            ("token_consumed_or_expired", 400, "签到凭证无效或已过期。请重新输入房间码，或向桌主索取新的签到链接。"),
-            ("guest_already_bound", 403, "当前临时访客已绑定其他牌桌，请使用账户身份加入。")
+            ("match_full", 409, "牌桌已满员，无法加入。"),
+            ("match_already_started", 409, "牌局已开始，无法加入。"),
+            ("token_consumed_or_expired", 400, "签到链接无效或已过期，请房主重新分享链接，或使用房间码。"),
+            ("owner_auto_check_in", 403, "你是房主，已为你打开牌桌。"),
+            ("guest_already_bound", 403, "当前访客身份已绑定其他牌桌。")
         ] {
             let client = client { _ in
-                (status, [:], Data(#"{"error":"\#(code)","message":"Rejected"}"#.utf8))
+                (status, [:], Data(#"{"error":"\#(code)","message":"SERVER PRIVATE MESSAGE"}"#.utf8))
             }
             do {
-                let _ = try await client.checkIn(matchID: match, command: CheckInCommand(token: "token", seatNo: 1, alias: nil))
+                let _ = try await client.checkIn(matchID: match, command: CheckInCommand(token: "token", alias: nil))
                 XCTFail("\(code) must fail")
             } catch let error as APIError {
                 XCTAssertEqual(error.status, status)
                 XCTAssertEqual(error.code, code)
-                XCTAssertEqual(JoinFlow.joinError(error), message)
+                XCTAssertEqual(APIErrorCopy.text(error), message)
+                XCTAssertFalse(APIErrorCopy.text(error).contains("SERVER PRIVATE MESSAGE"))
             }
         }
-        let missing = APIError(status: 404, code: "join_code_not_found", message: "Missing")
-        XCTAssertEqual(JoinFlow.codeError(missing), "房间码不存在或已失效，请向房主核对。")
-        XCTAssertEqual(JoinFlow.codeError(APIError(status: 409, code: "match_already_started", message: "Started")),
-                       "牌桌已经开局，无法通过房间码加入。")
+        XCTAssertEqual(APIErrorCopy.text(APIError(status: 404, code: "join_code_not_found", message: "Missing")),
+                       "房间码不正确，或牌桌已结束。")
+        let unknown = APIError(status: 418, code: "future_server_error", message: "SERVER PRIVATE MESSAGE")
+        XCTAssertEqual(APIErrorCopy.text(unknown), "操作失败，请稍后重试。")
+        XCTAssertFalse(APIErrorCopy.text(unknown).contains(unknown.message))
+    }
+
+    func testDrawResultAndTableSnapshotDecodeSeatAssignments() throws {
+        let draw = try JSONDecoder().decode(DrawSeatsResultDTO.self, from: Data("""
+        {"dealerSeatNo":1,"seats":[
+          {"seatNo":0,"principalId":"guest","displayName":"访客","wind":"N"},
+          {"seatNo":1,"principalId":"owner","displayName":"桌主","wind":"E"},
+          {"seatNo":2,"principalId":"third","displayName":"第三位","wind":"S"},
+          {"seatNo":3,"principalId":"fourth","displayName":"第四位","wind":"W"}]}
+        """.utf8))
+        XCTAssertEqual(draw.dealerSeatNo, 1)
+        XCTAssertEqual(draw.seats.map(\.seatNo), [0, 1, 2, 3])
+        XCTAssertEqual(draw.seats.map(\.wind), ["N", "E", "S", "W"])
+        XCTAssertEqual(draw.seats[1].principalId, "owner")
+        XCTAssertEqual(draw.seats[0].displayName, "访客")
+
+        let table = try JSONDecoder().decode(TableSnapshot.self, from: Data("""
+        {"match":{"id":"\(match)","status":"preparing","ownerPrincipalId":"owner",
+                  "playerCount":4,"seatingDrawnAt":"2026-10-24T12:00:00Z","dealerSeatNo":1},
+         "seats":[{"seatNo":0,"principalId":"guest","status":"checked_in"},
+                  {"seatNo":1,"principalId":"owner","status":"checked_in"}],
+         "members":[{"principalId":"owner","displayName":"桌主","isOwner":true,"seatNo":1,"wind":"E"},
+                    {"principalId":"guest","displayName":"访客","isOwner":false,"seatNo":0,"wind":"N"}]}
+        """.utf8))
+        XCTAssertEqual(table.match.seatingDrawnAt, "2026-10-24T12:00:00Z")
+        XCTAssertEqual(table.match.dealerSeatNo, 1)
+        XCTAssertEqual(table.members.map(\.principalId), ["owner", "guest"])
+        XCTAssertEqual(table.members.map(\.seatNo), [1, 0])
+        XCTAssertEqual(table.members.map(\.wind), ["E", "N"])
     }
 
     @MainActor func testHostReassignMoveSwapAndRemoveShapes() async throws {
@@ -468,6 +506,24 @@ final class JoinFlowTests: XCTestCase {
                                                         status: 403, principal: "spectator-unknown"))
         XCTAssertFalse(OnlineCommandPolicy.wasRemoved(previous: snapshot, updated: nil,
                                                         status: 403, principal: "participant"))
+    }
+
+    func testSeatlessMemberRemovalRevokesPreparingRoom() throws {
+        let previous = try JSONDecoder().decode(TableSnapshot.self, from: Data("""
+        {"match":{"id":"\(match)","status":"preparing","ownerPrincipalId":"owner","playerCount":4},
+         "members":[{"principalId":"owner","displayName":"桌主","isOwner":true,"seatNo":null,"wind":null},
+                    {"principalId":"guest","displayName":"访客","isOwner":false,"seatNo":null,"wind":null}],
+         "seats":[]}
+        """.utf8))
+        let updated = try JSONDecoder().decode(TableSnapshot.self, from: Data("""
+        {"match":{"id":"\(match)","status":"preparing","ownerPrincipalId":"owner","playerCount":4},
+         "members":[{"principalId":"owner","displayName":"桌主","isOwner":true,"seatNo":null,"wind":null}],
+         "seats":[]}
+        """.utf8))
+        XCTAssertTrue(OnlineCommandPolicy.wasRemoved(previous: previous, updated: updated,
+                                                      status: nil, principal: "guest"))
+        XCTAssertFalse(OnlineCommandPolicy.wasRemoved(previous: previous, updated: updated,
+                                                       status: nil, principal: "owner"))
     }
 
     func testPendingFilePreservesOriginalBytesAndPrincipalDraftIsolation() throws {

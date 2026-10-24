@@ -18,6 +18,32 @@ struct APIError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+enum APIErrorCopy {
+    static func text(_ error: APIError) -> String {
+        switch error.code {
+        case "match_full": return "牌桌已满员，无法加入。"
+        case "match_already_started": return "牌局已开始，无法加入。"
+        case "invalid_token", "token_consumed_or_expired", "missing_token":
+            return "签到链接无效或已过期，请房主重新分享链接，或使用房间码。"
+        case "seat_claim_retired": return "入座方式已更新，请重新加入牌桌。"
+        case "owner_auto_check_in": return "你是房主，已为你打开牌桌。"
+        case "guest_already_bound": return "当前访客身份已绑定其他牌桌。"
+        case "room_not_full": return "人数尚未到齐，无法抽风定座。"
+        case "seating_already_drawn": return "已完成抽风定座。"
+        case "seating_already_complete": return "座位已确定，可直接开局。"
+        case "forbidden": return "只有房主可以执行此操作。"
+        case "member_not_found": return "成员已不在牌桌中。"
+        case "seat_empty": return "该座位暂无成员。"
+        case "invalid_seat": return "座位选择无效。"
+        case "rate_limited": return "尝试过于频繁，请稍后再试。"
+        case "join_code_not_found": return "房间码不正确，或牌桌已结束。"
+        case "incomplete_check_ins": return "成员尚未全部就座，无法开局。"
+        case "match_not_found": return "牌桌不存在或已被删除。"
+        default: return "操作失败，请稍后重试。"
+        }
+    }
+}
+
 private struct ErrorResponse: Decodable {
     let message: String?
     let error: String?

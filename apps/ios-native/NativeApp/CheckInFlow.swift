@@ -37,17 +37,7 @@ struct CheckInDestination {
 
 struct CheckInCommand: Encodable {
     let token: String
-    let seatNo: Int?
     let alias: String?
-
-    private enum CodingKeys: String, CodingKey { case token, seatNo, alias }
-
-    func encode(to encoder: Encoder) throws {
-        var fields = encoder.container(keyedBy: CodingKeys.self)
-        try fields.encode(token, forKey: .token)
-        try fields.encodeIfPresent(seatNo, forKey: .seatNo)
-        try fields.encodeIfPresent(alias, forKey: .alias)
-    }
 }
 
 @MainActor
@@ -74,28 +64,6 @@ enum JoinFlow {
     }
     static func tokenExpired(_ error: APIError) -> Bool {
         error.status == 400 && (error.code == "token_consumed_or_expired" || error.code == "invalid_token")
-    }
-    static func joinError(_ error: APIError) -> String? {
-        if tokenExpired(error) { return "签到凭证无效或已过期。请重新输入房间码，或向桌主索取新的签到链接。" }
-        switch error.code {
-        case "seat_taken": return "座位已被占用，请重新选择空座。"
-        case "match_full": return "牌桌已满，无法加入。"
-        case "match_already_started": return "牌桌已经开局，无法加入。"
-        case "guest_already_bound": return "当前临时访客已绑定其他牌桌，请使用账户身份加入。"
-        default: return nil
-        }
-    }
-    static func codeError(_ error: APIError) -> String? {
-        if error.status == 404 && error.code == "join_code_not_found" {
-            return "房间码不存在或已失效，请向房主核对。"
-        }
-        if error.status == 409 && error.code == "match_already_started" {
-            return "牌桌已经开局，无法通过房间码加入。"
-        }
-        if error.status == 429 {
-            return "房间码查询过于频繁，请在 \(Int(error.retryAfter ?? 60)) 秒后重试。"
-        }
-        return nil
     }
 }
 
@@ -161,8 +129,8 @@ struct CheckInScreen: View {
     @State private var preview: CheckInSeatsDTO?
     @State private var previewKey: String?
     @State private var recoverableKey: String?
-    @State private var selectedSeat: Int?
-    @State private var joinedSeat: Int?
+    @State private var joined = false
+    @State private var waitingMembers: [MatchMemberDTO]?
     @State private var seatsRequest = 0
     let link: String?
     let onCompleted: (String) -> Void
@@ -185,9 +153,12 @@ struct CheckInScreen: View {
         guard let destination else { return nil }
         return "\(destination.matchID):\(destination.token)"
     }
+    private func memberRows(for preview: CheckInSeatsDTO) -> [MatchMemberDTO] {
+        joined ? (waitingMembers ?? preview.members) : preview.members
+    }
     var body: some View {
         Form {
-            if joinedSeat == nil {
+            if !joined {
                 Section {
                     SecureField("HTTPS 签到链接", text: $input, prompt: Text("HTTPS 签到链接").foregroundColor(Brand.muted))
                         .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
@@ -196,7 +167,6 @@ struct CheckInScreen: View {
                             resolved = nil
                             preview = nil
                             previewKey = nil
-                            selectedSeat = nil
                         }
                         .brandPanel()
                     Button("粘贴剪贴板中的链接") { input = UIPasteboard.general.string ?? "" }.brandPanel()
@@ -218,13 +188,12 @@ struct CheckInScreen: View {
                             input = ""
                             preview = nil
                             previewKey = nil
-                            selectedSeat = nil
                         }
                         .accessibilityIdentifier("checkIn.roomCode").brandPanel()
                     Button("换取签到凭证") { Task { await lookupCode() } }
                         .disabled(!session.authenticated || busy || code.isEmpty)
                         .accessibilityIdentifier("checkIn.redeemCode").brandPanel()
-                    Text("房间码换取短时签到凭证；选择空座后即可直接入座。")
+                    Text("房间码换取短时签到凭证；加入后由房主抽风定座。")
                         .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
                 } header: { BrandSectionHeader("通过房间码") }
             }
@@ -235,9 +204,9 @@ struct CheckInScreen: View {
                 }
             }
             if let notice {
-                Section { Text(notice).foregroundStyle(joinedSeat == nil ? Brand.gold : Brand.gain).brandPanel() }
+                Section { Text(notice).foregroundStyle(joined ? Brand.gain : Brand.gold).brandPanel() }
             }
-            joinedSeatControls
+            joinControls
         }
         .scrollContentBackground(.hidden)
         .foregroundStyle(Brand.text)
@@ -248,12 +217,13 @@ struct CheckInScreen: View {
             preview = nil
             previewKey = nil
             recoverableKey = nil
-            selectedSeat = nil
-            if destination != nil && session.authenticated && joinedSeat == nil { await loadSeats() }
+            waitingMembers = nil
+            if destination != nil && session.authenticated && !joined { await loadSeats() }
         }
         .onChange(of: link) { _, newLink in
             guard let newLink else { return }
-            joinedSeat = nil
+            joined = false
+            waitingMembers = nil
             notice = nil
             resolved = nil
             input = newLink
@@ -270,54 +240,61 @@ struct CheckInScreen: View {
             }
         }
     }
-    @ViewBuilder private var joinedSeatControls: some View {
-        if let joinedSeat = joinedSeat, let destination = destination {
+    @ViewBuilder private var joinControls: some View {
+        if let destination, session.authenticated {
             Section {
-                Text("你在 \(joinedSeat + 1) 号位，等待房主开局。").brandPanel()
-                Button("查看牌桌") { onCompleted(destination.matchID) }
-                    .accessibilityIdentifier("checkIn.viewTable").brandPanel()
-            } header: { BrandSectionHeader("已加入牌桌") }
-        } else if let destinationForSeats = destination, session.authenticated {
-            Section {
-                if loadingSeats { ProgressView("读取座位中…").brandPanel() }
-                if let seatsPreview = preview, previewKey == destinationKey, seatsPreview.match.id == destinationForSeats.matchID {
-                    let occupiedCount = seatsPreview.seats.reduce(0) { $0 + ($1.principalId == nil ? 0 : 1) }
-                    let fullForGuest = occupiedCount >= seatsPreview.match.playerCount &&
-                        !seatsPreview.seats.contains(where: { $0.principalId == session.principalID })
-                    Text("\(seatsPreview.match.playerCount) 人牌桌 · \(seatsPreview.match.status == "preparing" ? "待开局" : "已开局")")
+                if loadingSeats { ProgressView("读取成员中…").brandPanel() }
+                if let preview, previewKey == destinationKey, preview.match.id == destination.matchID {
+                    let members = memberRows(for: preview)
+                    Text("成员 \(members.count)/\(preview.match.playerCount)")
                         .foregroundStyle(Brand.muted).brandPanel()
-                    Picker("座位", selection: $selectedSeat) {
-                        Text("自动选择第一个空座").tag(Int?.none)
-                        ForEach(0..<seatsPreview.match.playerCount, id: \.self) { number in
-                            let seat = seatsPreview.seat(at: number)
-                            Text("\(number + 1) 号位 · \(seat?.principalId == nil ? "空座" : seat?.displayName ?? "已占用")")
-                                .tag(Optional(number))
-                                .disabled(seat?.principalId != nil)
+                    ForEach(members) { member in
+                        HStack {
+                            Text(member.displayName)
+                            if member.isOwner { Text("房主").foregroundStyle(Brand.gold) }
+                        }.brandPanel()
+                    }
+                    if joined || preview.caller.isMember {
+                        Text("已加入牌桌，等待房主抽风定座")
+                            .accessibilityIdentifier("checkIn.waiting").brandPanel()
+                        Button("查看牌桌") { onCompleted(destination.matchID) }
+                            .accessibilityIdentifier("checkIn.viewTable").brandPanel()
+                    } else if !preview.caller.isOwner {
+                        if preview.seating.memberCount >= preview.match.playerCount {
+                            Text("牌桌已满员").foregroundStyle(Brand.gold).brandPanel()
+                        }
+                        TextField("昵称（可选；更新个人展示名）", text: $alias,
+                                  prompt: Text("昵称（可选；更新个人展示名）").foregroundColor(Brand.muted))
+                            .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
+                            .textInputAutocapitalization(.words).brandPanel()
+                        Button(busy ? "正在加入…" : "加入牌桌") { Task { await checkIn() } }
+                            .disabled(busy || loadingSeats || preview.match.status != "preparing" ||
+                                      preview.seating.memberCount >= preview.match.playerCount)
+                            .accessibilityIdentifier("checkIn.join").brandPanel()
+                    }
+                } else if joined {
+                    if let waitingMembers {
+                        ForEach(waitingMembers) { member in
+                            HStack {
+                                Text(member.displayName)
+                                if member.isOwner { Text("房主").foregroundStyle(Brand.gold) }
+                            }.brandPanel()
                         }
                     }
-                    .accessibilityIdentifier("checkIn.seatPicker").brandPanel()
-                    Text("已有成员：\(occupiedCount) / \(seatsPreview.match.playerCount)。自动选择会在提交时取最低空座。")
-                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
-                    if fullForGuest {
-                        Text("牌桌已满，暂无可选座位。").foregroundStyle(Brand.gold).brandPanel()
-                    }
-                    TextField("昵称（可选；更新个人展示名）", text: $alias,
-                              prompt: Text("昵称（可选；更新个人展示名）").foregroundColor(Brand.muted))
-                        .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
-                        .textInputAutocapitalization(.words)
-                        .brandPanel()
-                    Button(busy ? "正在签到…" : "确认座位并加入") { Task { await checkIn() } }
-                        .disabled(busy || loadingSeats || seatsPreview.match.status != "preparing" || fullForGuest ||
-                                  (selectedSeat.map { seatsPreview.seat(at: $0)?.principalId != nil } ?? false))
-                        .accessibilityIdentifier("checkIn.confirmSeat").brandPanel()
+                    Text("已加入牌桌，等待房主抽风定座")
+                        .accessibilityIdentifier("checkIn.waiting").brandPanel()
+                    Button("查看牌桌") { onCompleted(destination.matchID) }
+                        .accessibilityIdentifier("checkIn.viewTable").brandPanel()
                 }
-                if recoverableKey == destinationKey, preview == nil {
-                    Button("已签到？找回座位") { Task { await recoverCheckIn() } }
+                if recoverableKey == destinationKey && preview == nil && !joined {
+                    Button("已加入？找回成员身份") { Task { await recoverCheckIn() } }
                         .disabled(busy || loadingSeats).brandPanel()
                 }
-                Button("刷新座位") { Task { await loadSeats() } }
-                    .disabled(loadingSeats || busy).brandPanel()
-            } header: { BrandSectionHeader("选择座位") }
+                if !joined {
+                    Button("刷新成员") { Task { await loadSeats() } }
+                        .disabled(loadingSeats || busy).brandPanel()
+                }
+            } header: { BrandSectionHeader(joined ? "已加入牌桌" : "加入牌桌") }
         }
     }
     private func requestCamera() {
@@ -347,7 +324,7 @@ struct CheckInScreen: View {
             resolved = found
         } catch let failure as APIError {
             guard JoinFlow.canonicalCode(code) == canonical, input.isEmpty else { return }
-            notice = JoinFlow.codeError(failure) ?? failure.localizedDescription
+            notice = APIErrorCopy.text(failure)
         } catch {
             guard JoinFlow.canonicalCode(code) == canonical, input.isEmpty else { return }
             notice = error.localizedDescription
@@ -368,17 +345,19 @@ struct CheckInScreen: View {
             preview = seats
             previewKey = key
             recoverableKey = nil
-            if let ownSeat = seats.seats.first(where: { $0.principalId == session.principalID && $0.status == "checked_in" }) {
-                joinedSeat = ownSeat.seatNo
-                notice = "已加入牌桌。"
+            if seats.caller.isOwner {
+                onCompleted(destination.matchID)
+                return
             }
-            if let selectedSeat, seats.seat(at: selectedSeat)?.principalId != nil { self.selectedSeat = nil }
-            if seats.match.status != "preparing" { notice = "牌桌已经开局，无法加入。" }
+            joined = seats.caller.isMember
+            if seats.match.status != "preparing" {
+                notice = APIErrorCopy.text(APIError(status: 409, code: "match_already_started", message: ""))
+            }
         } catch let failure as APIError {
             guard seatsRequest == request, destinationKey == key else { return }
             preview = nil; previewKey = nil
             recoverableKey = failure.code == "token_consumed_or_expired" ? key : nil
-            notice = JoinFlow.joinError(failure) ?? failure.localizedDescription
+            notice = APIErrorCopy.text(failure)
         } catch {
             guard seatsRequest == request, destinationKey == key else { return }
             preview = nil; previewKey = nil
@@ -391,16 +370,21 @@ struct CheckInScreen: View {
         busy = true
         defer { busy = false }
         do {
-            let result = try await session.api.checkIn(
+            let result: CheckInResultDTO = try await session.api.checkIn(
                 matchID: destination.matchID,
-                command: CheckInCommand(token: destination.token, seatNo: nil, alias: nil))
+                command: CheckInCommand(token: destination.token, alias: nil))
             guard destinationKey == key else { return }
-            joinedSeat = result.seat.seatNo
+            joined = true
             recoverableKey = nil
-            notice = "已找回签到座位。"
+            notice = nil
+            waitingMembers = [MatchMemberDTO(principalId: result.member.principalId,
+                                             displayName: result.member.displayName, isOwner: false,
+                                             seatNo: nil, wind: nil)]
+            Task { await refreshWaitingMembers(matchID: destination.matchID, key: key) }
         } catch let failure as APIError {
             guard destinationKey == key else { return }
-            notice = JoinFlow.joinError(failure) ?? failure.localizedDescription
+            if failure.code == "owner_auto_check_in" { onCompleted(destination.matchID); return }
+            notice = APIErrorCopy.text(failure)
         } catch {
             guard destinationKey == key else { return }
             notice = error.localizedDescription
@@ -409,26 +393,30 @@ struct CheckInScreen: View {
     private func checkIn() async {
         guard !busy, !loadingSeats, let destination, let key = destinationKey,
               let current = preview, previewKey == key, current.match.status == "preparing",
-              selectedSeat.map({ current.seat(at: $0)?.principalId == nil }) ?? true else { return }
+              !current.caller.isOwner, !current.caller.isMember,
+              current.seating.memberCount < current.match.playerCount else { return }
         busy = true; notice = nil
         defer { busy = false }
         do {
             let chosenAlias = alias.trimmingCharacters(in: .whitespacesAndNewlines)
-            let result = try await session.api.checkIn(
+            let result: CheckInResultDTO = try await session.api.checkIn(
                 matchID: destination.matchID,
-                command: CheckInCommand(token: destination.token, seatNo: selectedSeat,
-                                        alias: chosenAlias.isEmpty ? nil : chosenAlias))
+                command: CheckInCommand(token: destination.token, alias: chosenAlias.isEmpty ? nil : chosenAlias))
             guard destinationKey == key else { return }
-            joinedSeat = result.seat.seatNo
-            notice = "签到成功，已入座。"
+            joined = true
+            notice = nil
+            waitingMembers = current.members.contains(where: { $0.principalId == result.member.principalId })
+                ? current.members
+                : current.members + [MatchMemberDTO(principalId: result.member.principalId,
+                                                    displayName: result.member.displayName, isOwner: false,
+                                                    seatNo: nil, wind: nil)]
+            Task { await refreshWaitingMembers(matchID: destination.matchID, key: key) }
         } catch let failure as APIError {
             guard destinationKey == key else { return }
-            notice = JoinFlow.joinError(failure) ??
-                (failure.status == 429 ? "请求过于频繁，请在 \(Int(failure.retryAfter ?? 60)) 秒后重试。" : failure.localizedDescription)
-            if failure.code == "seat_taken" {
-                selectedSeat = nil
-                await loadSeats()
-            } else if JoinFlow.tokenExpired(failure) {
+            if failure.code == "owner_auto_check_in" { onCompleted(destination.matchID); return }
+            notice = APIErrorCopy.text(failure)
+            if failure.code == "match_full" { await loadSeats() }
+            if JoinFlow.tokenExpired(failure) {
                 preview = nil; previewKey = nil
                 resolved = nil; input = ""
             }
@@ -436,5 +424,10 @@ struct CheckInScreen: View {
             guard destinationKey == key else { return }
             notice = error.localizedDescription
         }
+    }
+    private func refreshWaitingMembers(matchID: String, key: String) async {
+        guard let updated: TableSnapshot = try? await session.api.get("/api/matches/\(matchID)"),
+              destinationKey == key, joined, updated.match.id == matchID else { return }
+        waitingMembers = updated.members
     }
 }
