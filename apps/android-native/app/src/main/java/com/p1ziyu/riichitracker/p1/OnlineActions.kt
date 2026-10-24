@@ -10,9 +10,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.util.UUID
 
-fun finalizeBody(dealerSeatNo: Int?): String = buildJsonObject {
-    if (dealerSeatNo != null) put("dealerSeatNo", dealerSeatNo)
-}.toString()
 
 fun canChangeRiichi(seat: HandSeatDto, allowLowPointRiichi: Boolean): Boolean = when (seat.isRiichi) {
     null -> false

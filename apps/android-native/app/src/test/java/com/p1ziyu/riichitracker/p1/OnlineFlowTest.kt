@@ -51,4 +51,28 @@ class OnlineFlowTest {
         assertEquals("2026-10-23 22:30", localMatchTime("2026-10-23T14:30:00.123Z", TimeZone.getTimeZone("Asia/Shanghai")))
         assertEquals("时间未提供", localMatchTime("2026-10-23T14:30:00"))
     }
+
+    @Test fun roomNeedsAllMembersBeforeDrawAndDrawBeforeStart() {
+        val match = MatchDto(id = "room", status = "preparing", playerCount = 3)
+        val seats = (0..2).map { SeatDto(seatNo = it, status = "empty") }
+        val owner = MemberDto("owner", "房主", isOwner = true)
+        val joined = TableSnapshot(match, seats, members = listOf(owner, MemberDto("a", "成员一")))
+        assertFalse(mayDrawSeats(joined))
+        assertFalse(mayStartMatch(joined))
+        val full = joined.copy(members = joined.members + MemberDto("b", "成员二"))
+        assertTrue(mayDrawSeats(full))
+        assertFalse(mayStartMatch(full))
+        val drawn = full.copy(match = match.copy(seatingDrawnAt = "2026-10-24T12:00:00Z", dealerSeatNo = 1))
+        assertFalse(mayDrawSeats(drawn))
+        assertTrue(mayStartMatch(drawn))
+        val removed = drawn.copy(match = match, members = drawn.members.dropLast(1))
+        assertFalse(mayDrawSeats(removed))
+        assertFalse(mayStartMatch(removed))
+        val legacy = full.copy(seats = seats.mapIndexed { no, seat ->
+            seat.copy(principalId = full.members[no].principalId, status = "checked_in")
+        })
+        assertFalse(mayDrawSeats(legacy))
+        assertTrue(mayStartMatch(legacy))
+        assertFalse(mayStartMatch(drawn.copy(match = drawn.match.copy(status = "in_progress"))))
+    }
 }

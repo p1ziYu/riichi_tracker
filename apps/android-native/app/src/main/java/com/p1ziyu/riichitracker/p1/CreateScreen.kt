@@ -157,7 +157,7 @@ fun CreateScreen(templates: List<TemplateDto>, busy: Boolean, serverError: Strin
                     Text("仅保存在此设备；没有身份、签到或云端同步。", color = Brand.muted)
                 } else {
                     Button(onClick = { onCreate(rules) }, enabled = !busy && runCatching { rules.validated() }.isSuccess) { Text(if (busy) "正在创建…" else "创建在线牌桌") }
-                    Text("创建后桌主先选座；其他玩家可用房间码或链接直接选座签到，座位齐备后确认开局。", color = Brand.muted)
+                    Text("创建后分享房间码或加入链接；成员到齐后由房主抽风定座，再确认开局。", color = Brand.muted)
                 }
             }
             OutlinedButton(onClick = { step = if (step == 2) 1 else 0 }) { Text("返回上一步") }

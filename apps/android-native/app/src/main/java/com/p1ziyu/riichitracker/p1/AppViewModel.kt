@@ -26,8 +26,9 @@ private fun Throwable.chineseMessage(): String = when (this) {
     else -> message ?: "网络连接失败，请重试"
 }
 
-private val TABLE_REFRESH_EVENTS = setOf("seat_claimed", "join_approved", "check_in", "seats_finalized",
-    "hand_started", "marks_changed", "hand_settled", "match_finished", "settlement_confirmed")
+private val TABLE_REFRESH_EVENTS = setOf("member_joined", "seats_drawn", "seat_claimed", "join_approved",
+    "check_in", "seats_finalized", "hand_started", "marks_changed", "hand_settled", "match_finished",
+    "settlement_confirmed")
 enum class SessionMode { RESTORING, SIGNED_OUT, ACCOUNT, ONLINE_GUEST, LOCAL_ONLY }
 data class PendingResult(val matchId: String, val handId: String, val body: String)
 data class BoundPreview(val handId: String, val revision: Long, val input: String, val output: PaymentPreview)
@@ -42,7 +43,7 @@ data class AppState(
     val tableError: String? = null, val connection: String = "手动刷新", val connectionEpoch: Int = 0,
     val profile: MeResponse? = null, val profileError: String? = null,
     val diagnostic: String? = null, val busy: Boolean = false, val actionError: String? = null,
-    val invitation: CheckInTokenDto? = null, val joinedSeat: Int? = null, val joinedMatchId: String? = null,
+    val invitation: CheckInTokenDto? = null, val joinedMatchId: String? = null,
     val joinSeats: CheckInSeatsDto? = null, val joinPreviewLink: CheckInLink? = null,
     val preview: BoundPreview? = null, val terminal: BoundTerminal? = null,
     val draft: SavedResultDraft? = null, val draftEditVersion: Long = 0, val pendingReviewed: Boolean = false,
@@ -426,36 +427,43 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         check(isCheckedInParticipant(table, state.value.profile?.principal?.id)) { "只有已签到参赛者可以操作" }
         return table
     }
-    fun claim(id: String, seatNo: Int) = operation(id) {
-        check(requireHost(id).match.status == "preparing") { "座位已确认" }
-        api.post("/api/matches/$id/seats/claim", """{"seatNo":$seatNo}""")
+    fun drawSeats(id: String) = operation(id) {
+        val table = requireHost(id)
+        check(table.match.status == "preparing" && table.match.seatingDrawnAt == null) { "座位已确定" }
+        joins.draw(id)
     }
     fun invite(id: String) = operation(id) {
         check(requireHost(id).match.status == "preparing") { "座位已确认" }
         val token = api.json.decodeFromString<CheckInTokenDto>(api.post("/api/matches/$id/check-in-tokens"))
         if (tableId == id) state.value = state.value.copy(invitation = token)
     }
-    fun finalizeSeats(id: String, dealer: Int?) = operation(id) {
+    fun finalizeSeats(id: String) = operation(id) {
         check(requireHost(id).match.status == "preparing") { "座位已确认" }
-        api.post("/api/matches/$id/seats/finalize", finalizeBody(dealer))
+        api.post("/api/matches/$id/seats/finalize")
     }
     fun beginCheckIn() {
-        state.value = state.value.copy(joinedSeat = null, joinedMatchId = null,
+        state.value = state.value.copy(joinedMatchId = null,
             joinSeats = null, joinPreviewLink = null, actionError = null)
     }
     fun previewJoin(link: CheckInLink) = operation(null) {
         state.value = state.value.copy(joinSeats = null, joinPreviewLink = null)
-        val seats = joins.seats(link)
-        state.value = state.value.copy(joinSeats = seats, joinPreviewLink = link)
+        val preview = joins.seats(link)
+        state.value = state.value.copy(joinSeats = preview, joinPreviewLink = link,
+            joinedMatchId = if (preview.caller.isOwner) link.matchId else null)
     }
-    fun checkIn(link: CheckInLink, seatNo: Int?, alias: String?) = operation(null) {
-        val result = joins.checkInWithSeatRefresh(link, seatNo, alias) { seats ->
-            state.value = state.value.copy(joinSeats = seats, joinPreviewLink = seats?.let { link })
-        }
-        state.value = state.value.copy(joinedSeat = result.seat.seatNo, joinedMatchId = link.matchId,
-            joinSeats = null, joinPreviewLink = null)
+    fun checkIn(link: CheckInLink, alias: String?) = operation(null) {
+        val result = joins.checkIn(link, alias)
+        val preview = state.value.joinSeats?.takeIf { state.value.joinPreviewLink == link }
+        state.value = state.value.copy(joinSeats = preview?.let {
+            val alreadyPresent = it.members.any { member -> member.principalId == result.member.principalId }
+            it.copy(caller = it.caller.copy(isMember = true),
+                members = if (alreadyPresent) it.members
+                    else it.members + MemberDto(result.member.principalId, result.member.displayName),
+                seating = it.seating.copy(memberCount = it.seating.memberCount + if (alreadyPresent) 0 else 1))
+        })
         loadList()
     }
+    fun openJoinedMatch(id: String) { state.value = state.value.copy(joinedMatchId = id) }
     fun clearJoinedMatch() { state.value = state.value.copy(joinedMatchId = null) }
     fun byCode(code: String, onResolved: (CheckInLink) -> Unit) = operation(null) {
         state.value = state.value.copy(joinSeats = null, joinPreviewLink = null)
@@ -475,7 +483,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val table = requireHost(id)
         check(table.match.status == "preparing" &&
             principalId != table.match.ownerPrincipalId &&
-            table.seats.any { it.principalId == principalId }) { "成员已变化，请刷新牌桌" }
+            table.members.any { it.principalId == principalId }) { "成员已变化，请刷新牌桌" }
         joins.remove(id, principalId)
     }
     fun mark(id: String, hand: CurrentHandDto, seat: HandSeatDto, riichi: Boolean) = operation(id) {

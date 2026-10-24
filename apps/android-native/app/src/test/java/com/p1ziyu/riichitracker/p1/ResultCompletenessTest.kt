@@ -127,6 +127,18 @@ class ResultCompletenessTest {
         assertFalse(isMembershipRevoked(preparing, "player", status = 401))
         assertFalse(isMembershipRevoked(match, "player", status = 403))
     }
+    @Test fun removedSeatlessMemberLosesPreparingRoomAccess() {
+        val preparing = table().copy(
+            match = table().match.copy(status = "preparing"),
+            seats = table().seats.map { it.copy(principalId = null, status = "empty") },
+            members = listOf(MemberDto("host", "房主", isOwner = true), MemberDto("player", "成员")),
+        )
+        val removed = preparing.copy(members = preparing.members.filterNot { it.principalId == "player" })
+        assertTrue(isMembershipRevoked(preparing, "player", updated = removed))
+        assertTrue(isMembershipRevoked(preparing, "player", status = 403))
+        assertFalse(isMembershipRevoked(preparing, "host", updated = removed))
+        assertFalse(isMembershipRevoked(preparing, "watcher", status = 403))
+    }
     @Test fun flowAndNagashiKeepTheirExistingInputShape() {
         val draw = input(ResultDraft(kind = "ryuukyoku", tenpai = setOf(0, 2)))
         assertEquals(listOf(true, false, true, false),

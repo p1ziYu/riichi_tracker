@@ -19,6 +19,7 @@ import kotlinx.serialization.json.jsonPrimitive
     val rulesSnapshot: JsonObject? = null, val rulesetVersionId: String? = null,
     val createdAt: String? = null, val ownerPrincipalId: String? = null,
     val joinCode: String? = null, val version: Long? = null,
+    val seatingDrawnAt: String? = null, val dealerSeatNo: Int? = null,
     val settlementConfirmed: Boolean = false,
 )
 @Serializable data class SeatDto(
@@ -38,6 +39,7 @@ import kotlinx.serialization.json.jsonPrimitive
 )
 @Serializable data class TableSnapshot(
     val match: MatchDto, val seats: List<SeatDto>, val currentHand: CurrentHandDto? = null,
+    val members: List<MemberDto> = emptyList(),
 )
 @Serializable data class HandDeltaDto(val seatNo: Int, val netPoints: Int)
 @Serializable data class HandDto(
@@ -59,12 +61,28 @@ import kotlinx.serialization.json.jsonPrimitive
 @Serializable data class CreatedMatchData(val id: String, val joinCode: String? = null)
 @Serializable data class CheckInTokenDto(val token: String, val expiresAt: String)
 @Serializable data class ByCodeDto(val matchId: String, val token: String, val expiresAt: String)
-@Serializable data class CheckInSeatsDto(val match: CheckInMatchDto, val seats: List<SeatDto>)
+@Serializable data class MemberDto(
+    val principalId: String, val displayName: String, val isOwner: Boolean = false,
+    val seatNo: Int? = null, val wind: String? = null,
+)
+@Serializable data class CheckInCallerDto(val principalId: String, val isOwner: Boolean, val isMember: Boolean)
+@Serializable data class SeatingDto(
+    val drawn: Boolean, val dealerSeatNo: Int? = null, val memberCount: Int, val seatedCount: Int,
+)
+@Serializable data class CheckInSeatsDto(
+    val match: CheckInMatchDto, val caller: CheckInCallerDto, val members: List<MemberDto>,
+    val seating: SeatingDto, val seats: List<SeatDto> = emptyList(),
+)
 @Serializable data class CheckInMatchDto(val id: String, val playerCount: Int, val status: String)
+@Serializable data class CheckInRequestDto(val token: String, val alias: String? = null)
+@Serializable data class CheckInDto(val member: CheckInMemberDto, val seated: Boolean, val grantId: String)
+@Serializable data class CheckInMemberDto(val principalId: String, val displayName: String)
+@Serializable data class DrawSeatsDto(val seats: List<DrawSeatDto>, val dealerSeatNo: Int)
+@Serializable data class DrawSeatDto(
+    val seatNo: Int, val principalId: String, val displayName: String, val wind: String,
+)
 @Serializable data class ReassignDto(val fromSeatNo: Int, val toSeatNo: Int, val swapped: Boolean)
 @Serializable data class RemoveMemberDto(val removed: Boolean)
-@Serializable data class CheckInDto(val seat: CheckInSeat, val grantId: String)
-@Serializable data class CheckInSeat(val seatNo: Int)
 @Serializable data class PrincipalDto(
     val id: String, val displayName: String, val type: String, val createdAt: String? = null,
 )

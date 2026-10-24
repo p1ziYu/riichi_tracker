@@ -1,7 +1,6 @@
 package com.p1ziyu.riichitracker.p1
 
-import kotlinx.coroutines.CancellationException
-import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -9,16 +8,24 @@ import java.net.URLEncoder
 import java.util.Locale
 
 fun apiFailureMessage(error: ApiFailure): String = when (error.code) {
-    "missing_token", "invalid_token", "token_consumed_or_expired" -> "签到链接无效或已过期：房间码可重新换取，链接请桌主重新发送。"
-    "guest_already_bound" -> "此访客身份已绑定其他牌桌。"
-    "seat_taken" -> "所选座位已被占用，请刷新座位并重新选座。"
-    "match_full" -> "牌桌座位已满，请联系桌主。"
-    "match_already_started" -> "牌桌已开局，不能再加入。"
-    "member_already_seated" -> "你已在本桌入座，请刷新座位查看。"
-    "join_code_not_found" -> "房间码无效，请核对后重试。"
-    "match_not_found" -> "牌桌不存在或已删除，请核对邀请信息。"
-    "rate_limited" -> error.retryAfterSeconds?.let { "查询过于频繁，请${it}秒后重试" } ?: "查询过于频繁，请稍后重试"
-    else -> error.message ?: "请求失败（${error.status}）"
+    "match_full" -> "牌桌已满员，无法加入。"
+    "match_already_started" -> "牌局已开始，无法加入。"
+    "invalid_token", "token_consumed_or_expired", "missing_token" -> "签到链接无效或已过期，请房主重新分享链接，或使用房间码。"
+    "seat_claim_retired" -> "入座方式已更新，请重新加入牌桌。"
+    "owner_auto_check_in" -> "你是房主，已为你打开牌桌。"
+    "guest_already_bound" -> "当前访客身份已绑定其他牌桌。"
+    "room_not_full" -> "人数尚未到齐，无法抽风定座。"
+    "seating_already_drawn" -> "已完成抽风定座。"
+    "seating_already_complete" -> "座位已确定，可直接开局。"
+    "forbidden" -> "只有房主可以执行此操作。"
+    "member_not_found" -> "成员已不在牌桌中。"
+    "seat_empty" -> "该座位暂无成员。"
+    "invalid_seat" -> "座位选择无效。"
+    "rate_limited" -> "尝试过于频繁，请稍后再试。"
+    "join_code_not_found" -> "房间码不正确，或牌桌已结束。"
+    "incomplete_check_ins" -> "成员尚未全部就座，无法开局。"
+    "match_not_found" -> "牌桌不存在或已被删除。"
+    else -> "操作失败，请稍后重试。"
 }
 
 private val joinCodePattern = Regex("^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$")
@@ -26,14 +33,6 @@ private val joinCodePattern = Regex("^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$")
 fun normalizeJoinCode(input: String): String? = input.trim().uppercase(Locale.ROOT)
     .takeIf(joinCodePattern::matches)
 
-/** API seats are zero-based. Occupancy is determined by principalId, never by displayName. */
-fun freeJoinSeats(preview: CheckInSeatsDto): List<SeatDto> =
-    preview.seats.filter { it.principalId == null }.sortedBy { it.seatNo }
-
-/** A returning member keeps their existing seat, even when the table has other empty seats. */
-fun selectableJoinSeats(preview: CheckInSeatsDto, principalId: String?): List<SeatDto> =
-    preview.seats.firstOrNull { principalId != null && it.principalId == principalId }
-        ?.let(::listOf) ?: freeJoinSeats(preview)
 
 interface JoinTransport {
     suspend fun get(path: String): String
@@ -54,29 +53,14 @@ class JoinActions(private val transport: JoinTransport, private val json: Json =
         return response
     }
 
-    suspend fun checkIn(link: CheckInLink, seatNo: Int?, alias: String?): CheckInDto {
+    suspend fun checkIn(link: CheckInLink, alias: String?): CheckInDto {
         val token = link.token?.takeIf(String::isNotBlank) ?: throw IllegalArgumentException("链接缺少签到凭证")
         return json.decodeFromString(transport.post("/api/matches/${link.matchId}/check-ins",
-            buildJsonObject {
-                put("token", token)
-                seatNo?.let { put("seatNo", it) }
-                alias?.trim()?.takeIf(String::isNotEmpty)?.let { put("alias", it) }
-            }.toString()))
+            json.encodeToString(CheckInRequestDto(token, alias?.trim()?.takeIf(String::isNotEmpty)))))
     }
 
-    /** Refresh availability after a competing check-in, without retrying the original write. */
-    suspend fun checkInWithSeatRefresh(link: CheckInLink, seatNo: Int?, alias: String?,
-                                       onSeats: (CheckInSeatsDto?) -> Unit): CheckInDto = try {
-        checkIn(link, seatNo, alias)
-    } catch (error: ApiFailure) {
-        if (error.code == "seat_taken") {
-            onSeats(null)
-            try { onSeats(seats(link)) }
-            catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { /* Keep the original conflict; the guest can refresh again. */ }
-        }
-        throw error
-    }
+    suspend fun draw(matchId: String): DrawSeatsDto =
+        json.decodeFromString(transport.post("/api/matches/$matchId/seats/draw"))
 
     suspend fun reassign(matchId: String, fromSeatNo: Int, toSeatNo: Int): ReassignDto =
         json.decodeFromString(transport.post("/api/matches/$matchId/seats/reassign",

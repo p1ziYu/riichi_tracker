@@ -45,6 +45,9 @@ class MainActivity : ComponentActivity() {
         setContent {
             BrandTheme {
                 val state by model.ui.collectAsState()
+                LaunchedEffect(state.joinedMatchId) {
+                    if (state.joinedMatchId != null) incomingLink = null
+                }
                 when {
                     state.session == SessionMode.RESTORING -> {
                         androidx.compose.foundation.layout.Column {

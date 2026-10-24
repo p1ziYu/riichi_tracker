@@ -53,16 +53,27 @@
     "currentHandId": null,
     "settlementConfirmed": false,
     "createdAt": "2026-10-23T04:34:13.715Z",
+    "seatingDrawnAt": null,
+    "dealerSeatNo": null,
     "startedAt": null,
     "endedAt": null
   },
+  "members": [
+    {
+      "principalId": "4334cf00-6cd0-4c69-81ce-12f3d2424b0b",
+      "displayName": "Disposable Fixture Owner",
+      "isOwner": true,
+      "seatNo": null,
+      "wind": null
+    }
+  ],
   "seats": [
     {
       "seatNo": 0,
-      "principalId": "4334cf00-6cd0-4c69-81ce-12f3d2424b0b",
-      "displayName": "Disposable Fixture Owner",
+      "principalId": null,
+      "displayName": null,
       "points": 25000,
-      "status": "checked_in"
+      "status": "empty"
     },
     {
       "seatNo": 1,
@@ -105,5 +116,5 @@
       "points": 25000
     }
   ],
-  "checkedIn": 1
+  "checkedIn": 0
 }

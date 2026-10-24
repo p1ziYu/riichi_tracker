@@ -23,10 +23,6 @@ class JoinAndActionsTest {
         }
     }
 
-    @Test fun dealerDesignatedAndOmittedAreDistinctPayloads() {
-        assertEquals("{}", finalizeBody(null))
-        assertEquals(2, Json.parseToJsonElement(finalizeBody(2)).jsonObject.getValue("dealerSeatNo").jsonPrimitive.content.toInt())
-    }
 
     @Test fun markUsesCompareAndSwapRevisionAndLimitsChanges() {
         val hand = CurrentHandDto(id = "hand", status = "open", markRevision = 12)
@@ -120,139 +116,168 @@ class JoinAndActionsTest {
             JoinActions(fake).seats(CheckInLink(matchId, null, ""))
         } }
         assertThrows(IllegalArgumentException::class.java) { runBlocking {
-            JoinActions(fake).checkIn(CheckInLink(matchId, "", ""), 0, null)
+            JoinActions(fake).checkIn(CheckInLink(matchId, "", ""), null)
         } }
         assertTrue(fake.calls.isEmpty())
     }
-    @Test fun serverErrorsMapToActionableChineseCopy() {
-        assertTrue(apiFailureMessage(ApiFailure(404, "join_code_not_found", null, "missing")).contains("房间码无效"))
-        assertTrue(apiFailureMessage(ApiFailure(403, "guest_already_bound", null, "bound")).contains("其他牌桌"))
-        assertTrue(apiFailureMessage(ApiFailure(409, "member_already_seated", null, "seated")).contains("已在本桌"))
-        assertTrue(apiFailureMessage(ApiFailure(409, "seat_taken", null, "taken")).contains("刷新"))
-        assertTrue(apiFailureMessage(ApiFailure(409, "match_full", null, "full")).contains("已满"))
-        assertTrue(apiFailureMessage(ApiFailure(409, "match_already_started", null, "started")).contains("已开局"))
-        assertTrue(apiFailureMessage(ApiFailure(404, "match_not_found", null, "missing")).contains("不存在"))
-        assertFalse(apiFailureMessage(ApiFailure(404, "match_not_found", null, "missing")).contains("已开局"))
-        for (code in listOf("invalid_token", "missing_token", "token_consumed_or_expired"))
-            assertTrue(apiFailureMessage(ApiFailure(400, code, null, "expired")).contains("已过期"))
-        assertTrue(apiFailureMessage(ApiFailure(429, "rate_limited", 12, "slow")).contains("12秒"))
-        assertTrue(apiFailureMessage(ApiFailure(429, "rate_limited", null, "slow")).contains("稍后重试"))
-        assertEquals("服务器维护中", apiFailureMessage(ApiFailure(503, "maintenance", null, "服务器维护中")))
+    @Test fun serverErrorsMapToExactChineseCopyWithoutLeakingServerText() {
+        val messages = mapOf(
+            "match_full" to "牌桌已满员，无法加入。",
+            "match_already_started" to "牌局已开始，无法加入。",
+            "invalid_token" to "签到链接无效或已过期，请房主重新分享链接，或使用房间码。",
+            "token_consumed_or_expired" to "签到链接无效或已过期，请房主重新分享链接，或使用房间码。",
+            "missing_token" to "签到链接无效或已过期，请房主重新分享链接，或使用房间码。",
+            "seat_claim_retired" to "入座方式已更新，请重新加入牌桌。",
+            "owner_auto_check_in" to "你是房主，已为你打开牌桌。",
+            "guest_already_bound" to "当前访客身份已绑定其他牌桌。",
+            "room_not_full" to "人数尚未到齐，无法抽风定座。",
+            "seating_already_drawn" to "已完成抽风定座。",
+            "seating_already_complete" to "座位已确定，可直接开局。",
+            "forbidden" to "只有房主可以执行此操作。",
+            "member_not_found" to "成员已不在牌桌中。",
+            "seat_empty" to "该座位暂无成员。",
+            "invalid_seat" to "座位选择无效。",
+            "rate_limited" to "尝试过于频繁，请稍后再试。",
+            "join_code_not_found" to "房间码不正确，或牌桌已结束。",
+            "incomplete_check_ins" to "成员尚未全部就座，无法开局。",
+            "match_not_found" to "牌桌不存在或已被删除。",
+        )
+        messages.forEach { (code, expected) ->
+            assertEquals(code, expected, apiFailureMessage(ApiFailure(409, code, 12, "PRIVATE SERVER TEXT")))
+        }
+        assertEquals("操作失败，请稍后重试。",
+            apiFailureMessage(ApiFailure(503, "unrecognized", null, "PRIVATE SERVER TEXT")))
     }
 
-    @Test fun previewMapsOccupancyByPrincipalAndSortsFreeSeats(): Unit = runBlocking {
+    @Test fun previewProvidesCallerMembershipAndUndrawnSeating(): Unit = runBlocking {
         val fake = FakeTransport().apply {
-            getResponse = { """{"match":{"id":"$matchId","playerCount":4,"status":"preparing"},
-                "seats":[{"seatNo":2,"principalId":null,"displayName":null,"status":"empty"},
-                {"seatNo":0,"principalId":"owner","displayName":"房主","status":"checked_in"},
-                {"seatNo":3,"principalId":null,"displayName":"旧昵称","status":"empty"},
-                {"seatNo":1,"principalId":"guest","displayName":null,"status":"assigned"}]}""" }
+            getResponse = { """{"match":{"id":"$matchId","playerCount":3,"status":"preparing"},
+                "caller":{"principalId":"guest","isOwner":false,"isMember":false},
+                "members":[{"principalId":"owner","displayName":"房主","isOwner":true,"seatNo":null,"wind":null}],
+                "seating":{"drawn":false,"dealerSeatNo":null,"memberCount":1,"seatedCount":0},
+                "seats":[{"seatNo":0,"principalId":null,"status":"empty"},
+                         {"seatNo":1,"principalId":null,"status":"empty"},
+                         {"seatNo":2,"principalId":null,"status":"empty"}]}""" }
         }
         val preview = JoinActions(fake).seats(CheckInLink(matchId, "signed+/token", ""))
-        assertEquals(listOf(2, 3), freeJoinSeats(preview).map { it.seatNo })
-        assertEquals(listOf(2, 3), selectableJoinSeats(preview, "newcomer").map { it.seatNo })
-        assertEquals(listOf(1), selectableJoinSeats(preview, "guest").map { it.seatNo })
-        assertEquals(listOf(0), selectableJoinSeats(preview, "owner").map { it.seatNo })
-        assertEquals(listOf(2, 3), selectableJoinSeats(preview, null).map { it.seatNo })
-        val full = preview.copy(seats = preview.seats.filter { it.principalId != null })
-        assertTrue(selectableJoinSeats(full, "newcomer").isEmpty())
-        assertEquals(listOf(0), selectableJoinSeats(full, "owner").map { it.seatNo })
-        assertEquals("房主", preview.seats.first { it.seatNo == 0 }.displayName)
+        assertEquals("guest", preview.caller.principalId)
+        assertFalse(preview.caller.isOwner)
+        assertFalse(preview.caller.isMember)
+        assertEquals(listOf("owner"), preview.members.map { it.principalId })
+        assertTrue(preview.members.single().isOwner)
+        assertNull(preview.members.single().seatNo)
+        assertNull(preview.members.single().wind)
+        assertFalse(preview.seating.drawn)
+        assertEquals(1, preview.seating.memberCount)
+        assertEquals(0, preview.seating.seatedCount)
+        assertNull(preview.seating.dealerSeatNo)
         assertEquals("GET" to "/api/matches/$matchId/check-in-seats?token=signed%2B%2Ftoken", fake.calls.single())
-        fake.getResponse = { """{"match":{"id":"$otherId","playerCount":4,"status":"preparing"},"seats":[]}""" }
+        fake.getResponse = { """{"match":{"id":"$otherId","playerCount":3,"status":"preparing"},
+            "caller":{"principalId":"guest","isOwner":false,"isMember":false},
+            "members":[],"seating":{"drawn":false,"memberCount":0,"seatedCount":0}}""" }
         assertThrows(IllegalStateException::class.java) { runBlocking {
             JoinActions(fake).seats(CheckInLink(matchId, "token", ""))
         } }
     }
 
-    @Test fun codeResolvesBeforePreviewAndDirectCheckInEncodesExplicitOrAutoSeat() = runBlocking {
+    @Test fun previewDistinguishesOwnerReturningMemberAndFullDrawnTable() = runBlocking {
+        val fake = FakeTransport().apply {
+            getResponse = { path ->
+                val caller = when {
+                    path.contains("token=owner") -> """{"principalId":"owner","isOwner":true,"isMember":true}"""
+                    path.contains("token=member") -> """{"principalId":"guest","isOwner":false,"isMember":true}"""
+                    else -> """{"principalId":"newcomer","isOwner":false,"isMember":false}"""
+                }
+                """{"match":{"id":"$matchId","playerCount":3,"status":"preparing"},
+                   "caller":$caller,
+                   "members":[{"principalId":"owner","displayName":"房主","isOwner":true,"seatNo":2,"wind":"E"},
+                              {"principalId":"guest","displayName":"回访者","isOwner":false,"seatNo":0,"wind":"S"},
+                              {"principalId":"third","displayName":"第三位","isOwner":false,"seatNo":1,"wind":"W"}],
+                   "seating":{"drawn":true,"dealerSeatNo":2,"memberCount":3,"seatedCount":3},
+                   "seats":[]}"""
+            }
+        }
+        val joins = JoinActions(fake)
+        val owner = joins.seats(CheckInLink(matchId, "owner", ""))
+        val member = joins.seats(CheckInLink(matchId, "member", ""))
+        val outsider = joins.seats(CheckInLink(matchId, "newcomer", ""))
+        assertTrue(owner.caller.isOwner)
+        assertTrue(owner.caller.isMember)
+        assertFalse(member.caller.isOwner)
+        assertTrue(member.caller.isMember)
+        assertFalse(outsider.caller.isOwner)
+        assertFalse(outsider.caller.isMember)
+        assertEquals(outsider.match.playerCount, outsider.seating.memberCount)
+        assertTrue(outsider.seating.drawn)
+        assertEquals(3, outsider.seating.seatedCount)
+        assertEquals(2, outsider.seating.dealerSeatNo)
+        assertEquals(listOf("E", "S", "W"), outsider.members.map { it.wind })
+        assertEquals(listOf(2, 0, 1), outsider.members.map { it.seatNo })
+    }
+
+    @Test fun codeResolvesBeforePreviewAndJoinPostsTokenWithOptionalAliasButNeverSeat() = runBlocking {
         val fake = FakeTransport().apply {
             getResponse = { path ->
                 if (path.startsWith("/api/matches/by-code/"))
                     """{"matchId":"$matchId","token":"fresh","expiresAt":"2026-11-01T00:00:00Z"}"""
                 else """{"match":{"id":"$matchId","playerCount":3,"status":"preparing"},
-                    "seats":[{"seatNo":0,"principalId":"owner","displayName":"房主","status":"checked_in"},
-                    {"seatNo":1,"principalId":null,"displayName":null,"status":"empty"},
-                    {"seatNo":2,"principalId":null,"displayName":null,"status":"empty"}]}"""
+                    "caller":{"principalId":"guest","isOwner":false,"isMember":false},
+                    "members":[{"principalId":"owner","displayName":"房主","isOwner":true}],
+                    "seating":{"drawn":false,"memberCount":1,"seatedCount":0}}"""
             }
-            postResponse = { _, _ -> """{"seat":{"seatNo":1},"grantId":"grant-1"}""" }
+            postResponse = { _, _ -> """{"member":{"principalId":"guest","displayName":"新客"},"seated":false,"grantId":"grant-1"}""" }
         }
         val joins = JoinActions(fake)
         val code = joins.resolve(" abc234 ")
         val link = CheckInLink(code.matchId, code.token, "")
-        assertEquals(1, freeJoinSeats(joins.seats(link)).first().seatNo)
-        val claimed = joins.checkIn(link, 1, " 新客 ")
-        assertEquals(1, claimed.seat.seatNo)
-        assertEquals("grant-1", claimed.grantId)
-        val explicit = fake.calls.last().second
-        assertEquals("/api/matches/$matchId/check-ins ", explicit.substringBefore("{"))
-        assertEquals("fresh", Json.parseToJsonElement(explicit.substringAfter(" ")).jsonObject.getValue("token").jsonPrimitive.content)
-        assertEquals("1", Json.parseToJsonElement(explicit.substringAfter(" ")).jsonObject.getValue("seatNo").jsonPrimitive.content)
-        assertEquals("新客", Json.parseToJsonElement(explicit.substringAfter(" ")).jsonObject.getValue("alias").jsonPrimitive.content)
-        joins.checkIn(link, null, " ")
+        assertEquals("ABC234", fake.calls.first().second.substringAfterLast("/"))
+        assertEquals(1, joins.seats(link).seating.memberCount)
+        val joined = joins.checkIn(link, " 新客 ")
+        assertEquals("guest", joined.member.principalId)
+        assertEquals("新客", joined.member.displayName)
+        assertFalse(joined.seated)
+        assertEquals("grant-1", joined.grantId)
+        val post = fake.calls.last().second
+        assertEquals("/api/matches/$matchId/check-ins ", post.substringBefore("{"))
+        val body = Json.parseToJsonElement(post.substringAfter(" ")).jsonObject
+        assertEquals(setOf("token", "alias"), body.keys)
+        assertEquals("fresh", body.getValue("token").jsonPrimitive.content)
+        assertEquals("新客", body.getValue("alias").jsonPrimitive.content)
+        joins.checkIn(link, " ")
         assertEquals(setOf("token"), Json.parseToJsonElement(fake.calls.last().second.substringAfter(" ")).jsonObject.keys)
         assertEquals(listOf("GET", "GET", "POST", "POST"), fake.calls.map { it.first })
     }
 
-    @Test fun checkInFailuresDoNotRetryOrConsumeAnotherToken() = runBlocking {
-        for (code in listOf("seat_taken", "match_full", "match_already_started", "invalid_token", "token_consumed_or_expired")) {
+
+    @Test fun joinFailuresDoNotRetryOrConsumeAnotherToken() = runBlocking {
+        for (code in listOf("match_full", "match_already_started", "invalid_token",
+                "token_consumed_or_expired", "owner_auto_check_in")) {
             val fake = FakeTransport().apply {
-                postResponse = { _, _ -> throw ApiFailure(if (code == "invalid_token" || code == "token_consumed_or_expired") 400 else 409, code, null, code) }
+                postResponse = { _, _ -> throw ApiFailure(409, code, null, code) }
             }
             val failure = assertThrows(ApiFailure::class.java) { runBlocking {
-                JoinActions(fake).checkIn(CheckInLink(matchId, "token", ""), 2, null)
+                JoinActions(fake).checkIn(CheckInLink(matchId, "token", ""), null)
             } }
             assertEquals(code, failure.code)
-            assertEquals(1, fake.calls.size)
+            assertEquals(listOf("POST" to "/api/matches/$matchId/check-ins {\"token\":\"token\"}"), fake.calls)
         }
     }
-    @Test fun seatTakenRefreshesAvailableSeatsWithoutReposting() = runBlocking {
+
+    @Test fun hostDrawPostsEmptyBodyAndReadsWindAndDealer() = runBlocking {
         val fake = FakeTransport().apply {
-            postResponse = { _, _ -> throw ApiFailure(409, "seat_taken", null, "taken") }
-            getResponse = { """{"match":{"id":"$matchId","playerCount":3,"status":"preparing"},
-                "seats":[{"seatNo":0,"principalId":"owner","displayName":"房主","status":"checked_in"},
-                {"seatNo":1,"principalId":null,"displayName":null,"status":"empty"},
-                {"seatNo":2,"principalId":"other","displayName":"抢先签到","status":"checked_in"}]}""" }
+            postResponse = { _, _ -> """{"seats":[
+                {"seatNo":0,"principalId":"guest","displayName":"新客","wind":"S"},
+                {"seatNo":1,"principalId":"third","displayName":"第三位","wind":"W"},
+                {"seatNo":2,"principalId":"owner","displayName":"房主","wind":"E"}],
+                "dealerSeatNo":2}""" }
         }
-        val link = CheckInLink(matchId, "token", "")
-        val previews = mutableListOf<CheckInSeatsDto?>()
-        val failure = assertThrows(ApiFailure::class.java) { runBlocking {
-            JoinActions(fake).checkInWithSeatRefresh(link, 2, null) { previews += it }
-        } }
-        assertEquals("seat_taken", failure.code)
-        assertEquals(listOf(null, 1), previews.map { it?.let(::freeJoinSeats)?.singleOrNull()?.seatNo })
-        assertEquals(listOf("POST", "GET"), fake.calls.map { it.first })
-        assertEquals("GET" to "/api/matches/$matchId/check-in-seats?token=token", fake.calls.last())
-
-        fake.calls.clear()
-        fake.getResponse = { throw ApiFailure(400, "invalid_token", null, "expired") }
-        previews.clear()
-        val original = assertThrows(ApiFailure::class.java) { runBlocking {
-            JoinActions(fake).checkInWithSeatRefresh(link, 2, null) { previews += it }
-        } }
-        assertEquals("seat_taken", original.code)
-        assertEquals(listOf(null), previews)
-        assertEquals(listOf("POST", "GET"), fake.calls.map { it.first })
-
-        fake.calls.clear()
-        fake.postResponse = { _, _ -> throw ApiFailure(409, "match_full", null, "full") }
-        previews.clear()
-        assertThrows(ApiFailure::class.java) { runBlocking {
-            JoinActions(fake).checkInWithSeatRefresh(link, 2, null) { previews += it }
-        } }
-        assertTrue(previews.isEmpty())
-        assertEquals(listOf("POST"), fake.calls.map { it.first })
-    }
-
-
-    @Test fun alreadyCheckedInResponseKeepsServerSeatAndGrant() = runBlocking {
-        val fake = FakeTransport().apply {
-            postResponse = { _, _ -> """{"seat":{"seatNo":1},"grantId":"existing-grant"}""" }
-        }
-        val result = JoinActions(fake).checkIn(CheckInLink(matchId, "fresh", ""), 2, null)
-        assertEquals(1, result.seat.seatNo)
-        assertEquals("existing-grant", result.grantId)
-        assertEquals(1, fake.calls.size)
+        val drawn = JoinActions(fake).draw(matchId)
+        assertEquals("POST" to "/api/matches/$matchId/seats/draw {}", fake.calls.single())
+        assertEquals(2, drawn.dealerSeatNo)
+        assertEquals(listOf(0, 1, 2), drawn.seats.map { it.seatNo })
+        assertEquals(listOf("guest", "third", "owner"), drawn.seats.map { it.principalId })
+        assertEquals(listOf("S", "W", "E"), drawn.seats.map { it.wind })
+        assertEquals("房主", drawn.seats.last().displayName)
     }
 
     @Test fun hostMoveSwapAndRemoveUseOwnerOnlyCommandShapes() = runBlocking {

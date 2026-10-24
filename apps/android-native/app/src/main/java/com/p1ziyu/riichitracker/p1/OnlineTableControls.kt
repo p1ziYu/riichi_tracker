@@ -21,58 +21,60 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
     val hand = table.currentHand
     val open = active && hand?.status == "open"
     val between = active && (hand == null || hand.status == "settled")
-    var dealer by remember(id) { mutableStateOf<Int?>(null) }
+    val drawn = table.match.seatingDrawnAt != null
+    val legacyReady = table.seats.size == table.match.playerCount &&
+        table.seats.all { it.status == "checked_in" }
     var showResult by remember(id) { mutableStateOf(false) }
     var confirmFinish by remember(id) { mutableStateOf(false) }
     var movingSeat by remember(id) { mutableStateOf<Int?>(null) }
-    var removingSeat by remember(id) { mutableStateOf<SeatDto?>(null) }
+    var removingMember by remember(id) { mutableStateOf<MemberDto?>(null) }
     val clipboard = LocalClipboardManager.current
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (state.actionError != null) Text(state.actionError, color = MaterialTheme.colorScheme.error)
         if (!participant && !isOwner) Text("未签到或旁观者仅可只读查看规则、分数、局摘要和终局；无权记分或确认。", color = Brand.muted)
         else if (isOwner && !participant && active) Text("桌主尚未签到，当前只能查看；请由已签到参赛者录入局结果。", color = Brand.muted)
         if (preparing && isOwner) {
-            Text("桌主座位与邀请", color = Brand.goldText, style = MaterialTheme.typography.titleLarge)
-            Text("房主选座后分享房间码或十分钟签到链接。访客直接选座签到；座位满员且已签到即可确认座次。", color = Brand.text)
-            table.seats.sortedBy { it.seatNo }.forEach { seat ->
-                if (seat.principalId == null || seat.principalId == principal && seat.status != "checked_in")
-                    OutlinedButton(onClick = { model.claim(id, seat.seatNo) }, enabled = !state.busy,
-                        modifier = Modifier.fillMaxWidth()) { Text("房主选 ${seat.seatNo + 1} 号位") }
-            }
-            Text("起家 · ${dealer?.let { "${it + 1} 号位" } ?: "服务器随机（默认）"}", color = Brand.text)
-            OutlinedButton(onClick = { dealer = null }) { Text("随机起家") }
-            table.seats.filter { it.principalId != null }.sortedBy { it.seatNo }.forEach { seat ->
-                OutlinedButton(onClick = { dealer = seat.seatNo }) { Text("指定 ${seat.displayName ?: "${seat.seatNo + 1}号位"} 为起家") }
-            }
+            Text("桌主邀请与开局", color = Brand.goldText, style = MaterialTheme.typography.titleLarge)
+            Text("分享房间码或十分钟加入链接。人齐后由桌主抽风定座，再开局。", color = Brand.text)
             table.match.joinCode?.let { code ->
                 Text("房间码：$code", color = Brand.goldText)
                 OutlinedButton(onClick = { clipboard.setText(AnnotatedString(code)) }) { Text("复制房间码") }
             }
-            Button(onClick = { model.invite(id) }, enabled = !state.busy) { Text("生成十分钟签到链接") }
+            Button(onClick = { model.invite(id) }, enabled = !state.busy) { Text("生成十分钟加入链接") }
             state.invitation?.let { token ->
                 val valid = runCatching { java.time.Instant.parse(token.expiresAt).isAfter(java.time.Instant.now()) }.getOrDefault(false)
                 if (valid) {
                     val link = "https://riichi.p1ziyu.com/checkin/$id?token=${java.net.URLEncoder.encode(token.token, "UTF-8")}"
                     InvitationQr(link)
                     Text("单人一次性 · 截止 ${localMatchTime(token.expiresAt)}", color = Brand.text)
-                    OutlinedButton(onClick = { clipboard.setText(AnnotatedString(link)) }) { Text("复制玩家签到链接") }
-                } else Text("签到链接已过期，请重新生成", color = Brand.text)
+                    OutlinedButton(onClick = { clipboard.setText(AnnotatedString(link)) }) { Text("复制玩家加入链接") }
+                } else Text("加入链接已过期，请重新生成", color = Brand.text)
             }
-            Text("已入座成员 · 可在开局前移动、交换座位或移除访客", color = Brand.goldText)
-            table.seats.sortedBy { it.seatNo }.forEach { seat ->
-                Text("${seat.seatNo + 1} 号位 · ${seat.displayName ?: "空座"} · ${if (seat.status == "checked_in") "已签到" else if (seat.principalId != null) "已入座" else "空座"}",
-                    color = Brand.text)
-                if (seat.principalId != null) {
-                    OutlinedButton(onClick = { movingSeat = seat.seatNo }, enabled = !state.busy) {
-                        Text("移动 / 交换 ${seat.displayName ?: "${seat.seatNo + 1}号位"}")
+            Text("已加入成员 · 开局前可调整座位或移除成员", color = Brand.goldText)
+            table.members.forEach { member ->
+                if (member.seatNo != null) {
+                    OutlinedButton(onClick = { movingSeat = member.seatNo }, enabled = !state.busy) {
+                        Text("移动 / 交换 ${member.displayName}")
                     }
-                    if (seat.principalId != principal) OutlinedButton(onClick = { removingSeat = seat }, enabled = !state.busy) {
-                        Text("移除 ${seat.displayName ?: "${seat.seatNo + 1}号位"}")
+                }
+                if (member.principalId != principal) {
+                    OutlinedButton(onClick = { removingMember = member }, enabled = !state.busy) {
+                        Text("移除 ${member.displayName}")
                     }
                 }
             }
-            Button(onClick = { model.finalizeSeats(id, dealer) }, enabled = !state.busy &&
-                table.seats.size == table.match.playerCount && table.seats.all { it.status == "checked_in" }) { Text("确认座次并开局") }
+            if (!drawn) {
+                if (table.members.size < table.match.playerCount && !legacyReady)
+                    Text("还差 ${table.match.playerCount - table.members.size} 人", color = Brand.muted)
+                Button(onClick = { model.drawSeats(id) },
+                    enabled = !state.busy && mayDrawSeats(table)) {
+                    Text("抽风定座")
+                }
+            }
+            if (!drawn && !legacyReady) Text("人齐后先抽风定座", color = Brand.muted)
+            Button(onClick = { model.finalizeSeats(id) }, enabled = !state.busy && mayStartMatch(table)) {
+                Text("确认座次并开局")
+            }
         }
         if (open && participant && hand != null) {
             Text("立直标记 · 服务器版本 ${hand.markRevision ?: "未提供"}", color = Brand.goldText)
@@ -120,16 +122,17 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
             { model.preview(id, hand, it) }, { model.submit(id, hand, it) }) { showResult = false }
     }
     movingSeat?.let { from ->
-        val source = table.seats.firstOrNull { it.seatNo == from && it.principalId != null }
+        val source = table.members.firstOrNull { it.seatNo == from }
         if (source == null || !preparing || !isOwner) movingSeat = null else AlertDialog(
             onDismissRequest = { movingSeat = null },
-            title = { Text("调整 ${source.displayName ?: "${from + 1}号位"} 的座位") },
+            title = { Text("调整 ${source.displayName} 的座位") },
             text = {
                 Column(Modifier.heightIn(max = 400.dp).verticalScroll(androidx.compose.foundation.rememberScrollState())) {
                     table.seats.sortedBy { it.seatNo }.filterNot { it.seatNo == from }.forEach { target ->
+                        val occupant = table.members.firstOrNull { it.seatNo == target.seatNo }
                         TextButton(onClick = { movingSeat = null; model.reassignSeat(id, from, target.seatNo) },
                             enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
-                            Text("${target.seatNo + 1}号位 · ${target.displayName ?: "空座"} · ${if (target.principalId == null) "移动" else "交换"}")
+                            Text("${target.seatNo + 1}号位 · ${occupant?.displayName ?: "空座"} · ${if (occupant == null) "移动" else "交换"}")
                         }
                     }
                 }
@@ -137,17 +140,18 @@ fun OnlineTableControls(id: String, state: AppState, model: AppViewModel) {
             confirmButton = {},
             dismissButton = { TextButton(onClick = { movingSeat = null }) { Text("取消") } })
     }
-    removingSeat?.let { seat ->
-        if (!preparing || !isOwner || seat.principalId == null ||
-            table.seats.none { it.seatNo == seat.seatNo && it.principalId == seat.principalId }) removingSeat = null
-        else AlertDialog(onDismissRequest = { removingSeat = null },
-            title = { Text("移除 ${seat.displayName ?: "${seat.seatNo + 1}号位"}？") },
-            text = { Text("此操作将腾出 ${seat.seatNo + 1} 号位；该成员需要新的签到凭证才能重新加入。") },
+    removingMember?.let { selected ->
+        val member = table.members.firstOrNull { it.principalId == selected.principalId }
+        if (!preparing || !isOwner || member == null || member.principalId == principal) removingMember = null
+        else AlertDialog(onDismissRequest = { removingMember = null },
+            title = { Text("移除 ${member.displayName}？") },
+            text = { Text(if (drawn) "移除成员后本桌抽风座次将重置，剩余成员需要重新抽风定座；该成员需要新的加入凭证才能重新加入。"
+                else "该成员需要新的加入凭证才能重新加入。") },
             confirmButton = { TextButton(onClick = {
-                removingSeat = null
-                model.removeMember(id, seat.principalId)
+                removingMember = null
+                model.removeMember(id, member.principalId)
             }, enabled = !state.busy) { Text("确认移除") } },
-            dismissButton = { TextButton(onClick = { removingSeat = null }) { Text("取消") } })
+            dismissButton = { TextButton(onClick = { removingMember = null }) { Text("取消") } })
     }
 }
 
