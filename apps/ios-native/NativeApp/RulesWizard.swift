@@ -84,7 +84,7 @@ struct RulesWizard: View {
                             VStack(alignment: .leading) {
                                 Text(template.name)
                                 Text("\(template.scope == "system" ? "系统" : "参考") · \(reviewLabel(template.reviewStatus))")
-                                    .font(.footnote).foregroundStyle(Brand.muted)
+                                    .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                             }
                         }
                         .brandPanel()
@@ -94,7 +94,7 @@ struct RulesWizard: View {
                 if selected != nil { Button("下一步：调整规则") { step = 1 }.brandPanel() }
             } else if step == 1 {
                 Section {
-                    Text(selected?.name ?? "").font(.headline).brandPanel()
+                    Text(selected?.name ?? "").font(Brand.font(.headline)).brandPanel()
                     Text("人数随模板固定，立直棒固定 1,000 点；只调整本桌。")
                         .foregroundStyle(Brand.muted).brandPanel()
                     Button("重选模板") { step = 0 }.brandPanel()
@@ -110,7 +110,7 @@ struct RulesWizard: View {
                         pointInput(key, label: pointLabels[index])
                         HStack {
                             ForEach(key == "startingPoints" ? [25_000, 30_000, 35_000] : [30_000, 40_000], id: \.self) { preset in
-                                Button(preset.formatted()) { setPoint(key, preset) }.font(.footnote)
+                                Button(preset.formatted()) { setPoint(key, preset) }.font(Brand.font(.footnote))
                             }
                         }
                         .brandPanel()
@@ -138,7 +138,7 @@ struct RulesWizard: View {
                                 pointInput(pointKeys[index], label: pointLabels[index])
                             }
                             Text("罚符 1,500 点无法按所有听牌人数以整百分摊，不支持。")
-                                .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
+                                .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
                             ForEach(count == 3 ? [0, 2000, 3000] : [0, 3000], id: \.self) { value in
                                 Button("罚符 \(value)") { setPoint("notenPenaltyTotal", value) }.brandPanel()
                             }
@@ -171,8 +171,8 @@ struct RulesWizard: View {
                     }
                     ForEach(0..<examples.count, id: \.self) { index in
                         VStack(alignment: .leading) {
-                            Text(examples[index].0).font(.headline)
-                            Text(examples[index].1).font(.footnote).foregroundStyle(Brand.muted).monospacedDigit()
+                            Text(examples[index].0).font(Brand.font(.headline))
+                            Text(examples[index].1).font(Brand.font(.footnote)).foregroundStyle(Brand.muted).monospacedDigit()
                         }
                         .brandPanel()
                     }
@@ -221,7 +221,7 @@ struct RulesWizard: View {
             }), prompt: Text(label).foregroundColor(Brand.muted))
             .keyboardType(.numberPad)
             .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
-            if numberText[key]?.isEmpty == true { Text("此项不能为空").font(.footnote).foregroundStyle(Brand.loss) }
+            if numberText[key]?.isEmpty == true { Text("此项不能为空").font(Brand.font(.footnote)).foregroundStyle(Brand.loss) }
         }
         .brandPanel()
     }

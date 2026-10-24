@@ -56,12 +56,12 @@ private extension View {
         HStack {
             NavigationLink(value: match.id) {
                 VStack(alignment: .leading) {
-                    Text(match.name).font(.headline)
+                    Text(match.name).font(Brand.font(.headline))
                     Text("\(match.templateName) · \(match.reviewStatus) · \(match.seats.count) 麻")
-                        .font(.footnote).foregroundStyle(Brand.muted)
+                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                     Text("\(match.status == "active" ? "继续对局" : "查看记录") · \(localDate(match.updatedAt))")
-                        .font(.caption).foregroundStyle(Brand.muted)
-                    Text("自定义规则 \(match.customizedKeys.count) 项").font(.caption).foregroundStyle(Brand.muted)
+                        .font(Brand.font(.caption1)).foregroundStyle(Brand.muted)
+                    Text("自定义规则 \(match.customizedKeys.count) 项").font(Brand.font(.caption1)).foregroundStyle(Brand.muted)
                 }
             }
             Button(role: .destructive) { deleteFirst = match.id } label: {
@@ -143,7 +143,7 @@ private extension View {
                             point(pointKeys[index], pointLabels[index])
                             HStack {
                                 ForEach(index == 0 ? [25_000, 30_000, 35_000] : [30_000, 40_000], id: \.self) { value in
-                                    Button(value.formatted()) { setPoint(pointKeys[index], value) }.font(.footnote)
+                                    Button(value.formatted()) { setPoint(pointKeys[index], value) }.font(Brand.font(.footnote))
                                 }
                             }.brandPanel()
                         }
@@ -203,8 +203,8 @@ private extension View {
                     if examples.isEmpty { Text("规则无效时不会展示过期金额").foregroundStyle(Brand.muted).brandPanel() }
                     ForEach(0..<examples.count, id: \.self) { index in
                         VStack(alignment: .leading) {
-                            Text(examples[index].0).font(.headline)
-                            Text(examples[index].1).font(.footnote).monospacedDigit().foregroundStyle(Brand.muted)
+                            Text(examples[index].0).font(Brand.font(.headline))
+                            Text(examples[index].1).font(Brand.font(.footnote)).monospacedDigit().foregroundStyle(Brand.muted)
                         }.brandPanel().accessibilityIdentifier("local.wizard.example.\(index)")
                     }
                     Button("下一步：设置姓名与起家") { step = 2 }.disabled(issue != nil).brandPanel().accessibilityIdentifier("local.wizard.nextNames")
@@ -342,11 +342,11 @@ private extension View {
             if let currentMatch = match {
                 Section {
                     Text("\(currentMatch.name) · \(currentMatch.status == "active" ? "进行中" : "已结束")").brandPanel()
-                    Text("引擎 \(currentMatch.engineVersion) · 规则与已结算局不可修改").font(.footnote).foregroundStyle(Brand.muted).brandPanel()
+                    Text("引擎 \(currentMatch.engineVersion) · 规则与已结算局不可修改").font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
                     DisclosureGroup("本桌规则快照 · 自定义 \(currentMatch.customizedKeys.count) 项") {
                         Text("调整字段：\(currentMatch.customizedKeys.isEmpty ? "无" : currentMatch.customizedKeys.joined(separator: "、"))")
                             .foregroundStyle(Brand.muted).brandPanel()
-                        Text(jsonText(currentMatch.rules)).font(.caption).foregroundStyle(Brand.muted).textSelection(.enabled).brandPanel()
+                        Text(jsonText(currentMatch.rules)).font(Brand.font(.caption1)).foregroundStyle(Brand.muted).textSelection(.enabled).brandPanel()
                     }.brandPanel()
                     if currentMatch.engineVersion != EngineBridgeCheck.version {
                         Text("引擎版本不同，此牌桌只能读取历史，不能继续计算").foregroundStyle(Brand.loss).brandPanel()
@@ -374,7 +374,7 @@ private extension View {
                                 Button(seat.isRiichi ? "取消" : "立直") { action { try store.mark(id, seat: seat.seatNo) } }
                                     .disabled(currentMatch.engineVersion != EngineBridgeCheck.version)
                             }.brandPanel().accessibilityIdentifier("local.table.hand.seat.\(seat.seatNo)")
-                            Text("声明 \(seat.declares)/2 · 取消 \(seat.cancels)/1").font(.caption).foregroundStyle(Brand.muted).brandPanel()
+                            Text("声明 \(seat.declares)/2 · 取消 \(seat.cancels)/1").font(Brand.font(.caption1)).foregroundStyle(Brand.muted).brandPanel()
                         }
                         Button("录入本局结果") { entering = true }.disabled(currentMatch.engineVersion != EngineBridgeCheck.version)
                             .brandPanel().accessibilityIdentifier("local.table.enterResult")
@@ -388,7 +388,7 @@ private extension View {
                             abandonFirst = true
                         }.disabled(currentMatch.engineVersion != EngineBridgeCheck.version).brandPanel()
                         Text("放弃只丢弃当前未结算手及立直标记；已结算记录、供托及点数不撤回。")
-                            .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
+                            .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
                     }
                 } else {
                     Section {
@@ -422,13 +422,13 @@ private extension View {
                                     if let parts = fields["breakdown"]?.arrayValue {
                                         ForEach(0..<parts.count, id: \.self) { part in
                                             Text("\(breakdownLabel(parts[part].object?["reason"]?.string))：\(number(parts[part].object?["amount"]) ?? 0)")
-                                                .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
+                                                .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
                                         }
                                     }
                                 }
                             }
-                            Text("输入：\(jsonText(result.input))").font(.caption).foregroundStyle(Brand.muted).textSelection(.enabled).brandPanel()
-                            Text("完整输出：\(jsonText(result.output))").font(.caption).foregroundStyle(Brand.muted).textSelection(.enabled).brandPanel()
+                            Text("输入：\(jsonText(result.input))").font(Brand.font(.caption1)).foregroundStyle(Brand.muted).textSelection(.enabled).brandPanel()
+                            Text("完整输出：\(jsonText(result.output))").font(Brand.font(.caption1)).foregroundStyle(Brand.muted).textSelection(.enabled).brandPanel()
                         }.brandPanel().accessibilityIdentifier("local.table.history.\(result.id)")
                     }
                 } header: { BrandSectionHeader("已结算逐局历史 · 保存的原始输入及引擎输出") }
@@ -478,7 +478,7 @@ private extension View {
                     .brandPanel().accessibilityIdentifier("local.table.standing.\(index)")
             }
         }
-        Text("完整终局输出：\(jsonText(terminal))").font(.caption).foregroundStyle(Brand.muted).textSelection(.enabled).brandPanel()
+        Text("完整终局输出：\(jsonText(terminal))").font(Brand.font(.caption1)).foregroundStyle(Brand.muted).textSelection(.enabled).brandPanel()
     }
 }
 
@@ -536,7 +536,7 @@ private extension View {
                             if let parts = row["breakdown"]?.arrayValue {
                                 ForEach(0..<parts.count, id: \.self) { part in
                                     Text("\(breakdownLabel(parts[part].object?["reason"]?.string))：\(number(parts[part].object?["amount"]) ?? 0)")
-                                        .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
+                                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
                                 }
                             }
                         }

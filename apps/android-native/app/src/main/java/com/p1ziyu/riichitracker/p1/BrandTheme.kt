@@ -10,6 +10,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -17,6 +18,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
@@ -33,7 +35,23 @@ internal object Brand {
     val cream = Color(0xFFEAE5D7)
     val tileInk = Color(0xFF184F46)
     val hairline = Color(0x65A79D7B)
-    val display = FontFamily(Font(R.font.wenkai_screen_display, FontWeight.Normal))
+    // One FontFamily mirroring the Web root stack: Nunito faces first
+    // (Latin + digits), LXGW WenKai Screen after them, so CJK glyphs fall
+    // through to WenKai. WenKai ships a single weight; it is listed at every
+    // weight and the platform synthesizes the rest — the Web does the same
+    // via font-synthesis: weight.
+    val body = FontFamily(
+        Font(R.font.nunito_regular, FontWeight.Normal),
+        Font(R.font.nunito_semibold, FontWeight.SemiBold),
+        Font(R.font.nunito_bold, FontWeight.Bold),
+        Font(R.font.nunito_extrabold, FontWeight.ExtraBold),
+        Font(R.font.wenkai_screen_display, FontWeight.Normal),
+        Font(R.font.wenkai_screen_display, FontWeight.SemiBold),
+        Font(R.font.wenkai_screen_display, FontWeight.Bold),
+        Font(R.font.wenkai_screen_display, FontWeight.ExtraBold),
+    )
+    /** Display face: the same stack (per-glyph Latin -> Nunito, CJK -> WenKai). */
+    val display = body
     val hero = Brush.horizontalGradient(0f to panel, 0.58f to Color(0xFF1B3844), 1f to Color(0xFF264E42))
     val felt = Brush.radialGradient(listOf(Color(0xFF2B645D), Color(0xFF24534F), Color(0xFF173D42)))
 }
@@ -51,9 +69,32 @@ private val scheme = darkColorScheme(
     error = Brand.loss,
 )
 
+private val brandTypography: Typography
+    get() {
+        val base = Typography()
+        fun TextStyle.brand() = copy(fontFamily = Brand.body, fontFeatureSettings = "tnum, lnum")
+        return Typography(
+            displayLarge = base.displayLarge.brand(),
+            displayMedium = base.displayMedium.brand(),
+            displaySmall = base.displaySmall.brand(),
+            headlineLarge = base.headlineLarge.brand(),
+            headlineMedium = base.headlineMedium.brand(),
+            headlineSmall = base.headlineSmall.brand(),
+            titleLarge = base.titleLarge.brand(),
+            titleMedium = base.titleMedium.brand(),
+            titleSmall = base.titleSmall.brand(),
+            bodyLarge = base.bodyLarge.brand(),
+            bodyMedium = base.bodyMedium.brand(),
+            bodySmall = base.bodySmall.brand(),
+            labelLarge = base.labelLarge.brand(),
+            labelMedium = base.labelMedium.brand(),
+            labelSmall = base.labelSmall.brand(),
+        )
+    }
+
 @Composable
 internal fun BrandTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = scheme, content = content)
+    MaterialTheme(colorScheme = scheme, typography = brandTypography, content = content)
 }
 
 @Composable

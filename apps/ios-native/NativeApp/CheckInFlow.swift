@@ -225,7 +225,7 @@ struct CheckInScreen: View {
                         .disabled(!session.authenticated || busy || code.isEmpty)
                         .accessibilityIdentifier("checkIn.redeemCode").brandPanel()
                     Text("房间码换取短时签到凭证；选择空座后即可直接入座。")
-                        .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
+                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
                 } header: { BrandSectionHeader("通过房间码") }
             }
             if !session.authenticated {
@@ -297,7 +297,7 @@ struct CheckInScreen: View {
                     }
                     .accessibilityIdentifier("checkIn.seatPicker").brandPanel()
                     Text("已有成员：\(occupiedCount) / \(seatsPreview.match.playerCount)。自动选择会在提交时取最低空座。")
-                        .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
+                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
                     if fullForGuest {
                         Text("牌桌已满，暂无可选座位。").foregroundStyle(Brand.gold).brandPanel()
                     }

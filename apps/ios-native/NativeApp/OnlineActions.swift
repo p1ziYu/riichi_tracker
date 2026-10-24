@@ -460,7 +460,7 @@ struct OnlineTableActions: View {
                 !OnlineCommandPolicy.canConfirmSettlement(snapshot, principal: session.principalID) &&
                 !(isOwner && snapshot.match.status == "preparing") {
                 Text("当前身份未签到入座，仅可只读查看牌桌；写入操作需由已签到玩家执行。")
-                    .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
+                    .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
             }
             if let code = snapshot.match.joinCode, isOwner, snapshot.match.status == "preparing" {
                 LabeledContent {
@@ -613,10 +613,10 @@ struct OnlineTableActions: View {
     @ViewBuilder private var preparingControls: some View {
             if isOwner && snapshot.match.status == "preparing" {
                 Text("访客通过签到链接或房间码直接选择空座入座；加入者会实时显示在下方。")
-                    .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
+                    .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
                 if !occupiedSeats.isEmpty {
                     Group {
-                        Text("已加入成员 · 调整座次").font(.headline).brandPanel()
+                        Text("已加入成员 · 调整座次").font(Brand.font(.headline)).brandPanel()
                         ForEach(occupiedSeats) { seat in
                             HStack {
                                 Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "未命名")")
@@ -689,7 +689,7 @@ struct OnlineTableActions: View {
                     InvitationQR(link: invitationURL).brandPanel()
                     Button("复制签到链接") { UIPasteboard.general.string = invitationURL }.brandPanel()
                     Text("签入凭证仅供一人使用。请勿公开转发；使用或过期后需重新生成。")
-                        .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
+                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
                 }
                 Picker("指定起家（可选）", selection: $dealer) {
                     Text("服务器随机").tag(Int?.none)
@@ -852,7 +852,7 @@ private struct ResultEntry: View {
                             Text("\(payment.seatNo + 1) 号位：\(payment.netPoints >= 0 ? "+" : "")\(payment.netPoints) 点").monospacedDigit()
                             ForEach(0..<payment.breakdown.count, id: \.self) { index in
                                 Text("\(payment.breakdown[index].reason)：\(payment.breakdown[index].amount)")
-                                    .font(.footnote).foregroundStyle(Brand.muted)
+                                    .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                             }
                         }
                         .brandPanel()
@@ -1067,7 +1067,7 @@ struct ResultInputFields: View {
                                     }
                                 } else {
                                     Text("役满按引擎要求提交番 1、符 30")
-                                        .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
+                                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
                                 }
                                 let ordinaryCap = snapshot.match.rulesSnapshot?["compositeYakuman"] == .bool(true) ? 10 : 1
                                 TextField("\(number + 1) 号位普通役满数 0–\(ordinaryCap)",

@@ -12,7 +12,10 @@ enum Brand {
     static let gain = Color(red: 169 / 255, green: 220 / 255, blue: 172 / 255)
     static let loss = Color(red: 243 / 255, green: 169 / 255, blue: 167 / 255)
     static let hairline = Color.white.opacity(0.13)
-    static func display(_ size: CGFloat) -> Font { .custom("LXGWWenKaiScreenR", size: size, relativeTo: .title) }
+    static func display(_ size: CGFloat) -> Font { BrandFont.display(size) }
+    static func font(_ style: UIFont.TextStyle, weight: UIFont.Weight? = nil) -> Font {
+        BrandFont.font(style, weight: weight)
+    }
 }
 
 private struct EastTile: View {
@@ -171,7 +174,7 @@ private struct RuleInfo: View {
             Text("来源：\(sourceLabel(details.source)) · \(reviewLabel(details.reviewStatus))")
             Text("自定义：\(details.customizedKeys.isEmpty ? "无（按模板）" : details.customizedKeys.map(customRuleLabel).joined(separator: "、"))")
         }
-        .font(.subheadline)
+        .font(Brand.font(.subheadline))
         .foregroundStyle(Brand.muted)
     }
 
@@ -203,7 +206,7 @@ struct AuthScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text("ACCOUNT / 账户")
-                    .font(.caption)
+                    .font(Brand.font(.caption1))
                     .foregroundStyle(Brand.gold)
                 HStack(spacing: 12) {
                     EastTile(size: 38)
@@ -239,7 +242,7 @@ struct AuthScreen: View {
                     Task { await submit() }
                 } label: {
                     Text(busy ? "请稍候…" : registering ? "注册并登录" : "登录")
-                        .fontWeight(.semibold)
+                        .font(Brand.font(.body, weight: .semibold))
                         .foregroundStyle(Brand.background)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
@@ -258,11 +261,11 @@ struct AuthScreen: View {
                 }
                 .disabled(busy)
                 Text("访客扫码或输入房间码即可直接选座签到，不能开桌；本地模式不使用此身份。")
-                    .font(.footnote).foregroundStyle(Brand.muted)
+                    .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                 Text("本地无身份模式在“本地牌桌”标签中开桌；不登录、不创建访客、不上传。")
-                    .font(.footnote).foregroundStyle(Brand.muted)
+                    .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                 if let warning = session.sessionError {
-                    Text(warning).font(.footnote).foregroundStyle(Brand.loss)
+                    Text(warning).font(Brand.font(.footnote)).foregroundStyle(Brand.loss)
                 }
             }
             .textFieldStyle(.plain)
@@ -282,7 +285,7 @@ struct AuthScreen: View {
 
     private func modeButton(_ title: String, registering mode: Bool) -> some View {
         Button(title) { registering = mode }
-            .font(.subheadline.weight(.semibold))
+            .font(Brand.font(.subheadline, weight: .semibold))
             .foregroundStyle(registering == mode ? Brand.background : Brand.cream)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
@@ -334,13 +337,13 @@ struct AuthScreen: View {
                 EastTile(size: 30)
                 VStack(alignment: .leading, spacing: 6) {
                     Text(ruleDetails(snapshot: match.rulesSnapshot, template: templates.first { $0.versionId == match.rulesetVersionId }).title)
-                        .font(.headline).foregroundStyle(Brand.gold)
+                        .font(Brand.font(.headline)).foregroundStyle(Brand.gold)
                     Text("\(statusLabel(match.status)) · \(match.playerCount) 麻")
                         .foregroundStyle(Brand.text)
                     Text(localDate(match.createdAt))
-                        .font(.subheadline).foregroundStyle(Brand.muted).monospacedDigit()
+                        .font(Brand.font(.subheadline)).foregroundStyle(Brand.muted).monospacedDigit()
                     Text("牌桌 \(match.id)")
-                        .font(.caption2).foregroundStyle(Brand.muted).textSelection(.enabled)
+                        .font(Brand.font(.caption2)).foregroundStyle(Brand.muted).textSelection(.enabled)
                 }
             }
             .padding(.vertical, 5)
@@ -359,14 +362,14 @@ struct AuthScreen: View {
                             EastTile(size: 38)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text("一姬").font(Brand.display(29)).foregroundStyle(Brand.text)
-                                Text("ICHIHIME").font(.caption2).tracking(3).foregroundStyle(Brand.gold)
+                                Text("ICHIHIME").font(Brand.font(.caption2)).tracking(3).foregroundStyle(Brand.gold)
                             }
                             Spacer()
                             EastTile(size: 66).rotationEffect(.degrees(12))
                         }
                         Text("落座，即开局。").font(Brand.display(27)).foregroundStyle(Brand.text)
                         Text("从规则到结算，给同桌每一分一个清楚的去处。")
-                            .font(.subheadline).foregroundStyle(Brand.muted)
+                            .font(Brand.font(.subheadline)).foregroundStyle(Brand.muted)
                         Button {
                             showCreate = true
                         } label: {
@@ -378,7 +381,7 @@ struct AuthScreen: View {
                         .disabled(!session.canHost)
                         .accessibilityIdentifier("online.wizard.open")
                         Text(session.canHost ? "选择模板、调整规则、预览支付后创建" : "访客不能创建牌桌，请使用注册账户")
-                            .font(.footnote).foregroundStyle(Brand.muted)
+                            .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                     }
                     .padding(20)
                     .background(LinearGradient(stops: [
@@ -413,9 +416,9 @@ struct AuthScreen: View {
                     }
                     ForEach(templates.prefix(3)) { template in
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(template.name).font(.headline).foregroundStyle(Brand.gold)
+                            Text(template.name).font(Brand.font(.headline)).foregroundStyle(Brand.gold)
                             Text("\(template.scope == "system" ? "系统模板" : "私有模板") · \(reviewLabel(template.reviewStatus))")
-                                .font(.subheadline).foregroundStyle(Brand.muted)
+                                .font(Brand.font(.subheadline)).foregroundStyle(Brand.muted)
                         }
                         .brandPanel()
                     }
@@ -544,7 +547,7 @@ struct AuthScreen: View {
                     }
                     Text("创建时间：\(localDate(currentSnapshot.match.createdAt))").monospacedDigit()
                     Text("牌桌 \(currentSnapshot.match.id)")
-                        .font(.caption2).foregroundStyle(Brand.muted).textSelection(.enabled)
+                        .font(Brand.font(.caption2)).foregroundStyle(Brand.muted).textSelection(.enabled)
                     RuleInfo(snapshot: currentSnapshot.match.rulesSnapshot, templates: templates, versionID: currentSnapshot.match.rulesetVersionId)
                 } header: { BrandSectionHeader("对局信息") }
                 .brandPanel()
@@ -560,19 +563,19 @@ struct AuthScreen: View {
                     ForEach(currentSnapshot.seats.sorted { $0.seatNo < $1.seatNo }, id: \.seatNo) { seat in
                         HStack(spacing: 12) {
                             Text(windLabel(["E", "S", "W", "N"][seat.seatNo % 4]))
-                                .font(.headline)
+                                .font(Brand.font(.headline))
                                 .foregroundStyle(Brand.ink)
                                 .frame(width: 30, height: 30)
                                 .background(Brand.cream, in: RoundedRectangle(cornerRadius: 6))
                             VStack(alignment: .leading, spacing: 5) {
                                 Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "空座")")
-                                    .font(.headline).foregroundStyle(Brand.text)
+                                    .font(Brand.font(.headline)).foregroundStyle(Brand.text)
                                 Text(seatLabel(seat.status))
-                                    .font(.caption).foregroundStyle(Brand.muted)
+                                    .font(Brand.font(.caption1)).foregroundStyle(Brand.muted)
                             }
                             Spacer(minLength: 4)
                             Text(seat.points.map { "\($0) 点" } ?? "点数未提供")
-                                .font(.subheadline.weight(.semibold))
+                                .font(Brand.font(.subheadline, weight: .semibold))
                                 .monospacedDigit()
                                 .foregroundStyle(Brand.ink)
                                 .padding(.horizontal, 9).padding(.vertical, 7)
@@ -622,13 +625,13 @@ struct AuthScreen: View {
             }
             Section {
                 Text("显示最早的已结算局摘要（最多 100 局），非完整牌谱回放；无后续分页或原始输入。")
-                    .font(.footnote).foregroundStyle(Brand.muted)
+                    .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                 if let recordedHands = hands {
                     if recordedHands.isEmpty { Text("暂无牌局记录") }
                     ForEach(recordedHands.sorted { $0.handNo < $1.handNo }, id: \.handNo) { hand in
                         VStack(alignment: .leading, spacing: 4) {
                             Text("第 \(hand.handNo) 局 · \(windLabel(hand.roundWind)) \(hand.roundNumber) 局 · \(handLabel(hand.kind))")
-                                .font(.headline)
+                                .font(Brand.font(.headline))
                                 .monospacedDigit()
                             Text("庄家 \(hand.dealerSeatNo + 1) 号位 · 本场棒 \(hand.honba)")
                                 .monospacedDigit()
@@ -795,7 +798,7 @@ struct ProfileScreen: View {
                     EastTile(size: 38)
                     VStack(alignment: .leading, spacing: 1) {
                         Text("一姬").font(Brand.display(29)).foregroundStyle(Brand.text)
-                        Text("ICHIHIME").font(.caption2).tracking(3).foregroundStyle(Brand.gold)
+                        Text("ICHIHIME").font(Brand.font(.caption2)).tracking(3).foregroundStyle(Brand.gold)
                     }
                 }
                 .padding(.vertical, 12)
@@ -819,7 +822,7 @@ struct ProfileScreen: View {
                     } label: { Text("创建时间").foregroundStyle(Brand.text) }
                     if session.identity == .onlineGuest {
                         Text("临时访客会话已安全保存；不能开桌，也不承诺升级账户后自动继承战绩。")
-                            .font(.footnote).foregroundStyle(Brand.muted)
+                            .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                     }
                 }
             } header: { BrandSectionHeader("我的账号") }

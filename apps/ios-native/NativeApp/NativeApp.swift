@@ -26,7 +26,8 @@ struct IchihimeNativeApp: App {
             ? FileManager.default.temporaryDirectory.appendingPathComponent("LocalUITour-\(UUID().uuidString).sqlite3")
             : nil
         _localStore = StateObject(wrappedValue: LocalMatchStore(location: testStore))
-        // Nav titles: ivory text only. Do NOT give this proxy appearance an
+        // Nav titles: ivory text in the brand stack (Nunito/WenKai composite).
+        // Do NOT give this proxy appearance an
         // opaque background: on iOS 27, configureWithOpaqueBackground() +
         // backgroundColor makes SwiftUI reserve an oversized empty bar zone
         // whose title never composites (the "dead band" defect, 2026-10-23).
@@ -35,8 +36,8 @@ struct IchihimeNativeApp: App {
         let appearance = UINavigationBarAppearance()
         appearance.configureWithTransparentBackground()
         let titleColor = UIColor(red: 245 / 255, green: 245 / 255, blue: 239 / 255, alpha: 1)
-        appearance.titleTextAttributes = [.foregroundColor: titleColor]
-        appearance.largeTitleTextAttributes = [.foregroundColor: titleColor]
+        appearance.titleTextAttributes = [.foregroundColor: titleColor, .font: BrandFont.uiFont(size: 17, weight: .semibold)]
+        appearance.largeTitleTextAttributes = [.foregroundColor: titleColor, .font: BrandFont.uiFont(size: 34, weight: .bold)]
 
         let navigationBar = UINavigationBar.appearance()
         navigationBar.standardAppearance = appearance
@@ -51,9 +52,9 @@ struct IchihimeNativeApp: App {
         let gold = UIColor(Brand.gold)
         func style(_ item: UITabBarItemAppearance) {
             item.normal.iconColor = muted
-            item.normal.titleTextAttributes = [.foregroundColor: muted]
+            item.normal.titleTextAttributes = [.foregroundColor: muted, .font: BrandFont.uiFont(size: 10)]
             item.selected.iconColor = gold
-            item.selected.titleTextAttributes = [.foregroundColor: gold]
+            item.selected.titleTextAttributes = [.foregroundColor: gold, .font: BrandFont.uiFont(size: 10, weight: .semibold)]
         }
         style(tabAppearance.stackedLayoutAppearance)
         style(tabAppearance.inlineLayoutAppearance)
@@ -142,6 +143,7 @@ struct IchihimeNativeApp: App {
             }
             .tint(Brand.gold)
             .preferredColorScheme(.dark)
+            .font(BrandFont.font(.body))
             .task {
                 // CI/verification hook: `simctl launch ... -EngineSelfCheck` runs the
                 // bundled golden-fixture replay through the MobileEngine framework and
