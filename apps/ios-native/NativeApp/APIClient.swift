@@ -255,7 +255,13 @@ final class APIClient {
             request.httpBody = encodedBody
         } else if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONEncoder().encode(EncodableBody(value: body))
+            // Canonical key order: Swift's JSONEncoder does not guarantee struct key
+            // order across processes when encoding through an existential, which
+            // made repeat-request byte equality nondeterministic. Sorted keys keep
+            // every API body byte-stable (servers parse objects unordered).
+            let bodyEncoder = JSONEncoder()
+            bodyEncoder.outputFormatting = [.sortedKeys]
+            request.httpBody = try bodyEncoder.encode(EncodableBody(value: body))
         }
         let (data, response) = try await transport.data(for: request)
         guard let response = response as? HTTPURLResponse else {
