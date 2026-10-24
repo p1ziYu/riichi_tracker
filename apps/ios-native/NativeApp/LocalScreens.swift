@@ -59,7 +59,7 @@ private extension View {
                     Text(match.name).font(.headline)
                     Text("\(match.templateName) · \(match.reviewStatus) · \(match.seats.count) 麻")
                         .font(.footnote).foregroundStyle(Brand.muted)
-                    Text("\(match.status == "active" ? "继续对局" : "查看记录") · \(match.updatedAt)")
+                    Text("\(match.status == "active" ? "继续对局" : "查看记录") · \(localDate(match.updatedAt))")
                         .font(.caption).foregroundStyle(Brand.muted)
                     Text("自定义规则 \(match.customizedKeys.count) 项").font(.caption).foregroundStyle(Brand.muted)
                 }
@@ -148,7 +148,7 @@ private extension View {
                             }.brandPanel()
                         }
                         if case .number(let start)? = values["startingPoints"], case .number(let returned)? = values["returnPoints"] {
-                            Text("头名赏（只读） \((returned - start) * Double(count) / 1000) 竞技分").foregroundStyle(Brand.muted).brandPanel()
+                            Text("头名赏（只读） \(scoreText((returned - start) * Double(count) / 1000)) 竞技分").foregroundStyle(Brand.muted).brandPanel()
                         }
                         ForEach(0..<uma.count, id: \.self) { index in
                             TextField("", text: Binding(get: { uma[index] }, set: { uma[index] = $0; recalculate() }),
@@ -421,7 +421,7 @@ private extension View {
                                     Text("\(number(fields["seatNo"]).map { $0 + 1 } ?? 0) 号位：\(number(fields["netPoints"]) ?? 0) 点").brandPanel()
                                     if let parts = fields["breakdown"]?.arrayValue {
                                         ForEach(0..<parts.count, id: \.self) { part in
-                                            Text("\(parts[part].object?["reason"]?.string ?? "支付")：\(number(parts[part].object?["amount"]) ?? 0)")
+                                            Text("\(breakdownLabel(parts[part].object?["reason"]?.string))：\(number(parts[part].object?["amount"]) ?? 0)")
                                                 .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
                                         }
                                     }
@@ -535,7 +535,7 @@ private extension View {
                                 .brandPanel().accessibilityIdentifier("local.result.payment.\(index)")
                             if let parts = row["breakdown"]?.arrayValue {
                                 ForEach(0..<parts.count, id: \.self) { part in
-                                    Text("\(parts[part].object?["reason"]?.string ?? "支付")：\(number(parts[part].object?["amount"]) ?? 0)")
+                                    Text("\(breakdownLabel(parts[part].object?["reason"]?.string))：\(number(parts[part].object?["amount"]) ?? 0)")
                                         .font(.footnote).foregroundStyle(Brand.muted).brandPanel()
                                 }
                             }
@@ -572,5 +572,30 @@ private extension View {
         guard let input else { return }
         do { preview = try store.preview(match.id, input: input); previewInput = input; issue = nil }
         catch { issue = error.localizedDescription; preview = nil; previewInput = nil }
+    }
+}
+
+/// 竞技分显示：整数不带小数尾巴（20，而非 20.0 / 20.000000），小数用最短形式（如 20.5）。
+private func scoreText(_ value: Double) -> String {
+    value == value.rounded() ? String(Int(value)) : String(value)
+}
+
+/// 结算明细标签：引擎 breakdown 的 reason 键 → 界面文案（术语与 Web 端一致），未知键回退原始键名。
+private func breakdownLabel(_ reason: String?) -> String {
+    switch reason {
+    case "ron_win": return "荣和"
+    case "ron_payment": return "放铳"
+    case "tsumo_win": return "自摸"
+    case "tsumo_payment": return "自摸支付"
+    case "honba_win", "honba_payment": return "本场费"
+    case "riichi_pool": return "供托"
+    case "riichi": return "立直棒"
+    case "tenpai_receipt": return "听牌收入"
+    case "noten_penalty": return "未听罚符"
+    case "nagashi_mangan_win": return "流局满贯"
+    case "nagashi_mangan_payment": return "流局满贯支付"
+    case "manual_adjudication": return "人工裁定"
+    case "chombo_replay": return "错和重赛"
+    default: return reason ?? "支付"
     }
 }

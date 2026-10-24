@@ -56,7 +56,7 @@ extension View {
     func brandPanel() -> some View { modifier(BrandPanel()) }
 }
 
-private func localDate(_ value: String?) -> String {
+func localDate(_ value: String?) -> String {
     guard let value, !value.isEmpty else { return "未提供" }
     let date = ISO8601DateFormatter.standard.date(from: value)
         ?? ISO8601DateFormatter.withFractionalSeconds.date(from: value)
