@@ -160,7 +160,7 @@ describe('isolated migration runner negative probes', () => {
   });
 
   it('applies 013 after 012, records its checksum, and skips it on rerun', async () => {
-    const all = loadMigrations();
+    const all = loadMigrations().filter((m) => m.version <= '013');
     const m013 = all.find((m) => m.version === '013');
     assert.ok(m013, 'migration 013 exists');
     const db = new FakeDatabase();
