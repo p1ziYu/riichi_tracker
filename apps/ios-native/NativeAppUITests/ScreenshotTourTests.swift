@@ -211,6 +211,12 @@ final class ScreenshotTourTests: XCTestCase {
         if let joinCode = environment["UITEST_JOINCODE"], !joinCode.isEmpty {
             let codeField = app.textFields["checkIn.roomCode"]
             tap(codeField)
+            if !app.keyboards.firstMatch.waitForExistence(timeout: 3) {
+                // Form sheet fields occasionally take the first tap as a
+                // focus pass without raising the keyboard.
+                codeField.tap()
+                _ = app.keyboards.firstMatch.waitForExistence(timeout: 3)
+            }
             codeField.typeText(joinCode)
             tap(app.buttons["checkIn.redeemCode"])
             XCTAssertTrue(app.buttons["checkIn.confirmSeat"].waitForExistence(timeout: timeout),
