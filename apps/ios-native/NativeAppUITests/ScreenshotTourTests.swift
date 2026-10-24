@@ -221,17 +221,19 @@ final class ScreenshotTourTests: XCTestCase {
             }
             app.typeText(joinCode)
             tap(app.buttons["checkIn.redeemCode"])
-            // Guests land on the seat picker; a host redeeming a code for a
-            // table they own is refused by design (host presence is confirmed
-            // on seat claim), so either arrival proves the redemption step.
+            // The first redeem tap can be consumed dismissing the keyboard;
+            // re-tap while waiting for the seat preview to load.
             let seatPreview = app.buttons["checkIn.confirmSeat"]
-            let hostRefusal = app.staticTexts["签到失败，请确认链接或房间码后重试。"]
-            let deadline = Date().addingTimeInterval(timeout)
-            while !seatPreview.exists && !hostRefusal.exists && Date() < deadline {
-                Thread.sleep(forTimeInterval: 1)
+            let deadline = Date().addingTimeInterval(45)
+            var lastRedeemTap = Date()
+            while !seatPreview.exists && Date() < deadline {
+                Thread.sleep(forTimeInterval: 2)
+                if Date().timeIntervalSince(lastRedeemTap) > 6 {
+                    tap(app.buttons["checkIn.redeemCode"])
+                    lastRedeemTap = Date()
+                }
             }
-            XCTAssertTrue(seatPreview.exists || hostRefusal.exists,
-                          "Room code did not resolve to a seat preview or the host refusal")
+            XCTAssertTrue(seatPreview.exists, "Room code did not reach the seat preview")
             capture("tour-online-10-seats", in: app)
         }
         tap(app.buttons["关闭"])
