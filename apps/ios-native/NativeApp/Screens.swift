@@ -311,6 +311,7 @@ struct AuthScreen: View {
     @ObservedObject var session: AppSession
     let lobby: Bool
     let onRevoked: @MainActor () -> Void
+    let onJoin: () -> Void
     @State private var matches: [MatchSummary]?
     @State private var templates: [TemplateDTO] = []
     @State private var loading = false
@@ -370,17 +371,28 @@ struct AuthScreen: View {
                         Text("落座，即开局。").font(Brand.display(27)).foregroundStyle(Brand.text)
                         Text("从规则到结算，给同桌每一分一个清楚的去处。")
                             .font(Brand.font(.subheadline)).foregroundStyle(Brand.muted)
-                        Button {
-                            showCreate = true
-                        } label: {
-                            Text("开桌 ↗").frame(maxWidth: .infinity)
+                        HStack(spacing: 12) {
+                            Button {
+                                showCreate = true
+                            } label: {
+                                Text("开桌 ↗").frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Brand.gold)
+                            .foregroundStyle(Brand.background)
+                            .disabled(!session.canHost)
+                            .accessibilityIdentifier("online.wizard.open")
+                            Button {
+                                onJoin()
+                            } label: {
+                                Text("加入牌桌").frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(Brand.gold)
+                            .foregroundStyle(Brand.gold)
+                            .accessibilityIdentifier("online.join.open")
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Brand.gold)
-                        .foregroundStyle(Brand.background)
-                        .disabled(!session.canHost)
-                        .accessibilityIdentifier("online.wizard.open")
-                        Text(session.canHost ? "选择模板、调整规则、预览支付后创建" : "访客不能创建牌桌，请使用注册账户")
+                        Text(session.canHost ? "选择模板、调整规则、预览支付后创建；加入牌桌可用房间码或扫码签到" : "访客不能开桌，可用「加入牌桌」扫码或输房间码入座")
                             .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                     }
                     .padding(20)
@@ -391,7 +403,7 @@ struct AuthScreen: View {
                     ], startPoint: .topLeading, endPoint: .bottomTrailing),
                     in: RoundedRectangle(cornerRadius: 18))
                     .overlay(RoundedRectangle(cornerRadius: 18).stroke(Brand.gold.opacity(0.7), lineWidth: 1))
-                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                    .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
                     .listRowBackground(Brand.background)
                 }
             }
@@ -410,19 +422,6 @@ struct AuthScreen: View {
                     if matches != nil && liveMatches.isEmpty { Text("暂无进行中的牌桌").foregroundStyle(Brand.muted).brandPanel() }
                     ForEach(liveMatches, id: \.id) { match in row(match) }
                 } header: { BrandSectionHeader("正在进行的牌桌") }
-                Section {
-                    if templates.isEmpty {
-                        Text("规则模板暂未提供").foregroundStyle(Brand.muted).brandPanel()
-                    }
-                    ForEach(templates.prefix(3)) { template in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(template.name).font(Brand.font(.headline)).foregroundStyle(Brand.gold)
-                            Text("\(template.scope == "system" ? "系统模板" : "私有模板") · \(reviewLabel(template.reviewStatus))")
-                                .font(Brand.font(.subheadline)).foregroundStyle(Brand.muted)
-                        }
-                        .brandPanel()
-                    }
-                } header: { BrandSectionHeader("规则模板 / 桌边入口") }
             }
             Section {
                 if matches != nil && recentMatches.isEmpty {

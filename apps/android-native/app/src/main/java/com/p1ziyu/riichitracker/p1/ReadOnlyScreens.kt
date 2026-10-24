@@ -151,7 +151,7 @@ private fun MatchRow(match: MatchSummary, templates: List<TemplateDto>, onOpen: 
 }
 
 @Composable
-private fun LobbyHero(onCreate: () -> Unit) {
+private fun LobbyHero(onCreate: () -> Unit, onJoin: () -> Unit) {
     Column(Modifier.fillMaxWidth().border(1.dp, Brand.gold.copy(alpha = 0.44f), RoundedCornerShape(12.dp))
         .background(Brand.hero, RoundedCornerShape(12.dp)).padding(10.dp)
         .border(1.dp, Brand.gold.copy(alpha = 0.26f), RoundedCornerShape(8.dp)).padding(16.dp),
@@ -160,7 +160,10 @@ private fun LobbyHero(onCreate: () -> Unit) {
         Text("一姬 / ICHIHIME · 线下日麻记分", color = Brand.gold, style = MaterialTheme.typography.labelMedium)
         Heading("落座，即开局。")
         Text("从规则到结算，给同桌每一分一个清楚的去处。", color = Color(0xFFD3DFDC))
-        Button(onClick = onCreate) { Text("开桌 ↗") }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button(onClick = onCreate, modifier = Modifier.weight(1f)) { Text("开桌 ↗") }
+            OutlinedButton(onClick = onJoin, modifier = Modifier.weight(1f)) { Text("加入牌桌") }
+        }
         Caption("本桌在线记分 · 服务端确认每笔支付")
     }
 }
@@ -187,26 +190,15 @@ fun MatchListScreen(
     PullToRefreshBox(isRefreshing = refreshing, onRefresh = onRefresh, modifier = Modifier.fillMaxSize().background(Brand.background)) {
         LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (lobby) {
-                item { LobbyHero(onCreate) }
+                item { LobbyHero(onCreate, onJoin) }
                 item {
                     Text("在线身份 · ${principalName?.takeIf { it.isNotBlank() } ?: if (session == SessionMode.ACCOUNT) "账户" else "临时访客"} · ${if (session == SessionMode.ACCOUNT) "账户" else "访客"}", color = Brand.goldText)
-                    OutlinedButton(onClick = onJoin) { Text("扫码 / 链接 / 房间码加入") }
-                    Caption("扫码或输入房间码，查看座位后直接签到。")
+                    Caption("加入牌桌：扫码或输入房间码，查看座位后直接签到。")
                 }
                 if (loading && matches == null) item { CircularProgressIndicator() }
                 if (error != null) item { Text("加载失败：$error", color = MaterialTheme.colorScheme.error); TextButton(onClick = onRefresh) { Text("重试") } }
                 if (!loading && matches != null && live.isEmpty()) item { Caption("暂无正在进行的牌桌，下拉刷新试试") }
                 items(live, key = { "live:${it.id}" }) { MatchRow(it, templates, onOpen) }
-                item { SectionTitle("规则模板") }
-                if (templates.isEmpty()) item { Caption("模板资料暂未提供") }
-                items(templates, key = { "template:${it.versionId}" }) { template ->
-                    BrandPanel(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                            Text(template.name, color = Brand.goldText, style = MaterialTheme.typography.titleMedium)
-                            Caption("${sourceLabel(template.scope)} · ${reviewLabel(template.reviewStatus)} · 可在开桌时调整")
-                        }
-                    }
-                }
                 item {
                     BrandPanel(Modifier.fillMaxWidth().clickable(onClick = onHistory)) {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {

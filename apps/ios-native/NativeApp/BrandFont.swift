@@ -11,6 +11,12 @@ import UIKit
 /// the LXGW WenKai Screen font rides along as the CoreText cascade fallback,
 /// so any glyph Nunito lacks (CJK) resolves to WenKai instead of the system
 /// font — the same per-glyph resolution CSS performs with the family list.
+///
+/// The bundled WenKai file is built by scripts/build_brand_font.py from the
+/// full LXGW WenKai Screen release (GB2312 + all UI characters + kana +
+/// punctuation, with sentence-punctuation advances trimmed). Do not replace
+/// it with a small display subset: characters missing from the file fall
+/// back per-glyph to the system font (the Phase 1 font-residuals defect).
 /// Weights Nunito does not ship resolve to the nearest bundled face; WenKai
 /// has a single weight, so heavier CJK runs rely on CoreText weight synthesis,
 /// exactly like the Web's font-synthesis: weight.

@@ -198,6 +198,15 @@ final class ScreenshotTourTests: XCTestCase {
         }
         XCTAssertTrue(app.buttons["online.wizard.open"].isHittable, "Could not dismiss the wizard sheet")
 
+        // The lobby's second primary action opens the existing join flow
+        // (room-code entry + QR scan) without leaving the lobby tab.
+        tap(app.buttons["online.join.open"])
+        XCTAssertTrue(app.textFields["checkIn.roomCode"].waitForExistence(timeout: timeout),
+                      "Lobby join entry did not present the check-in flow")
+        capture("tour-online-09-join", in: app)
+        tap(app.buttons["关闭"])
+        XCTAssertFalse(app.textFields["checkIn.roomCode"].waitForExistence(timeout: 3), "Join sheet did not close")
+
         tab("我的", in: app)
         tap(app.buttons["扫描二维码 / 粘贴签到链接 / 房间码"])
         if !app.textFields["checkIn.roomCode"].waitForExistence(timeout: timeout) {

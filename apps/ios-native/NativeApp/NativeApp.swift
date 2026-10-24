@@ -81,7 +81,10 @@ struct IchihimeNativeApp: App {
                 } else if session.authenticated && !useLocalDuringRestore {
                     TabView(selection: $selectedTab) {
                         NavigationStack(path: $lobbyPath) {
-                            MatchListScreen(session: session, lobby: true, onRevoked: leaveRevokedTable)
+                            MatchListScreen(session: session, lobby: true, onRevoked: leaveRevokedTable, onJoin: {
+                                checkInLink = nil
+                                showingCheckIn = true
+                            })
                                 .navigationDestination(for: String.self) { id in
                                     TableScreen(session: session, matchId: id, onRevoked: leaveRevokedTable)
                                 }
@@ -89,7 +92,7 @@ struct IchihimeNativeApp: App {
                         .tabItem { Label("大厅", systemImage: "house") }
                         .tag(0)
                         NavigationStack(path: $historyPath) {
-                            MatchListScreen(session: session, lobby: false, onRevoked: leaveRevokedTable)
+                            MatchListScreen(session: session, lobby: false, onRevoked: leaveRevokedTable, onJoin: {})
                                 .navigationDestination(for: String.self) { id in
                                     TableScreen(session: session, matchId: id, onRevoked: leaveRevokedTable)
                                 }
