@@ -31,13 +31,15 @@ Web 牌桌在生成签到链接前单独显示房间码；生成后只在二维�
 
 错误响应遵循 `{ "error": "...", "message": "..." }` 格式。每个 IP（`req.ip`）每 10 分钟最多 10 次失败的 404 查询，超限后返回 429；另有每 IP 每分钟最多 60 次总查询的硬限制。成功查询不消耗失败额度，但消耗总查询额度。限流在单个 API 进程内维护，进程重启后计数清零。
 
-## 直接选座入桌
+## 入桌与抽座
 
-访客先用 `GET /api/matches/:id/check-in-seats?token=<URL-encoded token>` 查看准备中牌桌的座位；须已有主体身份和有效令牌，无须先加入牌桌。响应为 `{ "match": { "id": "...", "playerCount": 4, "status": "preparing" }, "seats": [{ "seatNo": 0, "principalId": "...", "displayName": "...", "status": "checked_in" }] }`。API 座位编号从 0 开始，界面从 1 开始显示；已占用座位不可选，展示玩家昵称。
+访客先用 `GET /api/matches/:id/check-in-seats?token=<URL-encoded token>` 查看准备中牌桌；须已有主体身份和有效、未使用的令牌，无须先加入。响应包含 `match`、`caller`（`principalId`、`isOwner`、`isMember`）、`members`（含未入座成员的 `seatNo: null`、`wind: null`）、`seating`（`drawn`、`dealerSeatNo`、`memberCount`、`seatedCount`），以及兼容旧客户端的 `seats` 数组。`GET /api/matches/:id` 也返回全部活跃参与成员，以及 `match.seatingDrawnAt`、`match.dealerSeatNo`。
 
-`POST /api/matches/:id/check-ins` 接收 `{ "token": "...", "alias": "可选昵称", "seatNo": 1 }`，一次创建成员身份、占座并签到，返回 `{ "seat": { "seatNo": 1 }, "grantId": "..." }`；不传 `seatNo` 时自动选择编号最小的空座。已签到成员重复调用返回当前座位和授权，不消耗新令牌。并发占座冲突返回 409 `seat_taken`，客户端应刷新座位供访客重选；无空座返回 409 `match_full`，已开局返回 409 `match_already_started`；无效或过期令牌返回 400 `invalid_token` 或 `token_consumed_or_expired`。房间码可重新换取令牌，失效的签到链接须重新分享。
+`POST /api/matches/:id/check-ins` 接收 `{ "token": "...", "alias": "可选昵称" }`，仅加入房间，不占座或签到；旧客户端传入的 `seatNo` 会被忽略。返回 `{ "member": { "principalId": "...", "displayName": "..." }, "seated": false, "grantId": "..." }`。活跃成员重复加入不消耗新令牌，并返回现有授权和实际 `seated` 状态。房间满员返回 409 `match_full`，已开局返回 409 `match_already_started`，无效或过期令牌返回 400 `invalid_token` 或 `token_consumed_or_expired`。房间码可重新换取令牌。
 
-桌主在准备阶段可调用 `POST /api/matches/:id/seats/reassign { "fromSeatNo": 1, "toSeatNo": 2 }`：目标空座时移动，目标已占用时交换，返回 `{ "fromSeatNo": 1, "toSeatNo": 2, "swapped": true }` 并广播牌桌事件。`POST /api/matches/:id/members/:principalId/remove {}` 移出非桌主成员并释放座位，返回 `{ "removed": true }`；桌主不可移出自己。访客的 `POST /api/matches/:id/leave` 保持不变。桌主选起家、确认座次与开局仍按既有流程。
+满员后桌主调用 `POST /api/matches/:id/seats/draw`，服务端随机洗牌并选择起家，按座位顺序分配 3 人的东南西或 4 人的东南西北风，同时建立座位和签到。返回 `{ "seats": [{ "seatNo": 0, "principalId": "...", "displayName": "...", "wind": "E" }], "dealerSeatNo": 0 }`；未满员返回 409 `room_not_full`，重复抽座返回 409 `seating_already_drawn`，原有完整入座的旧房间返回 409 `seating_already_complete`。`POST /api/matches/:id/seats/claim` 已停用，返回 410 `seat_claim_retired`。
+
+桌主准备阶段仍可调用 `POST /api/matches/:id/seats/reassign { "fromSeatNo": 1, "toSeatNo": 2 }` 移动或交换；抽座后的风位随新座位调整。`POST /api/matches/:id/seats/finalize` 在抽座后以抽出的起家开局，忽略请求体的 `dealerSeatNo`；旧房间未抽座时保留原有选起家流程。抽座后成员被移出或离开会清空全桌座位和签到；补齐人数后桌主重新抽座。
 
 服务端仍保留旧的 `POST /join-requests` 与 `POST /join-requests/:jrId/approve` 命令，但客户端不使用，也不请求待批准列表。
 

@@ -425,35 +425,32 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     checkEq([malformedCode.status, malformedCode.data.error], [404, 'join_code_not_found'],
       'Malformed join code has the same not-found response');
     const ownerBeforeClaim = await requestJson<{
-      match: { rulesHash: string; joinCode: string }; seats: { principalId: string | null; status: string }[]; checkedIn: number;
+      match: { rulesHash: string; joinCode: string; seatingDrawnAt: string | null; dealerSeatNo: number | null };
+      seats: { principalId: string | null; status: string }[];
+      members: { principalId: string; displayName: string }[];
+      checkedIn: number;
     }>(`/api/matches/${matchId}`, { cookie: acct1.cookie });
     checkEq(ownerBeforeClaim.data.match.joinCode, createRes.data.match.joinCode,
       'Match detail exposes the persisted join code');
+    checkEq([ownerBeforeClaim.data.match.seatingDrawnAt, ownerBeforeClaim.data.match.dealerSeatNo], [null, null],
+      'New room has no seating draw or dealer');
     check(ownerBeforeClaim.data.seats.every((seat) => seat.principalId === null),
       'Owner is an active member but has no assigned seat after creation');
     checkEq(ownerBeforeClaim.data.checkedIn, 0, 'Creation does not auto-check-in a seatless owner');
+    checkEq(ownerBeforeClaim.data.members.map((member) => member.principalId), [acct1.principalId],
+      'Match detail exposes the seatless owner as a member');
     const ownerMembership = await pool.query<{ role: string; status: string }>(
       'SELECT role, status FROM app.match_members WHERE match_id = $1 AND principal_id = $2',
       [matchId, acct1.principalId],
     );
     checkEq(ownerMembership.rows[0], { role: 'participant', status: 'active' },
       'Unseated owner remains an active participant');
-    const ownerClaim = await requestJson<{ seatNo: number; status: string }>(
+    const retiredClaim = await requestJson<{ error: string }>(
       `/api/matches/${matchId}/seats/claim`,
       { method: 'POST', cookie: acct1.cookie, body: { seatNo: 0 } },
     );
-    checkEq(ownerClaim.status, 200, 'Owner claims a seat without a join request');
-    checkEq(ownerClaim.data.status, 'checked_in', 'Owner claim is confirmed and checked in');
-    const ownerCheckIn = await pool.query<{ method: string; rules_hash: string; confirmed_by: string }>(
-      `SELECT ci.method, ci.rules_hash, sa.confirmed_by FROM app.check_ins ci
-       JOIN app.seat_assignments sa ON sa.id = ci.seat_assignment_id
-       WHERE ci.match_id = $1 AND sa.seat_no = 0 AND ci.invalidated_at IS NULL`,
-      [matchId],
-    );
-    checkEq(ownerCheckIn.rows[0],
-      { method: 'host_confirm', rules_hash: ownerBeforeClaim.data.match.rulesHash,
-        confirmed_by: acct1.principalId },
-      'Owner assignment is auto-confirmed with a current-rules check-in row');
+    checkEq([retiredClaim.status, retiredClaim.data.error], [410, 'seat_claim_retired'],
+      'Individual seat claims are retired with a stable error');
     const crossOriginTicket = await requestJson<{ error: string }>(`/api/matches/${matchId}/ws-tickets`, {
       method: 'POST', cookie: acct1.cookie, origin: 'https://evil.p1ziyu.com',
     });
@@ -635,117 +632,139 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     }>(`/api/matches/${matchId}/check-in-seats?token=${encodeURIComponent(preJoinToken.data.token)}`, {
       cookie: acct2.cookie,
     });
-    checkEq(previewBeforeJoin.status, 200, 'Valid link token lets a non-member inspect occupied seats');
+    checkEq(previewBeforeJoin.status, 200, 'Valid link token lets a non-member inspect the room');
     checkEq(previewBeforeJoin.data.match, { id: matchId, playerCount: 4, status: 'preparing' },
       'Pre-join preview includes match capacity and state');
-    checkEq(previewBeforeJoin.data.seats[0].principalId, acct1.principalId,
-      'Pre-join preview identifies the seated owner');
-    checkEq(previewBeforeJoin.data.seats[1].status, 'empty', 'Pre-join preview identifies vacant seats');
+    check(previewBeforeJoin.data.seats.every((seat) => seat.status === 'empty'),
+      'Pre-join preview exposes no claimed seats before the draw');
 
-    // 4. Legacy join-request endpoints still assign seats when explicitly used.
-    const joinRequesters: { session: ClientSession; seatNo: number }[] = [
-      { session: acct2, seatNo: 1 },
-      { session: guest1, seatNo: 2 },
-      { session: guest2, seatNo: 3 },
+    // Guests join as members, with no seat assignment until the owner draws the whole room.
+    const playersForCheckIn: { session: ClientSession; alias?: string }[] = [
+      { session: acct2 },
+      { session: guest1, alias: '西家访客' },
+      { session: guest2, alias: '北家访客' },
     ];
-    for (const { session, seatNo } of joinRequesters) {
-      const jr = await requestJson<{ joinRequestId: string; status: string }>(
-        `/api/matches/${matchId}/join-requests`,
-        { method: 'POST', cookie: session.cookie, body: {} },
-      );
-      checkEq(jr.status, 200, `POST join-requests for seat ${seatNo} returns 200`);
-      checkEq(jr.data.status, 'pending', `Join request status is pending`);
-
-      const approve = await requestJson<{ ok: boolean; seatNo: number }>(
-        `/api/matches/${matchId}/join-requests/${jr.data.joinRequestId}/approve`,
-        { method: 'POST', cookie: acct1.cookie, body: { seatNo } },
-      );
-      checkEq(approve.status, 200, `POST approve join-request for seat ${seatNo} returns 200`);
-    }
-
-    // Guests still require single-use tokens; the owner never consumes one.
-    const playersForCheckIn: { session: ClientSession; expectedSeatNo: number; alias?: string }[] = [
-      { session: acct2, expectedSeatNo: 1 },
-      { session: guest1, expectedSeatNo: 2, alias: '西家访客' },
-      { session: guest2, expectedSeatNo: 3, alias: '北家访客' },
-    ];
-
-    for (const p of playersForCheckIn) {
-      const tokRes = p.session === guest1 ? byCode : await requestJson<{ token: string; expiresAt: string }>(
+    for (const { session, alias } of playersForCheckIn) {
+      const tokRes = session === guest1 ? byCode : await requestJson<{ token: string; expiresAt: string }>(
         `/api/matches/${matchId}/check-in-tokens`,
         { method: 'POST', cookie: acct1.cookie, body: {} },
       );
-      checkEq(tokRes.status, 200, `Check-in token for seat ${p.expectedSeatNo} returns 200`);
-
-      const checkIn = () => requestJson<{ seat: { seatNo: number }; grantId: string }>(
-        `/api/matches/${matchId}/check-ins`,
-        {
-          method: 'POST',
-          cookie: p.session.cookie,
-          body: {
-            token: tokRes.data.token,
-            seatNo: p.expectedSeatNo,
-            ...(p.alias ? { alias: p.alias } : {}),
-          },
-        },
-      );
-      const attempts = p.expectedSeatNo === 1
+      checkEq(tokRes.status, 200, 'Guest join invitation is issued');
+      const checkIn = () => requestJson<{
+        member: { principalId: string; displayName: string }; seated: boolean; grantId: string;
+      }>(`/api/matches/${matchId}/check-ins`, {
+        method: 'POST', cookie: session.cookie,
+        body: { token: tokRes.data.token, ...(alias ? { alias } : {}) },
+      });
+      const attempts = session === acct2
         ? await Promise.all([checkIn(), checkIn()])
         : [await checkIn()];
       checkEq(attempts.map((attempt) => attempt.status), attempts.map(() => 200),
-        `Concurrent/repeated check-in is idempotent for seat ${p.expectedSeatNo}`);
-      const ciRes = attempts[0];
-      if (p.expectedSeatNo === 1) {
-        const activeCheckIns = await pool.query<{ count: number }>(
-          `SELECT COUNT(*)::int AS count FROM app.check_ins
-           WHERE match_id = $1 AND seat_assignment_id IN (
-             SELECT id FROM app.seat_assignments WHERE match_id = $1 AND seat_no = 1
-           ) AND invalidated_at IS NULL`,
-          [matchId],
+        'Concurrent and repeated joins succeed idempotently');
+      const joined = attempts[0];
+      checkEq(joined.data.member, { principalId: session.principalId, displayName: alias ?? session.displayName },
+        'Join returns the caller as a member with their chosen display name');
+      checkEq(joined.data.seated, false, 'Joining does not claim a seat');
+      check(Boolean(joined.data.grantId), 'Join returns a member access grant');
+      if (session === acct2) {
+        checkEq(attempts[1].data.grantId, joined.data.grantId,
+          'Concurrent join returns the original member grant');
+        const activeMembers = await pool.query<{ count: number }>(
+          `SELECT COUNT(*)::int AS count FROM app.match_members
+           WHERE match_id = $1 AND principal_id = $2 AND status = 'active'`,
+          [matchId, session.principalId],
         );
-        checkEq(activeCheckIns.rows[0].count, 1, 'Check-in race leaves one active seat check-in');
-        checkEq(attempts[1].data.grantId, ciRes.data.grantId,
-          'Concurrent retry returns the original member grant');
+        checkEq(activeMembers.rows[0].count, 1, 'Concurrent join creates exactly one active membership');
       }
-      checkEq(ciRes.status, 200, `POST check-ins for seat ${p.expectedSeatNo} returns 200`);
-      checkEq(ciRes.data.seat.seatNo, p.expectedSeatNo, `Checked-in seatNo matches ${p.expectedSeatNo}`);
-      check(Boolean(ciRes.data.grantId), `grantId returned for seat ${p.expectedSeatNo}`);
-
-      const replayRes = await requestJson<{ seat: { seatNo: number }; grantId: string }>(
-        `/api/matches/${matchId}/check-ins`, {
-          method: 'POST',
-          cookie: p.session.cookie,
-          body: { token: tokRes.data.token },
-        });
-      checkEq([replayRes.status, replayRes.data.seat.seatNo, replayRes.data.grantId],
-        [200, p.expectedSeatNo, ciRes.data.grantId], 'Same caller can rejoin without re-consuming a token');
+      const replay = await checkIn();
+      checkEq([replay.status, replay.data.seated, replay.data.grantId],
+        [200, false, joined.data.grantId], 'Same caller can rejoin without consuming another invitation');
     }
 
-    // Verify GET /api/matches/:id shows 4 checkedIn seats
-    const matchBeforeFinalize = await requestJson<{
-      match: { id: string; status: string };
-      seats: { seatNo: number; principalId: string; displayName: string; points: number; status: string }[];
+    const matchBeforeDraw = await requestJson<{
+      match: { id: string; status: string; seatingDrawnAt: string | null; dealerSeatNo: number | null };
+      seats: { principalId: string | null; status: string }[];
+      members: { principalId: string; displayName: string }[];
       checkedIn: number;
     }>(`/api/matches/${matchId}`, { cookie: guest1.cookie });
-    checkEq(matchBeforeFinalize.status, 200, 'Guest member can view GET /api/matches/:id');
-    checkEq(matchBeforeFinalize.data.checkedIn, 4, 'checkedIn count is 4');
-    checkEq(matchBeforeFinalize.data.seats[2].displayName, '西家访客', 'Guest 1 alias updated in seat displayName');
-    checkEq(matchBeforeFinalize.data.seats[3].displayName, '北家访客', 'Guest 2 alias updated in seat displayName');
+    checkEq(matchBeforeDraw.status, 200, 'Joined guest can view the room before seating');
+    checkEq(matchBeforeDraw.data.members.map((member) => member.principalId).sort(),
+      [acct1, acct2, guest1, guest2].map((player) => player.principalId).sort(),
+      'GET match exposes all four seatless participants');
+    checkEq(matchBeforeDraw.data.members.find((member) => member.principalId === guest1.principalId)?.displayName,
+      '西家访客', 'Guest alias appears in the room member roster');
+    checkEq(matchBeforeDraw.data.checkedIn, 0, 'No participants are checked in before the draw');
+    check(matchBeforeDraw.data.seats.every((seat) => seat.principalId === null),
+      'Join-only flow has no seats before drawing');
 
-    // 6. Finalize seats -> status becomes in_progress, score_accounts created at 25,000
+    // The long-standing fixed-payout ledger scenario below uses a historical
+    // fully seated room so East stays at seat 0; separate scenarios exercise
+    // randomly drawn seating through the public API.
+    const legacyClient = await pool.connect();
+    try {
+      await legacyClient.query('BEGIN');
+      for (const [seatNo, participant] of [acct1, acct2, guest1, guest2].entries()) {
+        const member = await legacyClient.query<{ id: string }>(
+          'SELECT id FROM app.match_members WHERE match_id = $1 AND principal_id = $2',
+          [matchId, participant.principalId],
+        );
+        const assignment = await legacyClient.query<{ id: string }>(
+          `INSERT INTO app.seat_assignments (match_id, seat_no, member_id, start_hand_no, confirmed_by)
+           VALUES ($1, $2, $3, 0, $4) RETURNING id`,
+          [matchId, seatNo, member.rows[0].id, acct1.principalId],
+        );
+        await legacyClient.query(
+          `INSERT INTO app.check_ins (match_id, member_id, seat_assignment_id, rules_hash, method)
+           VALUES ($1, $2, $3, $4, 'host_confirm')`,
+          [matchId, member.rows[0].id, assignment.rows[0].id, ownerBeforeClaim.data.match.rulesHash],
+        );
+      }
+      await legacyClient.query('COMMIT');
+    } catch (error) {
+      await legacyClient.query('ROLLBACK');
+      throw error;
+    } finally {
+      legacyClient.release();
+    }
+    const legacyView = await requestJson<{
+      match: { seatingDrawnAt: string | null; dealerSeatNo: number | null };
+      seats: { principalId: string | null; status: string; displayName: string }[];
+      checkedIn: number;
+    }>(`/api/matches/${matchId}`, { cookie: acct1.cookie });
+    checkEq([legacyView.data.match.seatingDrawnAt, legacyView.data.match.dealerSeatNo], [null, null],
+      'Historical fully seated room has no Phase 2 draw metadata');
+    checkEq(legacyView.data.checkedIn, 4, 'Historical room has four active check-ins');
+    checkEq(legacyView.data.seats.map((seat) => seat.principalId),
+      [acct1, acct2, guest1, guest2].map((player) => player.principalId),
+      'Historical room preserves deterministic ledger seat order');
+    checkEq([legacyView.data.seats[2].displayName, legacyView.data.seats[3].displayName],
+      ['西家访客', '北家访客'], 'Guest aliases carry through to occupied seats');
+    const alreadySeated = await requestJson<{ error: string }>(`/api/matches/${matchId}/seats/draw`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq([alreadySeated.status, alreadySeated.data.error], [409, 'seating_already_complete'],
+      'Drawing a fully seated legacy room does not overwrite its seats');
+    const ownerCheckIn = await pool.query<{ method: string; rules_hash: string; confirmed_by: string }>(
+      `SELECT ci.method, ci.rules_hash, sa.confirmed_by FROM app.check_ins ci
+       JOIN app.seat_assignments sa ON sa.id = ci.seat_assignment_id
+       WHERE ci.match_id = $1 AND sa.member_id = (
+         SELECT id FROM app.match_members WHERE match_id = $1 AND principal_id = $2
+       ) AND ci.invalidated_at IS NULL`,
+      [matchId, acct1.principalId],
+    );
+    checkEq(ownerCheckIn.rows[0],
+      { method: 'host_confirm', rules_hash: ownerBeforeClaim.data.match.rulesHash,
+        confirmed_by: acct1.principalId },
+      'Historical owner has a current-rules check-in without a guest token');
     const finSeats = await requestJson<{
       seats: { seatNo: number; principalId: string; points: number; status: string }[];
     }>(`/api/matches/${matchId}/seats/finalize`, {
-      method: 'POST',
-      cookie: acct1.cookie,
-      body: { dealerSeatNo: 0 },
+      method: 'POST', cookie: acct1.cookie, body: { dealerSeatNo: 0 },
     });
-    checkEq(finSeats.status, 200, 'POST /api/matches/:id/seats/finalize returns 200');
-    checkEq(finSeats.data.seats.length, 4, '4 seats finalized');
-    check(
-      finSeats.data.seats.every((s) => s.points === 25000),
-      'All 4 seats start at 25,000 points',
-    );
+    checkEq(finSeats.status, 200, 'Owner finalizes historical fully seated room');
+    checkEq(finSeats.data.seats.length, 4, 'Four seats finalized');
+    check(finSeats.data.seats.every((seat) => seat.points === 25000),
+      'All four seats start at 25,000 points');
     const startedCode = await requestJson<{ error: string }>(
       `/api/matches/by-code/${createRes.data.match.joinCode}`, { cookie: guest1.cookie },
     );
@@ -1303,8 +1322,7 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     // Verify WebSocket received events
     await wsDone.promise;
     for (const expectedType of [
-      'join_approved',
-      'check_in',
+      'member_joined',
       'seats_finalized',
       'hand_started',
       'marks_changed',
@@ -1324,95 +1342,112 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     });
     checkEq(dealerMatch.status, 200, 'Dealer-selection fixture creates');
     const dealerId = dealerMatch.data.match.id;
-    const claimDealer = (seatNo: number) => requestJson<{ seatNo: number; status: string }>(
-      `/api/matches/${dealerId}/seats/claim`,
-      { method: 'POST', cookie: acct1.cookie, body: { seatNo } },
-    );
-    const seatTwoClaim = await claimDealer(2);
-    checkEq([seatTwoClaim.status, seatTwoClaim.data.seatNo, seatTwoClaim.data.status], [200, 2, 'checked_in'],
-      'Owner can claim seat 2 and is immediately confirmed and checked in');
-    const firstClaim = await pool.query<{ id: string; rules_hash: string }>(
-      `SELECT ci.id, ci.rules_hash FROM app.check_ins ci
-       JOIN app.seat_assignments sa ON sa.id = ci.seat_assignment_id
-       WHERE ci.match_id = $1 AND sa.seat_no = 2 AND ci.invalidated_at IS NULL`,
-      [dealerId],
-    );
-    checkEq(firstClaim.rows.length, 1, 'Owner seat 2 has an active check-in row without a token');
-    checkEq((await claimDealer(0)).status, 200, 'Owner can switch to seat 0 before start');
-    const switched = await pool.query<{ id: string; seat_no: number; invalidated: boolean }>(
-      `SELECT ci.id, sa.seat_no, ci.invalidated_at IS NOT NULL AS invalidated
-       FROM app.check_ins ci JOIN app.seat_assignments sa ON sa.id = ci.seat_assignment_id
-       WHERE ci.match_id = $1 ORDER BY ci.confirmed_at, ci.id`,
-      [dealerId],
-    );
-    checkEq(switched.rows.length, 2, 'Seat switch reissues owner check-in rather than retaining the old row');
-    checkEq(switched.rows.find((row) => row.id === firstClaim.rows[0].id)?.invalidated, true,
-      'Previous owner check-in is invalidated on a seat change');
-    checkEq((await claimDealer(2)).status, 200, 'Owner reclaims seat 2 before start');
-    const switchedBack = await requestJson<{ seats: { seatNo: number; status: string; principalId: string | null }[]; checkedIn: number }>(
-      `/api/matches/${dealerId}`, { cookie: acct1.cookie },
-    );
-    checkEq(switchedBack.data.seats.map((seat) => seat.status), ['empty', 'empty', 'checked_in'],
-      'Owner status and active check-in follow the new seat');
-    checkEq(switchedBack.data.checkedIn, 1, 'Only the current owner check-in counts');
-    const invalidEmpty = await requestJson<{ error: string }>(`/api/matches/${dealerId}/seats/finalize`, {
-      method: 'POST', cookie: acct1.cookie, body: { dealerSeatNo: 0 },
-    });
-    checkEq([invalidEmpty.status, invalidEmpty.data.error], [400, 'invalid_dealer_seat'],
-      'Explicit dealer at an empty seat is rejected with a structured 400');
-    for (const [participant, seatNo] of [[acct2, 0], [dealerGuest, 1]] as const) {
-      const jr = await requestJson<{ joinRequestId: string }>(`/api/matches/${dealerId}/join-requests`, {
-        method: 'POST', cookie: participant.cookie, body: {},
-      });
-      const approved = await requestJson(`/api/matches/${dealerId}/join-requests/${jr.data.joinRequestId}/approve`, {
-        method: 'POST', cookie: acct1.cookie, body: { seatNo },
-      });
-      checkEq(approved.status, 200, 'Legacy approve command assigns a guest seat');
-    }
-    const invalidUnchecked = await requestJson<{ error: string }>(`/api/matches/${dealerId}/seats/finalize`, {
-      method: 'POST', cookie: acct1.cookie, body: { dealerSeatNo: 1 },
-    });
-    checkEq([invalidUnchecked.status, invalidUnchecked.data.error], [400, 'invalid_dealer_seat'],
-      'Explicit dealer at an unchecked guest seat is rejected');
-    const accountToken = await requestJson<{ token: string }>(`/api/matches/${dealerId}/check-in-tokens`, {
+    const beforeDrawFinalize = await requestJson<{ error: string }>(`/api/matches/${dealerId}/seats/finalize`, {
       method: 'POST', cookie: acct1.cookie, body: {},
     });
-    const accountChecked = await requestJson(`/api/matches/${dealerId}/check-ins`, {
-      method: 'POST', cookie: acct2.cookie, body: { token: accountToken.data.token },
+    checkEq([beforeDrawFinalize.status, beforeDrawFinalize.data.error], [400, 'incomplete_check_ins'],
+      'Finalize rejects a seatless room');
+    const earlyDraw = await requestJson<{ error: string }>(`/api/matches/${dealerId}/seats/draw`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
     });
-    checkEq(accountChecked.status, 200, 'Account guest checks in with token');
-    const missingGuest = await requestJson<{ error: string }>(`/api/matches/${dealerId}/seats/finalize`, {
-      method: 'POST', cookie: acct1.cookie, body: { dealerSeatNo: 2 },
-    });
-    checkEq([missingGuest.status, missingGuest.data.error], [400, 'incomplete_check_ins'],
-      'Owner auto-check-in never bypasses a missing anonymous guest check-in');
-    for (const participant of [dealerGuest]) {
+    checkEq([earlyDraw.status, earlyDraw.data.error], [409, 'room_not_full'],
+      'Owner cannot draw before every participant has joined');
+    for (const participant of [acct2, dealerGuest]) {
       const token = await requestJson<{ token: string }>(`/api/matches/${dealerId}/check-in-tokens`, {
         method: 'POST', cookie: acct1.cookie, body: {},
       });
-      const checked = await requestJson(`/api/matches/${dealerId}/check-ins`, {
+      checkEq(token.status, 200, 'Owner issues a join invitation to the three-player room');
+      const joined = await requestJson<{
+        member: { principalId: string; displayName: string }; seated: boolean; grantId: string;
+      }>(`/api/matches/${dealerId}/check-ins`, {
         method: 'POST', cookie: participant.cookie, body: { token: token.data.token },
       });
-      checkEq(checked.status, 200, 'Previously assigned guest checks in with a token');
+      checkEq([joined.status, joined.data.member.principalId, joined.data.seated],
+        [200, participant.principalId, false], 'Invited guest joins the room without choosing a seat');
+    }
+    const guestDraw = await requestJson<{ error: string }>(`/api/matches/${dealerId}/seats/draw`, {
+      method: 'POST', cookie: acct2.cookie, body: {},
+    });
+    checkEq(guestDraw.status, 403, 'Only the owner can draw the room');
+    const drawn = await requestJson<{
+      seats: { seatNo: number; principalId: string; displayName: string; wind: string }[];
+      dealerSeatNo: number;
+    }>(`/api/matches/${dealerId}/seats/draw`, { method: 'POST', cookie: acct1.cookie, body: {} });
+    checkEq(drawn.status, 200, 'Owner draws all three participant seats');
+    checkEq(drawn.data.seats.map((seat) => seat.seatNo), [0, 1, 2], 'Draw fills seats in table order');
+    checkEq(drawn.data.seats.map((seat) => seat.principalId).sort(),
+      [acct1, acct2, dealerGuest].map((player) => player.principalId).sort(),
+      'Draw includes each joined member exactly once');
+    check([0, 1, 2].includes(drawn.data.dealerSeatNo), 'Draw selects a seated East');
+    checkEq(drawn.data.seats.map((seat) => seat.wind),
+      [0, 1, 2].map((seatNo) => ['E', 'S', 'W'][(seatNo - drawn.data.dealerSeatNo + 3) % 3]),
+      'Three-player winds rotate from the drawn East seat');
+    const drawnDetail = await requestJson<{
+      match: { seatingDrawnAt: string | null; dealerSeatNo: number | null };
+      members: { principalId: string; wind: string }[];
+      checkedIn: number;
+    }>(`/api/matches/${dealerId}`, { cookie: acct1.cookie });
+    check(Boolean(drawnDetail.data.match.seatingDrawnAt), 'Room detail reports when the draw happened');
+    checkEq(drawnDetail.data.match.dealerSeatNo, drawn.data.dealerSeatNo,
+      'Room detail reports the dealer selected by the draw');
+    checkEq(drawnDetail.data.checkedIn, 3, 'The draw checks in all three members including the owner');
+    const drawnOwnerCheckIn = await pool.query<{ method: string }>(
+      `SELECT ci.method FROM app.check_ins ci
+       JOIN app.match_members mm ON mm.id = ci.member_id
+       WHERE mm.match_id = $1 AND mm.principal_id = $2 AND ci.invalidated_at IS NULL`,
+      [dealerId, acct1.principalId],
+    );
+    checkEq(drawnOwnerCheckIn.rows.map((row) => row.method), ['host_confirm'],
+      'Draw automatically checks in the owner by host confirmation without a token');
+    const duplicateDraw = await requestJson<{ error: string }>(`/api/matches/${dealerId}/seats/draw`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
+    });
+    checkEq([duplicateDraw.status, duplicateDraw.data.error], [409, 'seating_already_drawn'],
+      'A second draw cannot silently change seating');
+    const swap = await requestJson<{ fromSeatNo: number; toSeatNo: number; swapped: boolean }>(
+      `/api/matches/${dealerId}/seats/reassign`, {
+        method: 'POST', cookie: acct1.cookie, body: { fromSeatNo: 0, toSeatNo: 2 },
+      });
+    checkEq([swap.status, swap.data], [200, { fromSeatNo: 0, toSeatNo: 2, swapped: true }],
+      'Owner can swap two occupied seats before finalizing');
+    const afterSwap = await requestJson<{
+      match: { dealerSeatNo: number | null };
+      seats: { principalId: string | null; status: string }[];
+      members: { principalId: string; wind: string }[];
+      checkedIn: number;
+    }>(`/api/matches/${dealerId}`, { cookie: acct1.cookie });
+    checkEq(afterSwap.data.seats.map((seat) => seat.principalId),
+      [drawn.data.seats[2].principalId, drawn.data.seats[1].principalId, drawn.data.seats[0].principalId],
+      'Reassignment swaps the two drawn occupants');
+    checkEq(afterSwap.data.match.dealerSeatNo, drawn.data.dealerSeatNo,
+      'Moving participants does not change the drawn dealer seat');
+    checkEq(afterSwap.data.checkedIn, 3, 'Reassignment keeps all three seats checked in');
+    for (const [seatNo, seat] of afterSwap.data.seats.entries()) {
+      checkEq(afterSwap.data.members.find((member) => member.principalId === seat.principalId)?.wind,
+        ['E', 'S', 'W'][(seatNo - drawn.data.dealerSeatNo + 3) % 3],
+        'Reassigned participant wind follows their current seat relative to East');
     }
     const chosen = await requestJson<{ dealerSeatNo: number }>(`/api/matches/${dealerId}/seats/finalize`, {
-      method: 'POST', cookie: acct1.cookie, body: { dealerSeatNo: 2 },
+      method: 'POST', cookie: acct1.cookie, body: { dealerSeatNo: (drawn.data.dealerSeatNo + 1) % 3 },
     });
-    checkEq([chosen.status, chosen.data.dealerSeatNo], [200, 2],
-      'Finalize accepts owner seat 2 as East without an owner token');
+    checkEq([chosen.status, chosen.data.dealerSeatNo], [200, drawn.data.dealerSeatNo],
+      'Finalize uses the persisted draw dealer rather than a caller-supplied override');
     const windRows = await pool.query<{ seat_no: number; initial_wind: string }>(
       'SELECT seat_no, initial_wind FROM app.match_seats WHERE match_id = $1 ORDER BY seat_no', [dealerId],
     );
-    checkEq(windRows.rows.map((row) => row.initial_wind), ['S', 'W', 'E'],
-      'Initial winds rotate from the selected dealer');
+    checkEq(windRows.rows.map((row) => row.initial_wind),
+      [0, 1, 2].map((seatNo) => ['E', 'S', 'W'][(seatNo - drawn.data.dealerSeatNo + 3) % 3]),
+      'Finalized initial winds agree with the drawn dealer');
     const chosenEvent = await pool.query<{ payload: { dealerSeatNo: number } }>(
       `SELECT payload FROM app.match_events WHERE match_id = $1 AND type = 'seats_finalized'`, [dealerId],
     );
-    checkEq(chosenEvent.rows[0].payload.dealerSeatNo, 2, 'Finalization event records chosen dealer');
+    checkEq(chosenEvent.rows[0].payload.dealerSeatNo, drawn.data.dealerSeatNo,
+      'Finalization event records the drawn dealer');
     const chosenHand = await requestJson<{ hand: { dealerSeatNo: number } }>(`/api/matches/${dealerId}/hands`, {
       method: 'POST', cookie: acct1.cookie, body: {},
     });
-    checkEq(chosenHand.data.hand.dealerSeatNo, 2, 'First hand opens with seat 2 as dealer');
+    checkEq(chosenHand.data.hand.dealerSeatNo, drawn.data.dealerSeatNo,
+      'First hand opens with the dealer selected at draw');
     const doubleMatch = await requestJson<{ match: { id: string } }>('/api/matches', {
       method: 'POST',
       cookie: acct1.cookie,
@@ -1420,34 +1455,28 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     });
     checkEq(doubleMatch.status, 200, 'A three-player special-double ruleset creates a match');
     const doubleMatchId = doubleMatch.data.match.id;
-    const doubleOwnerClaim = await requestJson(`/api/matches/${doubleMatchId}/seats/claim`, {
-      method: 'POST', cookie: acct1.cookie, body: { seatNo: 0 },
-    });
-    checkEq(doubleOwnerClaim.status, 200, 'Special-double owner claims their own seat');
-    for (const [participant, seatNo] of [[acct2, 1], [doublePlayer, 2]] as const) {
-      const join = await requestJson<{ joinRequestId: string }>(`/api/matches/${doubleMatchId}/join-requests`, {
-        method: 'POST', cookie: participant.cookie, body: {},
-      });
-      checkEq(join.status, 200, 'Double-yakuman match accepts a join request');
-      const approve = await requestJson(`/api/matches/${doubleMatchId}/join-requests/${join.data.joinRequestId}/approve`, {
-        method: 'POST', cookie: acct1.cookie, body: { seatNo },
-      });
-      checkEq(approve.status, 200, 'Owner approves a special-double match seat');
-    }
     for (const participant of [acct2, doublePlayer]) {
       const tokenResponse = await requestJson<{ token: string }>(`/api/matches/${doubleMatchId}/check-in-tokens`, {
         method: 'POST', cookie: acct1.cookie, body: {},
       });
-      checkEq(tokenResponse.status, 200, 'Owner issues a check-in token in special-double match');
-      const checked = await requestJson(`/api/matches/${doubleMatchId}/check-ins`, {
-        method: 'POST', cookie: participant.cookie, body: { token: tokenResponse.data.token },
-      });
-      checkEq(checked.status, 200, 'Previously assigned special-double match seat checks in');
+      checkEq(tokenResponse.status, 200, 'Owner issues a special-double room invitation');
+      const joined = await requestJson<{ member: { principalId: string }; seated: boolean }>(
+        `/api/matches/${doubleMatchId}/check-ins`, {
+          method: 'POST', cookie: participant.cookie, body: { token: tokenResponse.data.token },
+        });
+      checkEq([joined.status, joined.data.member.principalId, joined.data.seated],
+        [200, participant.principalId, false], 'Special-double participant joins seatlessly');
     }
-    const doubleFinalize = await requestJson(`/api/matches/${doubleMatchId}/seats/finalize`, {
-      method: 'POST', cookie: acct1.cookie, body: { dealerSeatNo: 0 },
-    });
-    checkEq(doubleFinalize.status, 200, 'Special-double match seats finalize');
+    const doubleDraw = await requestJson<{ dealerSeatNo: number; seats: { principalId: string }[] }>(
+      `/api/matches/${doubleMatchId}/seats/draw`, { method: 'POST', cookie: acct1.cookie, body: {} });
+    checkEq(doubleDraw.status, 200, 'Special-double owner draws three seats');
+    checkEq(doubleDraw.data.seats.length, 3, 'Special-double draw seats all participants');
+    const doubleFinalize = await requestJson<{ dealerSeatNo: number }>(
+      `/api/matches/${doubleMatchId}/seats/finalize`, {
+        method: 'POST', cookie: acct1.cookie, body: {},
+      });
+    checkEq([doubleFinalize.status, doubleFinalize.data.dealerSeatNo], [200, doubleDraw.data.dealerSeatNo],
+      'Special-double finalization preserves the drawn dealer');
     const doubleStart = await requestJson<{ hand: { id: string } }>(`/api/matches/${doubleMatchId}/hands`, {
       method: 'POST', cookie: acct1.cookie, body: {},
     });
@@ -1462,8 +1491,9 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       { method: 'POST', cookie: acct2.cookie, body: { resultInput: specialDoubleInput } },
     );
     checkEq(doublePreview.status, 200, 'Enabled special double yakuman previews successfully');
-    checkEq(doublePreview.data.perSeat.map((seat) => seat.netPoints), [0, 64000, -64000],
-      'Special double yakuman transfers two yakuman, not one');
+    const doubleRonPoints = doubleDraw.data.dealerSeatNo === 1 ? 96000 : 64000;
+    checkEq(doublePreview.data.perSeat.map((seat) => seat.netPoints), [0, doubleRonPoints, -doubleRonPoints],
+      'Special double yakuman pays the correct dealer-adjusted double-yakuman ron');
     const aliasDoublePreview = await requestJson<{ perSeat: { netPoints: number }[] }>(
       `/api/matches/${doubleMatchId}/hands/${doubleHandId}/preview`,
       {
@@ -1501,34 +1531,62 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       });
       checkEq(created.status, 200, 'Reference match creates from its ruleset version');
       const id = created.data.match.id;
-      const claimed = await requestJson(`/api/matches/${id}/seats/claim`, {
-        method: 'POST', cookie: acct1.cookie, body: { seatNo: 0 },
-      });
-      checkEq(claimed.status, 200, 'Reference owner claims and auto-confirms seat 0');
-      for (let seatNo = 1; seatNo < participants.length; seatNo++) {
-        const join = await requestJson<{ joinRequestId: string }>(`/api/matches/${id}/join-requests`, {
-          method: 'POST', cookie: participants[seatNo].cookie, body: {},
-        });
-        checkEq(join.status, 200, 'Reference participant requests a seat');
-        const approved = await requestJson(`/api/matches/${id}/join-requests/${join.data.joinRequestId}/approve`, {
-          method: 'POST', cookie: acct1.cookie, body: { seatNo },
-        });
-        checkEq(approved.status, 200, 'Reference participant obtains a seat');
-      }
       for (const participant of participants.slice(1)) {
         const token = await requestJson<{ token: string }>(`/api/matches/${id}/check-in-tokens`, {
           method: 'POST', cookie: acct1.cookie, body: {},
         });
-        checkEq(token.status, 200, 'Reference check-in token issued');
-        const checked = await requestJson(`/api/matches/${id}/check-ins`, {
-          method: 'POST', cookie: participant.cookie, body: { token: token.data.token },
-        });
-        checkEq(checked.status, 200, 'Reference participant checked in');
+        checkEq(token.status, 200, 'Reference match invitation issued');
+        const joined = await requestJson<{ member: { principalId: string }; seated: boolean }>(
+          `/api/matches/${id}/check-ins`, {
+            method: 'POST', cookie: participant.cookie, body: { token: token.data.token },
+          });
+        checkEq([joined.status, joined.data.member.principalId, joined.data.seated],
+          [200, participant.principalId, false], 'Reference participant joins without a seat');
       }
-      const finalized = await requestJson(`/api/matches/${id}/seats/finalize`, {
+      if (dealerSeatNo !== null) {
+        // Fixed-dealer engine fixtures represent rooms already fully seated by
+        // the legacy contract; random-dealer fixtures use the new public draw.
+        const rules = await pool.query<{ rules_hash: string }>(
+          'SELECT rules_hash FROM app.matches WHERE id = $1', [id]);
+        const fixture = await pool.connect();
+        try {
+          await fixture.query('BEGIN');
+          for (const [seatNo, participant] of participants.entries()) {
+            const member = await fixture.query<{ id: string }>(
+              'SELECT id FROM app.match_members WHERE match_id = $1 AND principal_id = $2',
+              [id, participant.principalId],
+            );
+            const assignment = await fixture.query<{ id: string }>(
+              `INSERT INTO app.seat_assignments (match_id, seat_no, member_id, start_hand_no, confirmed_by)
+               VALUES ($1, $2, $3, 0, $4) RETURNING id`,
+              [id, seatNo, member.rows[0].id, acct1.principalId],
+            );
+            await fixture.query(
+              `INSERT INTO app.check_ins (match_id, member_id, seat_assignment_id, rules_hash, method)
+               VALUES ($1, $2, $3, $4, 'host_confirm')`,
+              [id, member.rows[0].id, assignment.rows[0].id, rules.rows[0].rules_hash],
+            );
+          }
+          await fixture.query('COMMIT');
+        } catch (error) {
+          await fixture.query('ROLLBACK');
+          throw error;
+        } finally {
+          fixture.release();
+        }
+      } else {
+        const drawn = await requestJson<{ seats: { principalId: string }[]; dealerSeatNo: number }>(
+          `/api/matches/${id}/seats/draw`, { method: 'POST', cookie: acct1.cookie, body: {} });
+        checkEq(drawn.status, 200, 'Reference room draws its full set of participants');
+        checkEq(drawn.data.seats.length, participants.length, 'Reference draw seats every participant');
+      }
+      const finalized = await requestJson<{ dealerSeatNo: number }>(`/api/matches/${id}/seats/finalize`, {
         method: 'POST', cookie: acct1.cookie, body: dealerSeatNo === null ? {} : { dealerSeatNo },
       });
       checkEq(finalized.status, 200, 'Reference seats finalized');
+      if (dealerSeatNo !== null) {
+        checkEq(finalized.data.dealerSeatNo, dealerSeatNo, 'Historical fixture keeps its specified dealer');
+      }
       return id;
     };
 
@@ -2209,6 +2267,16 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       cookie: acct1.cookie,
       body: { seatNo: 1 },
     });
+    const legacyMove = await requestJson<{ fromSeatNo: number; toSeatNo: number; swapped: boolean }>(
+      `/api/matches/${delMatchId}/seats/reassign`, {
+        method: 'POST', cookie: acct1.cookie, body: { fromSeatNo: 1, toSeatNo: 2 },
+      });
+    checkEq([legacyMove.status, legacyMove.data], [200, { fromSeatNo: 1, toSeatNo: 2, swapped: false }],
+      'Owner can move an explicitly assigned legacy occupant into an empty seat');
+    const movedLegacyView = await requestJson<{ seats: { principalId: string | null }[] }>(
+      `/api/matches/${delMatchId}`, { cookie: acct1.cookie });
+    checkEq([movedLegacyView.data.seats[1].principalId, movedLegacyView.data.seats[2].principalId],
+      [null, delViewer.principalId], 'Match detail reflects a move into a previously empty seat');
 
     const delSubTicket = await requestJson<{ ticket: string }>(`/api/matches/${delMatchId}/ws-tickets`, {
       method: 'POST',
@@ -2320,49 +2388,32 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     checkEq(leaveMatchCreate.status, 200, 'Create match for leave flow');
     const leaveMatchId = leaveMatchCreate.data.match.id;
 
-    const ownerClaimLeaveMatch = await requestJson(`/api/matches/${leaveMatchId}/seats/claim`, {
-      method: 'POST',
-      cookie: acct1.cookie,
-      body: { seatNo: 0 },
-    });
-    checkEq(ownerClaimLeaveMatch.status, 200, 'Host claims seat 0 in leave match');
-
     const leaverUser = await registerEmailAccount(`leaver_${runId}@example.com`, '退出玩家');
-    const leaverJoin = await requestJson<{ joinRequestId: string }>(`/api/matches/${leaveMatchId}/join-requests`, {
-      method: 'POST',
-      cookie: leaverUser.cookie,
-      body: { requestedSeatNo: 1 },
-    });
-    checkEq(leaverJoin.status, 200, 'Guest requests seat 1');
-
-    const approveLeaver = await requestJson(`/api/matches/${leaveMatchId}/join-requests/${leaverJoin.data.joinRequestId}/approve`, {
-      method: 'POST',
-      cookie: acct1.cookie,
-      body: { seatNo: 1 },
-    });
-    checkEq(approveLeaver.status, 200, 'Host approves guest seat 1');
-
-    const tokenForLeaver = await requestJson<{ token: string }>(`/api/matches/${leaveMatchId}/check-in-tokens`, {
-      method: 'POST',
-      cookie: acct1.cookie,
-      body: {},
-    });
-    checkEq(tokenForLeaver.status, 200, 'Host issues check-in token');
-
-    const leaverCheckIn = await requestJson(`/api/matches/${leaveMatchId}/check-ins`, {
-      method: 'POST',
-      cookie: leaverUser.cookie,
-      body: { token: tokenForLeaver.data.token },
-    });
-    checkEq(leaverCheckIn.status, 200, 'Guest checks in to seat 1');
-
-    // Host view before leave shows 2 checked in
-    const beforeLeaveView = await requestJson<{ seats: { seatNo: number; status: string; principalId: string | null }[]; checkedIn: number }>(
-      `/api/matches/${leaveMatchId}`,
-      { cookie: acct1.cookie },
-    );
-    checkEq(beforeLeaveView.data.checkedIn, 2, 'Two players checked in before leave');
-    checkEq(beforeLeaveView.data.seats[1].status, 'checked_in', 'Guest is checked_in at seat 1');
+    const leaveSecond = await registerEmailAccount(`leave_second_${runId}@example.com`, '留桌玩家');
+    for (const participant of [leaverUser, leaveSecond, referenceThird]) {
+      const invitation = await requestJson<{ token: string }>(`/api/matches/${leaveMatchId}/check-in-tokens`, {
+        method: 'POST', cookie: acct1.cookie, body: {},
+      });
+      checkEq(invitation.status, 200, 'Host invites a participant to the leave-flow room');
+      const joined = await requestJson<{ member: { principalId: string }; seated: boolean }>(
+        `/api/matches/${leaveMatchId}/check-ins`, {
+          method: 'POST', cookie: participant.cookie, body: { token: invitation.data.token },
+        });
+      checkEq([joined.status, joined.data.member.principalId, joined.data.seated],
+        [200, participant.principalId, false], 'Participant joins leave-flow room without a seat');
+    }
+    const leaveDraw = await requestJson<{ seats: { seatNo: number; principalId: string }[]; dealerSeatNo: number }>(
+      `/api/matches/${leaveMatchId}/seats/draw`, { method: 'POST', cookie: acct1.cookie, body: {} });
+    checkEq(leaveDraw.status, 200, 'Host draws the full leave-flow room');
+    const leaverSeatNo = leaveDraw.data.seats.find((seat) => seat.principalId === leaverUser.principalId)?.seatNo;
+    check(leaverSeatNo !== undefined, 'Draw seats the guest who will leave');
+    const beforeLeaveView = await requestJson<{
+      seats: { seatNo: number; status: string; principalId: string | null }[];
+      checkedIn: number;
+    }>(`/api/matches/${leaveMatchId}`, { cookie: acct1.cookie });
+    checkEq(beforeLeaveView.data.checkedIn, 4, 'Draw checks in all four participants before leave');
+    checkEq(beforeLeaveView.data.seats[leaverSeatNo!].status, 'checked_in',
+      'Guest occupies their drawn seat before leaving');
 
     // Owner calling leave -> 409 owner_must_delete
     const ownerLeaveAttempt = await requestJson<{ error: string }>(`/api/matches/${leaveMatchId}/leave`, {
@@ -2403,14 +2454,19 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     );
     checkEq(Number(leaverCheckInDb.rows[0].count), 1, 'Leaver check-in row was invalidated');
 
-    // Fresh host view shows seat 1 vacant, checkedIn == 1
-    const afterLeaveView = await requestJson<{ seats: { seatNo: number; status: string; principalId: string | null }[]; checkedIn: number }>(
-      `/api/matches/${leaveMatchId}`,
-      { cookie: acct1.cookie },
-    );
-    checkEq(afterLeaveView.data.checkedIn, 1, 'Only host remains checked in after guest leaves');
-    checkEq(afterLeaveView.data.seats[1].status, 'empty', 'Seat 1 is empty in host view after guest leaves');
-    checkEq(afterLeaveView.data.seats[1].principalId, null, 'Seat 1 principalId is null in host view');
+    const afterLeaveView = await requestJson<{
+      match: { seatingDrawnAt: string | null; dealerSeatNo: number | null };
+      seats: { seatNo: number; status: string; principalId: string | null }[];
+      members: { principalId: string }[];
+      checkedIn: number;
+    }>(`/api/matches/${leaveMatchId}`, { cookie: acct1.cookie });
+    checkEq([afterLeaveView.data.match.seatingDrawnAt, afterLeaveView.data.match.dealerSeatNo], [null, null],
+      'Leaving a drawn room clears the draw and its dealer');
+    checkEq(afterLeaveView.data.checkedIn, 0, 'Leaving invalidates all prior draw check-ins');
+    check(afterLeaveView.data.seats.every((seat) => seat.principalId === null && seat.status === 'empty'),
+      'Leaving clears all seating so the room can be redrawn');
+    check(!afterLeaveView.data.members.some((member) => member.principalId === leaverUser.principalId),
+      'Leaver is absent from the active member roster');
 
     // Match absent from guest's list
     const leaverList = await requestJson<{ id: string }[]>('/api/matches?mine=1', {
@@ -2424,14 +2480,12 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       cookie: acct1.cookie,
       body: {},
     });
-    const reCheckInAttempt = await requestJson<{ seat: { seatNo: number } }>(
+    const reCheckInAttempt = await requestJson<{ member: { principalId: string }; seated: boolean }>(
       `/api/matches/${leaveMatchId}/check-ins`, {
-        method: 'POST',
-        cookie: leaverUser.cookie,
-        body: { token: newTokenForReCheckIn.data.token, seatNo: 1 },
+        method: 'POST', cookie: leaverUser.cookie, body: { token: newTokenForReCheckIn.data.token },
       });
-    checkEq([reCheckInAttempt.status, reCheckInAttempt.data.seat.seatNo], [200, 1],
-      'Left guest rejoins directly with a fresh invitation and the freed seat');
+    checkEq([reCheckInAttempt.status, reCheckInAttempt.data.member.principalId, reCheckInAttempt.data.seated],
+      [200, leaverUser.principalId, false], 'Left guest rejoins as a seatless member with a fresh invitation');
     const revivedLeaver = await pool.query<{ count: number; status: string }>(
       `SELECT COUNT(*)::int AS count, MAX(status) AS status FROM app.match_members
        WHERE match_id = $1 AND principal_id = $2`,
@@ -2445,39 +2499,36 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     checkEq([leaveAgain.status, leaveAgain.data.left], [200, true],
       'Rejoined guest can leave again before a replacement takes the seat');
 
-    // Seat claim by replacement guest succeeds
+    // A replacement joins the open member slot; drawing, not joining, assigns their seat.
     const replacementUser = await registerEmailAccount(`replacement_${runId}@example.com`, '补位玩家');
-    const replacementJoin = await requestJson<{ joinRequestId: string }>(`/api/matches/${leaveMatchId}/join-requests`, {
-      method: 'POST',
-      cookie: replacementUser.cookie,
-      body: { requestedSeatNo: 1 },
-    });
-    checkEq(replacementJoin.status, 200, 'Replacement guest can request vacated seat 1');
-
-    const approveReplacement = await requestJson(`/api/matches/${leaveMatchId}/join-requests/${replacementJoin.data.joinRequestId}/approve`, {
-      method: 'POST',
-      cookie: acct1.cookie,
-      body: { seatNo: 1 },
-    });
-    checkEq(approveReplacement.status, 200, 'Host can approve replacement guest into vacated seat 1');
-
     const replacementToken = await requestJson<{ token: string }>(`/api/matches/${leaveMatchId}/check-in-tokens`, {
       method: 'POST', cookie: acct1.cookie, body: {},
     });
-    const checkInReplacement = await requestJson(`/api/matches/${leaveMatchId}/check-ins`, {
-      method: 'POST',
-      cookie: replacementUser.cookie,
-      body: { token: replacementToken.data.token, seatNo: 1 },
+    const checkInReplacement = await requestJson<{ member: { principalId: string }; seated: boolean }>(
+      `/api/matches/${leaveMatchId}/check-ins`, {
+        method: 'POST', cookie: replacementUser.cookie, body: { token: replacementToken.data.token },
+      });
+    checkEq([checkInReplacement.status, checkInReplacement.data.member.principalId, checkInReplacement.data.seated],
+      [200, replacementUser.principalId, false], 'Replacement joins without taking a vacated seat');
+    const replacementDraw = await requestJson<{
+      seats: { seatNo: number; principalId: string }[]; dealerSeatNo: number;
+    }>(`/api/matches/${leaveMatchId}/seats/draw`, {
+      method: 'POST', cookie: acct1.cookie, body: {},
     });
-    checkEq(checkInReplacement.status, 200, 'Replacement guest successfully checks into vacated seat 1');
-
-    const finalView = await requestJson<{ seats: { seatNo: number; status: string; principalId: string | null }[]; checkedIn: number }>(
-      `/api/matches/${leaveMatchId}`,
-      { cookie: acct1.cookie },
-    );
-    checkEq(finalView.data.checkedIn, 2, 'Host and replacement guest are both checked in');
-    checkEq(finalView.data.seats[1].status, 'checked_in', 'Vacated seat 1 is now checked_in by replacement');
-    checkEq(finalView.data.seats[1].principalId, replacementUser.principalId, 'Seat 1 belongs to replacement guest');
+    checkEq(replacementDraw.status, 200, 'Owner redraws after a guest leaves and replacement joins');
+    checkEq(replacementDraw.data.seats.map((seat) => seat.principalId).sort(),
+      [acct1, leaveSecond, referenceThird, replacementUser].map((player) => player.principalId).sort(),
+      'Redrawn seating contains owner, surviving members, and replacement');
+    const finalView = await requestJson<{
+      match: { seatingDrawnAt: string | null; dealerSeatNo: number | null };
+      seats: { seatNo: number; status: string; principalId: string | null }[];
+      checkedIn: number;
+    }>(`/api/matches/${leaveMatchId}`, { cookie: acct1.cookie });
+    checkEq(finalView.data.checkedIn, 4, 'Replacement draw checks in all four participants');
+    checkEq(finalView.data.match.dealerSeatNo, replacementDraw.data.dealerSeatNo,
+      'Replacement draw persists its selected dealer');
+    check(finalView.data.seats.every((seat) => seat.status === 'checked_in'),
+      'All replacement-draw seats are checked in');
 
     // Direct join: link and code tokens seat participants without join requests or approval.
     const directGuest = await registerEmailAccount(`direct_guest_${runId}@example.com`, '扫码玩家');
@@ -2486,15 +2537,11 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     });
     checkEq(directCreated.status, 200, 'Direct-join fixture creates a three-player match');
     const directId = directCreated.data.match.id;
-    const directClaim = await requestJson(`/api/matches/${directId}/seats/claim`, {
-      method: 'POST', cookie: acct1.cookie, body: { seatNo: 0 },
-    });
-    checkEq(directClaim.status, 200, 'Direct-join owner occupies seat 0');
     const issueDirectToken = () => requestJson<{ token: string }>(`/api/matches/${directId}/check-in-tokens`, {
       method: 'POST', cookie: acct1.cookie, body: {},
     });
     const directLink = await issueDirectToken();
-    checkEq(directLink.status, 200, 'Owner issues QR/link token for direct join');
+    checkEq(directLink.status, 200, 'Owner issues QR/link token for a seatless join');
     const protectedDetail = await requestJson(`/api/matches/${directId}`, { cookie: strangerAcct.cookie });
     checkEq(protectedDetail.status, 403, 'Full match detail remains membership-protected');
     const anonymousPreview = await requestJson<{ error: string }>(
@@ -2506,61 +2553,59 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       'Seat preview rejects malformed tokens');
     const directPreview = await requestJson<{
       match: { id: string; playerCount: number; status: string };
-      seats: { seatNo: number; principalId: string | null; displayName: string | null; status: string }[];
+      seats: { seatNo: number; principalId: string | null; status: string }[];
     }>(`/api/matches/${directId}/check-in-seats?token=${encodeURIComponent(directLink.data.token)}`,
       { cookie: directGuest.cookie });
-    checkEq(directPreview.status, 200, 'QR token opens lightweight seat preview before membership');
+    checkEq(directPreview.status, 200, 'QR token opens lightweight preview before membership');
     checkEq(directPreview.data.match, { id: directId, playerCount: 3, status: 'preparing' },
-      'QR preview identifies the preparing 3p room');
-    checkEq(directPreview.data.seats.map((seat) => seat.status), ['checked_in', 'empty', 'empty'],
-      'QR preview identifies the occupied owner seat and empty guest seats');
-    checkEq(directPreview.data.seats[0].displayName, acct1.displayName,
-      'QR preview includes the owner display name');
+      'QR preview identifies the preparing three-player room');
+    checkEq(directPreview.data.seats.map((seat) => seat.status), ['empty', 'empty', 'empty'],
+      'The owner and guests have no seats before the draw');
 
-    const directJoin = await requestJson<{ seat: { seatNo: number }; grantId: string }>(
-      `/api/matches/${directId}/check-ins`, {
-        method: 'POST', cookie: directGuest.cookie,
-        body: { token: directLink.data.token, seatNo: 1, alias: '扫码入座' },
-      });
-    checkEq([directJoin.status, directJoin.data.seat.seatNo], [200, 1],
-      'Link token directly claims requested seat 1');
+    const directJoin = await requestJson<{
+      member: { principalId: string; displayName: string }; seated: boolean; grantId: string;
+    }>(`/api/matches/${directId}/check-ins`, {
+      method: 'POST', cookie: directGuest.cookie, body: { token: directLink.data.token, alias: '扫码入座' },
+    });
+    checkEq([directJoin.status, directJoin.data.member, directJoin.data.seated],
+      [200, { principalId: directGuest.principalId, displayName: '扫码入座' }, false],
+      'Link token joins the guest and retains the chosen alias without seating them');
     check(Boolean(directJoin.data.grantId), 'Direct join returns member access grant');
     const consumedPreview = await requestJson<{ error: string }>(
       `/api/matches/${directId}/check-in-seats?token=${encodeURIComponent(directLink.data.token)}`,
       { cookie: strangerAcct.cookie });
     checkEq([consumedPreview.status, consumedPreview.data.error], [400, 'token_consumed_or_expired'],
-      'A consumed QR token does not expose seats to another non-member');
-    const directRows = await pool.query<{
-      member_id: string; role: string; status: string; assignment_id: string;
-      seat_no: number; confirmed_by: string; method: string; grant_id: string;
-    }>(
-      `SELECT mm.id AS member_id, mm.role, mm.status, sa.id AS assignment_id,
-              sa.seat_no, sa.confirmed_by, ci.method, mag.id AS grant_id
+      'A consumed QR token does not expose the room to another non-member');
+    const directRows = await pool.query<{ role: string; status: string; grant_id: string; seat_count: number; check_in_count: number }>(
+      `SELECT mm.role, mm.status, mag.id AS grant_id,
+              (SELECT COUNT(*)::int FROM app.seat_assignments sa
+               WHERE sa.member_id = mm.id AND sa.end_hand_no IS NULL) AS seat_count,
+              (SELECT COUNT(*)::int FROM app.check_ins ci
+               WHERE ci.member_id = mm.id AND ci.invalidated_at IS NULL) AS check_in_count
        FROM app.match_members mm
-       JOIN app.seat_assignments sa ON sa.match_id = mm.match_id AND sa.member_id = mm.id
-         AND sa.end_hand_no IS NULL
-       JOIN app.check_ins ci ON ci.seat_assignment_id = sa.id AND ci.invalidated_at IS NULL
        JOIN app.member_access_grants mag ON mag.member_id = mm.id AND mag.revoked_at IS NULL
        WHERE mm.match_id = $1 AND mm.principal_id = $2`,
       [directId, directGuest.principalId],
     );
-    checkEq(directRows.rows.length, 1, 'Direct join atomically creates one member, seat, check-in and grant');
-    checkEq([directRows.rows[0].role, directRows.rows[0].status, directRows.rows[0].seat_no,
-      directRows.rows[0].confirmed_by, directRows.rows[0].method, directRows.rows[0].grant_id],
-    ['participant', 'active', 1, directGuest.principalId, 'qr_scan', directJoin.data.grantId],
-    'Joined account self-confirms its assigned seat and QR check-in');
-    const joinedOwnerView = await requestJson<{ seats: { principalId: string | null; displayName: string }[] }>(
-      `/api/matches/${directId}`, { cookie: acct1.cookie });
-    checkEq([joinedOwnerView.data.seats[1].principalId, joinedOwnerView.data.seats[1].displayName],
-      [directGuest.principalId, '扫码入座'], 'Host sees the joined account and its alias in seat 1');
+    checkEq(directRows.rows, [{
+      role: 'participant', status: 'active', grant_id: directJoin.data.grantId, seat_count: 0, check_in_count: 0,
+    }], 'Join creates a member and grant, but no assignment or check-in');
+    const joinedOwnerView = await requestJson<{
+      members: { principalId: string; displayName: string }[]; checkedIn: number;
+    }>(`/api/matches/${directId}`, { cookie: acct1.cookie });
+    checkEq(joinedOwnerView.data.members.find((member) => member.principalId === directGuest.principalId)?.displayName,
+      '扫码入座', 'Owner sees the new guest and alias in the member roster');
+    checkEq(joinedOwnerView.data.checkedIn, 0, 'Joining alone does not check in either participant');
 
     const retryToken = await issueDirectToken();
-    const idempotentJoin = await requestJson<{ seat: { seatNo: number }; grantId: string }>(
+    const idempotentJoin = await requestJson<{ member: { principalId: string }; seated: boolean; grantId: string }>(
       `/api/matches/${directId}/check-ins`, {
-        method: 'POST', cookie: directGuest.cookie, body: { token: retryToken.data.token, seatNo: 2 },
+        method: 'POST', cookie: directGuest.cookie, body: { token: retryToken.data.token },
       });
-    checkEq([idempotentJoin.status, idempotentJoin.data.seat.seatNo, idempotentJoin.data.grantId],
-      [200, 1, directJoin.data.grantId], 'Fresh token rejoin keeps the original seat and grant');
+    checkEq([idempotentJoin.status, idempotentJoin.data.member.principalId,
+      idempotentJoin.data.seated, idempotentJoin.data.grantId],
+    [200, directGuest.principalId, false, directJoin.data.grantId],
+    'Fresh-token rejoin keeps the existing seatless membership and grant');
     const membershipCount = await pool.query<{ count: number }>(
       `SELECT COUNT(*)::int AS count FROM app.match_members WHERE match_id = $1 AND principal_id = $2`,
       [directId, directGuest.principalId],
@@ -2576,51 +2621,23 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
     const directCode = await requestJson<{ matchId: string; token: string }>(
       `/api/matches/by-code/${directCreated.data.match.joinCode}`, { cookie: codeGuest.cookie });
     checkEq([directCode.status, directCode.data.matchId], [200, directId],
-      'Room-code exchange issues a direct-join token');
-    const occupiedSeat = await requestJson<{ error: string }>(`/api/matches/${directId}/check-ins`, {
-      method: 'POST', cookie: codeGuest.cookie, body: { token: directCode.data.token, seatNo: 1 },
-    });
-    checkEq([occupiedSeat.status, occupiedSeat.data.error], [409, 'seat_taken'],
-      'Second caller cannot claim an already occupied seat');
-    const guestAfterSeatTaken = await pool.query<{ count: number }>(
-      `SELECT COUNT(*)::int AS count FROM app.match_members WHERE match_id = $1 AND principal_id = $2`,
-      [directId, codeGuest.principalId],
-    );
-    checkEq(guestAfterSeatTaken.rows[0].count, 0, 'Failed seat claim does not create partial membership');
-
-    const unauthorizedMove = await requestJson(`/api/matches/${directId}/seats/reassign`, {
-      method: 'POST', cookie: directGuest.cookie, body: { fromSeatNo: 1, toSeatNo: 2 },
-    });
-    checkEq(unauthorizedMove.status, 403, 'Only the owner can move seated players');
-    const moveDirect = await requestJson<{ fromSeatNo: number; toSeatNo: number; swapped: boolean }>(
-      `/api/matches/${directId}/seats/reassign`, {
-        method: 'POST', cookie: acct1.cookie, body: { fromSeatNo: 1, toSeatNo: 2 },
-      });
-    checkEq([moveDirect.status, moveDirect.data], [200, { fromSeatNo: 1, toSeatNo: 2, swapped: false }],
-      'Owner moves an occupant into an empty seat without a swap');
-    const movedRows = await pool.query<{ id: string; seat_no: number; active_check_ins: number }>(
-      `SELECT sa.id, sa.seat_no,
-              (SELECT COUNT(*)::int FROM app.check_ins ci
-               WHERE ci.seat_assignment_id = sa.id AND ci.invalidated_at IS NULL) AS active_check_ins
-       FROM app.seat_assignments sa WHERE sa.match_id = $1 AND sa.id = $2`,
-      [directId, directRows.rows[0].assignment_id],
-    );
-    checkEq(movedRows.rows[0], { id: directRows.rows[0].assignment_id, seat_no: 2, active_check_ins: 1 },
-      'Move preserves assignment ID and reissues exactly one active check-in');
-
-    const codeJoin = await requestJson<{ seat: { seatNo: number }; grantId: string }>(
+      'Room-code exchange issues a seatless join token');
+    const codeJoin = await requestJson<{ member: { principalId: string }; seated: boolean; grantId: string }>(
       `/api/matches/${directId}/check-ins`, {
         method: 'POST', cookie: codeGuest.cookie, body: { token: directCode.data.token },
       });
-    checkEq([codeJoin.status, codeJoin.data.seat.seatNo], [200, 1],
-      'Code-exchanged token without seatNo auto-assigns first empty seat');
-    check(Boolean(codeJoin.data.grantId), 'Code join returns an access grant');
-    const occupiedThree = await requestJson<{ seats: { seatNo: number; principalId: string | null }[]; checkedIn: number }>(
-      `/api/matches/${directId}`, { cookie: acct1.cookie });
-    checkEq(occupiedThree.data.seats.map((seat) => seat.principalId),
-      [acct1.principalId, codeGuest.principalId, directGuest.principalId],
-      '3p match contains owner and two checked-in guests');
-    checkEq(occupiedThree.data.checkedIn, 3, 'All three 3p seats are checked in');
+    checkEq([codeJoin.status, codeJoin.data.member.principalId, codeJoin.data.seated],
+      [200, codeGuest.principalId, false], 'Second guest joins without a seat conflict');
+    check(Boolean(codeJoin.data.grantId), 'Room-code join returns an access grant');
+    const readyThree = await requestJson<{
+      members: { principalId: string }[]; seats: { principalId: string | null }[]; checkedIn: number;
+    }>(`/api/matches/${directId}`, { cookie: acct1.cookie });
+    checkEq(readyThree.data.members.map((member) => member.principalId).sort(),
+      [acct1, directGuest, codeGuest].map((player) => player.principalId).sort(),
+      'Full three-player room contains the owner and both joined guests');
+    checkEq(readyThree.data.checkedIn, 0, 'Full room is still unseated before the draw');
+    check(readyThree.data.seats.every((seat) => seat.principalId === null),
+      'No joined member has claimed a specific seat');
 
     const replacementDirect = await registerEmailAccount(`direct_replacement_${runId}@example.com`, '直接补位');
     const fullToken = await issueDirectToken();
@@ -2628,7 +2645,45 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       method: 'POST', cookie: replacementDirect.cookie, body: { token: fullToken.data.token },
     });
     checkEq([fullAttempt.status, fullAttempt.data.error], [409, 'match_full'],
-      'Fourth principal cannot join a full 3p match');
+      'Fourth principal cannot join a full three-player room');
+    const rejectedMember = await pool.query<{ count: number }>(
+      'SELECT COUNT(*)::int AS count FROM app.match_members WHERE match_id = $1 AND principal_id = $2',
+      [directId, replacementDirect.principalId],
+    );
+    checkEq(rejectedMember.rows[0].count, 0, 'Full-room rejection creates no partial membership');
+    const unauthorizedDraw = await requestJson(`/api/matches/${directId}/seats/draw`, {
+      method: 'POST', cookie: directGuest.cookie, body: {},
+    });
+    checkEq(unauthorizedDraw.status, 403, 'Only the owner can draw participants');
+    const directDraw = await requestJson<{
+      seats: { seatNo: number; principalId: string; displayName: string; wind: string }[];
+      dealerSeatNo: number;
+    }>(`/api/matches/${directId}/seats/draw`, { method: 'POST', cookie: acct1.cookie, body: {} });
+    checkEq(directDraw.status, 200, 'Owner draws the full three-player table');
+    checkEq(directDraw.data.seats.map((seat) => seat.principalId).sort(),
+      [acct1, directGuest, codeGuest].map((player) => player.principalId).sort(),
+      'Draw includes exactly the joined participants');
+    checkEq(directDraw.data.seats.find((seat) => seat.principalId === directGuest.principalId)?.displayName,
+      '扫码入座', 'Draw exposes the guest alias at their assigned seat');
+    const codeSeatNo = directDraw.data.seats.find((seat) => seat.principalId === codeGuest.principalId)!.seatNo;
+    const otherSeatNo = (codeSeatNo + 1) % 3;
+    const unauthorizedMove = await requestJson(`/api/matches/${directId}/seats/reassign`, {
+      method: 'POST', cookie: directGuest.cookie, body: { fromSeatNo: codeSeatNo, toSeatNo: otherSeatNo },
+    });
+    checkEq(unauthorizedMove.status, 403, 'Only the owner may reassign drawn seats');
+    const swappedDirect = await requestJson<{ fromSeatNo: number; toSeatNo: number; swapped: boolean }>(
+      `/api/matches/${directId}/seats/reassign`, {
+        method: 'POST', cookie: acct1.cookie, body: { fromSeatNo: codeSeatNo, toSeatNo: otherSeatNo },
+      });
+    checkEq([swappedDirect.status, swappedDirect.data],
+      [200, { fromSeatNo: codeSeatNo, toSeatNo: otherSeatNo, swapped: true }],
+      'Host swaps two drawn participants before finalization');
+    const swappedView = await requestJson<{
+      seats: { principalId: string | null; status: string }[]; checkedIn: number;
+    }>(`/api/matches/${directId}`, { cookie: acct1.cookie });
+    checkEq(swappedView.data.seats[otherSeatNo].principalId, codeGuest.principalId,
+      'Guest occupies the destination of the host swap');
+    checkEq(swappedView.data.checkedIn, 3, 'All swapped members remain checked in');
     const unauthorizedRemoval = await requestJson(`/api/matches/${directId}/members/${codeGuest.principalId}/remove`, {
       method: 'POST', cookie: directGuest.cookie, body: {},
     });
@@ -2643,11 +2698,15 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       `/api/matches/${directId}/members/${codeGuest.principalId}/remove`, {
         method: 'POST', cookie: acct1.cookie, body: {},
       });
-    checkEq([removal.status, removal.data.removed], [200, true], 'Host removes joined guest before start');
-    const freedSeat = await requestJson<{ seats: { principalId: string | null; status: string }[]; checkedIn: number }>(
-      `/api/matches/${directId}`, { cookie: acct1.cookie });
-    checkEq([freedSeat.data.seats[1].principalId, freedSeat.data.seats[1].status, freedSeat.data.checkedIn],
-      [null, 'empty', 2], 'Removal frees the seat and invalidates the removed guest check-in');
+    checkEq([removal.status, removal.data.removed], [200, true], 'Host removes a drawn guest before start');
+    const freedSeat = await requestJson<{
+      match: { seatingDrawnAt: string | null; dealerSeatNo: number | null };
+      seats: { principalId: string | null; status: string }[]; checkedIn: number;
+    }>(`/api/matches/${directId}`, { cookie: acct1.cookie });
+    checkEq([freedSeat.data.match.seatingDrawnAt, freedSeat.data.match.dealerSeatNo, freedSeat.data.checkedIn],
+      [null, null, 0], 'Removing a drawn guest clears dealer, draw, and all check-ins');
+    check(freedSeat.data.seats.every((seat) => seat.principalId === null && seat.status === 'empty'),
+      'Removal clears the entire seating chart for a fresh draw');
     const removedRows = await pool.query<{ status: string; active_check_ins: number; active_grants: number }>(
       `SELECT mm.status,
               (SELECT COUNT(*)::int FROM app.check_ins ci
@@ -2658,44 +2717,43 @@ export async function runStageBE2E(): Promise<{ assertionsPassed: number }> {
       [directId, codeGuest.principalId],
     );
     checkEq([removedRows.rows[0].active_check_ins, removedRows.rows[0].active_grants], [0, 0],
-      'Removing a guest revokes their check-in and access grant');
-    check(removedRows.rows[0].status !== 'active', 'Removed guest is no longer an active member');
-    const directReplacementJoin = await requestJson<{ seat: { seatNo: number } }>(
-      `/api/matches/${directId}/check-ins`, {
-        method: 'POST', cookie: replacementDirect.cookie,
-        body: { token: fullToken.data.token, seatNo: 1 },
-      });
-    checkEq([directReplacementJoin.status, directReplacementJoin.data.seat.seatNo], [200, 1],
-      'Another guest immediately takes the freed seat');
-
-    const swappedDirect = await requestJson<{ fromSeatNo: number; toSeatNo: number; swapped: boolean }>(
-      `/api/matches/${directId}/seats/reassign`, {
-        method: 'POST', cookie: acct1.cookie, body: { fromSeatNo: 1, toSeatNo: 2 },
-      });
-    checkEq([swappedDirect.status, swappedDirect.data], [200, { fromSeatNo: 1, toSeatNo: 2, swapped: true }],
-      'Host swaps the two joined guests before finalize');
-    const swappedView = await requestJson<{ seats: { principalId: string | null; status: string }[]; checkedIn: number }>(
-      `/api/matches/${directId}`, { cookie: acct1.cookie });
-    checkEq(swappedView.data.seats.map((seat) => seat.principalId),
-      [acct1.principalId, directGuest.principalId, replacementDirect.principalId],
-      'Seat preview reflects both sides of the host swap');
-    checkEq(swappedView.data.checkedIn, 3, 'Both swapped participants remain checked in');
+      'Removal revokes the former guest check-in and grant');
+    check(removedRows.rows[0].status !== 'active', 'Removed guest is no longer active');
+    const directReplacementJoin = await requestJson<{
+      member: { principalId: string }; seated: boolean;
+    }>(`/api/matches/${directId}/check-ins`, {
+      method: 'POST', cookie: replacementDirect.cookie, body: { token: fullToken.data.token },
+    });
+    checkEq([directReplacementJoin.status, directReplacementJoin.data.member.principalId,
+      directReplacementJoin.data.seated],
+    [200, replacementDirect.principalId, false],
+    'Another guest joins the freed membership slot without selecting a seat');
+    const replacementDirectDraw = await requestJson<{
+      seats: { seatNo: number; principalId: string }[]; dealerSeatNo: number;
+    }>(`/api/matches/${directId}/seats/draw`, { method: 'POST', cookie: acct1.cookie, body: {} });
+    checkEq(replacementDirectDraw.status, 200, 'Host redraws after removal and replacement');
+    checkEq(replacementDirectDraw.data.seats.map((seat) => seat.principalId).sort(),
+      [acct1, directGuest, replacementDirect].map((player) => player.principalId).sort(),
+      'Redraw seats current members and excludes the removed member');
     const afterStartToken = await issueDirectToken();
     const directFinalize = await requestJson<{
-      seats: { seatNo: number; principalId: string }[];
+      seats: { seatNo: number; principalId: string }[]; dealerSeatNo: number;
     }>(`/api/matches/${directId}/seats/finalize`, {
-      method: 'POST', cookie: acct1.cookie, body: { dealerSeatNo: 0 },
+      method: 'POST', cookie: acct1.cookie, body: {},
     });
-    checkEq(directFinalize.status, 200, 'Host finalizes a swapped three-player table');
+    checkEq(directFinalize.status, 200, 'Host finalizes the replacement draw');
+    checkEq(directFinalize.data.dealerSeatNo, replacementDirectDraw.data.dealerSeatNo,
+      'Finalization retains the replacement draw dealer');
     checkEq(directFinalize.data.seats.map((seat) => seat.principalId),
-      [acct1.principalId, directGuest.principalId, replacementDirect.principalId],
-      'Finalized seat order persists the host swap');
+      replacementDirectDraw.data.seats.map((seat) => seat.principalId),
+      'Finalized seat order agrees with the replacement draw');
     const directHand = await requestJson<{ hand: { dealerSeatNo: number } }>(
       `/api/matches/${directId}/hands`, { method: 'POST', cookie: acct1.cookie, body: {} });
-    checkEq([directHand.status, directHand.data.hand.dealerSeatNo], [200, 0],
-      'First hand starts successfully using the confirmed dealer after swapping');
+    checkEq([directHand.status, directHand.data.hand.dealerSeatNo],
+      [200, replacementDirectDraw.data.dealerSeatNo],
+      'First hand opens with the confirmed drawn dealer');
     const afterStartJoin = await requestJson<{ error: string }>(`/api/matches/${directId}/check-ins`, {
-      method: 'POST', cookie: strangerAcct.cookie, body: { token: afterStartToken.data.token, seatNo: 1 },
+      method: 'POST', cookie: strangerAcct.cookie, body: { token: afterStartToken.data.token },
     });
     checkEq([afterStartJoin.status, afterStartJoin.data.error], [409, 'match_already_started'],
       'A valid unused token cannot add another participant after start');

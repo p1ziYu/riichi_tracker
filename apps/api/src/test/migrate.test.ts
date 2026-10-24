@@ -158,6 +158,7 @@ describe('isolated migration runner negative probes', () => {
     assert.equal(db.versions.size, 12);
     assert.equal(db.versions.get('008'), '4f1426907db9d02cef674c18ebdee1db1dd8aedfeed9905adae697fd24af25d0');
   });
+
   it('applies 013 after 012, records its checksum, and skips it on rerun', async () => {
     const all = loadMigrations();
     const m013 = all.find((m) => m.version === '013');
@@ -172,6 +173,22 @@ describe('isolated migration runner negative probes', () => {
     assert.deepEqual(db.executedSql, [m013.sql]);
     await applyMigrations(new FakeClient(db), all);
     assert.deepEqual(db.executedSql, [m013.sql]);
+  });
+
+  it('applies 014 after 013, records its checksum, and skips it on rerun', async () => {
+    const all = loadMigrations();
+    const m014 = all.find((m) => m.version === '014');
+    assert.ok(m014, 'migration 014 exists');
+    const db = new FakeDatabase();
+    for (const migration of all) {
+      if (migration.version === '014') break;
+      db.versions.set(migration.version, migration.checksum);
+    }
+    await applyMigrations(new FakeClient(db), all);
+    assert.equal(db.versions.get('014'), m014.checksum);
+    assert.deepEqual(db.executedSql, [m014.sql]);
+    await applyMigrations(new FakeClient(db), all);
+    assert.deepEqual(db.executedSql, [m014.sql]);
   });
 
 });

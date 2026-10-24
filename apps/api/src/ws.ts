@@ -11,6 +11,8 @@ export type WsEventType =
   | 'check_in'
   | 'join_approved'
   | 'seat_claimed'
+  | 'seats_drawn'
+  | 'member_joined'
   | 'seats_finalized'
   | 'hand_started'
   | 'marks_changed'
