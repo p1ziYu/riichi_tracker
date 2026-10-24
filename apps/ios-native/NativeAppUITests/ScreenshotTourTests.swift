@@ -220,18 +220,15 @@ final class ScreenshotTourTests: XCTestCase {
                 Thread.sleep(forTimeInterval: 1)
             }
             app.typeText(joinCode)
+            // Dismiss the keyboard and scroll the form: the redeem button and
+            // the seat-preview rows only materialize once near the viewport.
+            app.swipeUp()
+            Thread.sleep(forTimeInterval: 1)
             tap(app.buttons["checkIn.redeemCode"])
-            // The first redeem tap can be consumed dismissing the keyboard;
-            // re-tap while waiting for the seat preview to load.
             let seatPreview = app.buttons["checkIn.confirmSeat"]
-            let deadline = Date().addingTimeInterval(45)
-            var lastRedeemTap = Date()
-            while !seatPreview.exists && Date() < deadline {
+            for _ in 0..<8 where !seatPreview.exists {
                 Thread.sleep(forTimeInterval: 2)
-                if Date().timeIntervalSince(lastRedeemTap) > 6 {
-                    tap(app.buttons["checkIn.redeemCode"])
-                    lastRedeemTap = Date()
-                }
+                app.swipeUp()
             }
             XCTAssertTrue(seatPreview.exists, "Room code did not reach the seat preview")
             capture("tour-online-10-seats", in: app)
