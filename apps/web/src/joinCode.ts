@@ -1,4 +1,5 @@
-import { ApiError, api, errorText } from './api.ts';
+import { api } from './api.ts';
+import { flowError } from './checkInSeats.ts';
 
 export const normalizeJoinCode = (value: string): string => value.trim().toUpperCase();
 
@@ -17,12 +18,7 @@ export function checkInRoute(match: JoinCodeMatch): string {
 }
 
 export function joinCodeError(error: unknown): string {
-  if (error instanceof ApiError) {
-    if (error.status === 404) return '房间码无效，或对局已结束';
-    if (error.status === 409) return '对局已开始，无法加入';
-    if (error.status === 429) return '尝试过于频繁，请稍后再试';
-  }
-  return errorText(error);
+  return flowError(error);
 }
 
 export function resolveJoinCode(code: string): Promise<JoinCodeMatch> {

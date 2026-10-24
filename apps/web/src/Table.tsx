@@ -5,6 +5,7 @@ import type { ResultInput } from '@riichi/engine';
 import { ApiError, api, errorText, post, webSocketUrl } from './api';
 import { pointText, snapshotRuleSummary, winds } from './rules';
 import Segmented from './Segmented';
+import { flowError } from './checkInSeats';
 
 type Revision = number | string;
 type Seat = {
@@ -18,6 +19,7 @@ type Seat = {
   member?: { id?: string; displayName?: string; name?: string } | null;
   initialWind?: string;
 };
+type Member = { principalId: string; displayName: string; isOwner: boolean; seatNo: number | null; wind: string | null };
 type HandSeat = { seatNo: number; points?: number; isRiichi?: boolean; riichiChangeUsage: { declares: number; cancels: number } };
 type CurrentHand = {
   id?: string;
@@ -34,7 +36,8 @@ type CurrentHand = {
 type Score = { seatNo: number; points: number };
 type CheckIn = { seatNo?: number; memberId?: string; checkedIn?: boolean; isCheckedIn?: boolean; status?: string };
 type MatchState = {
-  match: { id: string; name?: string; ownerPrincipalId?: string; status: string; joinCode?: string | null; playerCount?: number; handsPlayed?: number; version?: Revision; settlementConfirmed?: boolean; rulesSnapshot?: Record<string, unknown>; rulesetVersionId?: string };
+  match: { id: string; name?: string; ownerPrincipalId?: string; status: string; joinCode?: string | null; playerCount?: number; seatingDrawnAt: string | null; dealerSeatNo: number | null; handsPlayed?: number; version?: Revision; settlementConfirmed?: boolean; rulesSnapshot?: Record<string, unknown>; rulesetVersionId?: string };
+  members: Member[];
   seats: Seat[];
   currentHand: CurrentHand | null;
   scoreboard: Score[] | Record<string, number>;
@@ -58,6 +61,7 @@ const matchStateLabels: Record<string, string> = {
   finished: '牌局已结束',
   abandoned: '牌局已取消',
 };
+const windNames: Record<string, string> = { E: '东', S: '南', W: '西', N: '北' };
 
 function seatLabel(seat: Seat): string {
   return seat.displayName ?? seat.memberName ?? seat.member?.displayName ?? seat.member?.name ?? `座位 ${seat.seatNo + 1}`;
@@ -138,7 +142,7 @@ function JoinCodeBlock({ code, copyStatus, onCopy }: { code: string; copyStatus:
   return <div className="table-join-code">
     <span>房间码</span>
     <strong aria-label={`房间码 ${code}`}>{code}</strong>
-    <small>朋友可在首页输入房间码，进入签到页。</small>
+    <small>朋友可在首页输入房间码，进入加入牌桌页。</small>
     <button type="button" onClick={onCopy}>复制房间码</button>
     {copyStatus && <small role="status">{copyStatus}</small>}
   </div>;
@@ -186,7 +190,7 @@ export default function Table() {
     }).catch(() => {});
     return () => { alive = false; };
   }, []);
-  const [token, setToken] = useState<{ id: string; value: string; expiresAt?: string; checkedInAtIssue: number } | null>(null);
+  const [token, setToken] = useState<{ id: string; value: string; expiresAt?: string; memberCountAtIssue: number } | null>(null);
   const [expiredToken, setExpiredToken] = useState<string | null>(null);
   const [qrCode, setQrCode] = useState<{ url: string; image: string } | null>(null);
   const [qrError, setQrError] = useState('');
@@ -353,9 +357,15 @@ export default function Table() {
 
   const state = loaded && loaded.id === id ? loaded.value : null;
   const checkInUrl = token && token.id === id && expiredToken !== token.value &&
-    (typeof state?.checkedIn !== 'number' || state.checkedIn <= token.checkedInAtIssue) &&
+    state?.match.status === 'preparing' && (state.members.length < (state.match.playerCount ?? 0)) &&
+    state.members.length <= token.memberCountAtIssue &&
     (!token.expiresAt || Date.parse(token.expiresAt) > Date.now())
     ? new URL(`/checkin/${encodeURIComponent(id!)}?token=${encodeURIComponent(token.value)}`, 'https://riichi.p1ziyu.com').href : null;
+  useEffect(() => {
+    if (token && token.id === id && state && state.members.length > token.memberCountAtIssue) {
+      setExpiredToken(token.value);
+    }
+  }, [id, token, state?.members.length]);
   useEffect(() => {
     if (!token?.expiresAt || token.id !== id) return;
     const remaining = Date.parse(token.expiresAt) - Date.now();
@@ -379,8 +389,13 @@ export default function Table() {
   }, [checkInUrl]);
 
   const isOwner = !!state?.match.ownerPrincipalId && identity !== null && identity.id === id && identity.principalId === state.match.ownerPrincipalId;
+  const preparing = state?.match.status === 'preparing' || state?.match.status === 'lobby';
+  const drawn = state?.match.seatingDrawnAt != null;
+  const members = state?.members ?? [];
   const hand = state?.currentHand ?? null;
   const seats = useMemo(() => [...(state?.seats ?? [])].sort((a, b) => a.seatNo - b.seatNo), [state?.seats]);
+  const legacySeated = !drawn && seats.length === state?.match.playerCount &&
+    seats.every((seat) => seat.principalId && seat.status === 'checked_in');
   const handSeats = hand?.seats ?? [];
   const matchInProgress = state?.match.status === 'active' || state?.match.status === 'in_progress';
   const activeHand = matchInProgress && hand && (!hand.status || ['active', 'open', 'in_progress'].includes(hand.status));
@@ -408,7 +423,7 @@ export default function Table() {
         : !Number.isInteger(han) || han < 1 || !Number.isInteger(fu) || fu < 20 ||
           (kind === 'ron' && (winner === dealIn || !seats.some((seat) => seat.seatNo === dealIn))))));
 
-  const action = async (operation: () => Promise<void>) => {
+  const action = async (operation: () => Promise<void>, seating = false) => {
     setBusy(true);
     setActionError('');
     try {
@@ -418,9 +433,9 @@ export default function Table() {
         try { await refresh(); } catch { /* The GET error is separately displayed. */ }
         setDraftPreview(null);
         setTerminalPreview(null);
-        setActionError(error.code === 'riichi_change_budget_exceeded' ? errorText(error) : '数据已更新，请重试');
+        setActionError(seating ? flowError(error) : error.code === 'riichi_change_budget_exceeded' ? errorText(error) : '数据已更新，请重试');
       } else {
-        setActionError(errorText(error));
+        setActionError(seating ? flowError(error) : errorText(error));
       }
     } finally {
       setBusy(false);
@@ -522,67 +537,77 @@ export default function Table() {
     {!state && loadError?.id !== id && <p className="notice" role="status">正在读取牌桌…</p>}
     {!state && loadError?.id === id && <Link className="button" to="/create">返回开桌</Link>}
     {state && <>
-      <section className={`panel table-checkin${isOwner && ['preparing', 'lobby'].includes(state.match.status) ? ' table-checkin-owner' : ''}`}><div className="section-heading"><span>座次与签到</span><small>以服务端状态为准</small></div>
-        <div className="member-list">{seats.map((seat) => <div key={seat.seatNo}><span className="wind-badge">{seat.seatNo + 1}</span><span>{seatLabel(seat)} · 座位 {seat.seatNo + 1}</span><small>{checkInLabel(state.checkedIn, seat, state.match.ownerPrincipalId)}</small>
-          {isOwner && ['preparing', 'lobby'].includes(state.match.status) &&
-            (!seat.principalId || (seat.principalId === identity?.principalId && seat.status !== 'checked_in')) &&
-            <button type="button" disabled={busy} onClick={() => void action(async () => {
-              await post(`${base}/seats/claim`, { seatNo: seat.seatNo });
-              setDealerSeatNo(null);
-              await refresh();
-            })}>{seat.principalId ? '房主确认本座' : '房主选此座'}</button>}
-          {isOwner && state.match.status === 'preparing' && seat.principalId && <>
-            <div className="seat-reassign">
-              <select aria-label={`将${seatLabel(seat)}移至座位`} value={seatTargets[seat.seatNo] ?? ''} disabled={busy}
-                onChange={(event) => setSeatTargets((current) => ({ ...current, [seat.seatNo]: event.target.value }))}>
+      <section className={`panel table-checkin${preparing ? ' table-checkin-preparing' : ''}${isOwner && preparing ? ' table-checkin-owner' : ''}`}><div className="section-heading"><span>{preparing ? '成员与座位' : '座次与签到'}</span><small>以服务端状态为准</small></div>
+        {preparing ? <>
+          <p className="muted">成员 {members.length} / {state.match.playerCount}</p>
+          {!isOwner && members.some((member) => member.principalId === identity?.principalId) && !drawn &&
+            <p className="muted">已加入，等待房主抽风定座</p>}
+          <div className="member-list">{members.map((member) => <div key={member.principalId}>
+            <span className="wind-badge">{drawn && member.wind ? windNames[member.wind] ?? member.wind : member.seatNo !== null && legacySeated ? member.seatNo + 1 : '·'}</span>
+            <span>{member.displayName} {member.isOwner && <small className="tag">房主</small>}</span>
+            <small>{drawn && member.seatNo !== null ? `${windNames[member.wind ?? ''] ?? member.wind ?? ''} · 座位 ${member.seatNo + 1}${member.wind === 'E' ? ' · 庄家（起家）' : ''}` : legacySeated && member.seatNo !== null ? `座位 ${member.seatNo + 1} · 已入座` : '尚未定座'}</small>
+            {isOwner && member.seatNo !== null && <div className="seat-reassign">
+              <select aria-label={`将${member.displayName}移至座位`} value={seatTargets[member.seatNo] ?? ''} disabled={busy}
+                onChange={(event) => setSeatTargets((current) => ({ ...current, [member.seatNo!]: event.target.value }))}>
                 <option value="">选择目标座位</option>
-                {seats.filter((target) => target.seatNo !== seat.seatNo).map((target) =>
-                  <option value={target.seatNo} key={target.seatNo}>座位 {target.seatNo + 1} · {target.principalId ? `与${seatLabel(target)}交换` : '空座'}</option>)}
+                {seats.filter((target) => target.seatNo !== member.seatNo).map((target) => {
+                  const occupant = members.find((entry) => entry.seatNo === target.seatNo);
+                  return <option value={target.seatNo} key={target.seatNo}>座位 {target.seatNo + 1} · {occupant ? `与${occupant.displayName}交换` : '空座'}</option>;
+                })}
               </select>
-              <button type="button" disabled={busy || !seatTargets[seat.seatNo]}
+              <button type="button" disabled={busy || !seatTargets[member.seatNo]}
                 onClick={() => void action(async () => {
-                  await post(`${base}/seats/reassign`, { fromSeatNo: seat.seatNo, toSeatNo: Number(seatTargets[seat.seatNo]) });
+                  await post(`${base}/seats/reassign`, { fromSeatNo: member.seatNo, toSeatNo: Number(seatTargets[member.seatNo!]) });
                   setSeatTargets({});
                   setDealerSeatNo(null);
                   await refresh();
-                })}>移动 / 交换</button>
+                }, true)}>移动 / 交换</button>
+            </div>}
+            {isOwner && !member.isOwner && <button type="button" className="text-button danger" disabled={busy}
+              onClick={() => {
+                if (!window.confirm(`确定将${member.displayName}移出牌桌？${drawn ? '移出后将重置抽风结果。' : '移出后可邀请其他玩家加入。'}`)) return;
+                void action(async () => {
+                  await post(`${base}/members/${encodeURIComponent(member.principalId)}/remove`, {});
+                  setSeatTargets({});
+                  setDealerSeatNo(null);
+                  await refresh();
+                }, true);
+              }}>移出玩家</button>}
+            {isOwner && legacySeated && member.seatNo !== null &&
+              <button type="button" className="text-button" aria-pressed={dealerSeatNo === member.seatNo} disabled={busy} onClick={() => setDealerSeatNo(member.seatNo)}>{dealerSeatNo === member.seatNo ? '起家 · 东家' : '设为起家'}</button>}
+          </div>)}</div>
+          {isOwner && <>
+            {!drawn && !legacySeated && <div className="table-controls">
+              <button type="button" className="primary" disabled={busy || members.length !== state.match.playerCount}
+                onClick={() => void action(async () => {
+                  await post(`${base}/seats/draw`, {});
+                  setSeatTargets({});
+                  await refresh();
+                }, true)}>抽风定座</button>
+              {members.length < (state.match.playerCount ?? 0) && <small>还差 {(state.match.playerCount ?? 0) - members.length} 人</small>}
+            </div>}
+            {drawn ? <p className="muted">起家：{members.find((member) => member.wind === 'E')?.displayName ?? '东家'}（抽风决定）</p> :
+              legacySeated && <FinalizeDealerBlock dealerSeatNo={dealerSeatNo} busy={busy} onSelectDealer={setDealerSeatNo} />}
+            {state.match.joinCode && !checkInUrl && <JoinCodeBlock code={state.match.joinCode} copyStatus={joinCodeCopyStatus} onCopy={() => void copyJoinCode()} />}
+            <div className="table-controls table-controls-finalize">
+              <button type="button" disabled={busy || members.length >= (state.match.playerCount ?? 0)} onClick={() => void action(async () => {
+                setToken(null);
+                const result = await post<TokenResponse>(`${base}/check-in-tokens`, {});
+                if (!result?.token) throw new Error('服务端未返回签到令牌');
+                setToken({ id: id!, value: result.token, expiresAt: result.expiresAt, memberCountAtIssue: members.length });
+              }, true)}>生成玩家加入链接</button>
+              <button type="button" className="primary" disabled={busy || (!drawn && !legacySeated)}
+                onClick={() => void action(async () => {
+                  await post(`${base}/seats/finalize`, drawn || dealerSeatNo === null ? {} : { dealerSeatNo });
+                  await refresh();
+                }, true)}>{drawn ? '开局' : '确认座次并开局'}</button>
+              {!drawn && !legacySeated && <small>请先等人齐并抽风定座</small>}
             </div>
-            {seat.principalId !== state.match.ownerPrincipalId &&
-              <button type="button" className="text-button danger" disabled={busy}
-                onClick={() => {
-                  if (!window.confirm(`确定将${seatLabel(seat)}移出牌桌？该座位将空出。`)) return;
-                  void action(async () => {
-                    await post(`${base}/members/${encodeURIComponent(seat.principalId!)}/remove`, {});
-                    setSeatTargets({});
-                    setDealerSeatNo(null);
-                    await refresh();
-                  });
-                }}>移出玩家</button>}
           </>}
-          {isOwner && ['preparing', 'lobby'].includes(state.match.status) && seat.principalId &&
-            <button type="button" className="text-button" aria-pressed={dealerSeatNo === seat.seatNo} disabled={busy} onClick={() => setDealerSeatNo(seat.seatNo)}>{dealerSeatNo === seat.seatNo ? '起家 · 东家' : '设为起家'}</button>}
-        </div>)}</div>
-        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && <>
-          <FinalizeDealerBlock
-            dealerSeatNo={dealerSeatNo}
-            busy={busy}
-            onSelectDealer={setDealerSeatNo}
-          />
-          {state.match.joinCode && !checkInUrl && <JoinCodeBlock code={state.match.joinCode} copyStatus={joinCodeCopyStatus} onCopy={() => void copyJoinCode()} />}
-          <div className="table-controls table-controls-finalize">
-            <button type="button" disabled={busy} onClick={() => void action(async () => {
-              setToken(null);
-              const result = await post<TokenResponse>(`${base}/check-in-tokens`, {});
-              if (!result?.token) throw new Error('服务端未返回签到令牌');
-              setToken({ id: id!, value: result.token, expiresAt: result.expiresAt,
-                checkedInAtIssue: typeof state.checkedIn === 'number' ? state.checkedIn : 0 });
-            })}>生成玩家签到链接</button>
-            <button type="button" className="primary" disabled={busy} onClick={() => void action(async () => { await post(`${base}/seats/finalize`, dealerSeatNo === null ? {} : { dealerSeatNo }); await refresh(); })}>确认座次</button>
-          </div>
-        </>}
-        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && token?.id === id &&
-          !checkInUrl && <p className="notice" role="status">签到链接已使用或过期，请重新生成。</p>}
-        {isOwner && ['preparing', 'lobby'].includes(state.match.status) && checkInUrl && <div className="table-invite"><div className="table-qr">{qrCode?.url === checkInUrl ? <img src={qrCode.image} width="256" height="256" alt="扫描二维码打开签到链接" /> : <span role="status">{qrError ? '二维码生成失败，请使用下方链接' : '正在生成签到二维码…'}</span>}</div><div className="table-invite-details">{state.match.joinCode && <JoinCodeBlock code={state.match.joinCode} copyStatus={joinCodeCopyStatus} onCopy={() => void copyJoinCode()} />}<p>玩家入座链接（房主免签到）：</p><small>每个链接仅供一位玩家使用，可直接选择空座或自动分配。加入后请为下一位重新生成。</small><a href={checkInUrl}>{checkInUrl}</a>{token?.expiresAt && <small>截止 {token.expiresAt}</small>}<button type="button" onClick={() => void copyCheckIn()}>复制入座链接</button>{copyStatus && <small role="status">{copyStatus}</small>}</div></div>}
+          {isOwner && token?.id === id && !checkInUrl && members.length < (state.match.playerCount ?? 0) &&
+            <p className="notice" role="status">签到链接已使用或过期，请重新生成。</p>}
+          {isOwner && checkInUrl && <div className="table-invite"><div className="table-qr">{qrCode?.url === checkInUrl ? <img src={qrCode.image} width="256" height="256" alt="扫描二维码打开玩家加入链接" /> : <span role="status">{qrError ? '二维码生成失败，请使用下方链接' : '正在生成加入二维码…'}</span>}</div><div className="table-invite-details">{state.match.joinCode && <JoinCodeBlock code={state.match.joinCode} copyStatus={joinCodeCopyStatus} onCopy={() => void copyJoinCode()} />}<p>玩家加入链接</p><small>每位玩家打开链接即可加入牌桌；人齐后由房主抽风定座。每个链接仅供一位玩家使用，加入后请为下一位重新生成。</small><a href={checkInUrl}>{checkInUrl}</a>{token?.expiresAt && <small>截止 {token.expiresAt}</small>}<button type="button" onClick={() => void copyCheckIn()}>复制加入链接</button>{copyStatus && <small role="status">{copyStatus}</small>}</div></div>}
+        </> : <div className="member-list">{seats.map((seat) => <div key={seat.seatNo}><span className="wind-badge">{seat.seatNo + 1}</span><span>{seatLabel(seat)} · 座位 {seat.seatNo + 1}</span><small>{checkInLabel(state.checkedIn, seat, state.match.ownerPrincipalId)}</small></div>)}</div>}
       </section>
       <div className="table-layout"><section className="felt" aria-label="牌桌座位"><div className="felt-lines" aria-hidden="true" /><div className="seat-grid">{seats.map((seat) => {
         const inHand = handSeats.find((entry) => entry.seatNo === seat.seatNo);

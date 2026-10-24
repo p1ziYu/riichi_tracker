@@ -287,7 +287,7 @@ function Login({ onAuthenticated }: { onAuthenticated: (principal: Principal) =>
     } catch (cause) { setError(errorText(cause)); }
     finally { setBusy(false); }
   }
-  return <main className="page narrow"><p className="eyebrow">ACCOUNT / 账户</p><h1>登录一姬</h1><section className="panel"><Segmented label="登录方式" value={mode} options={[{ value: 'login', label: '邮箱登录' }, { value: 'register', label: '注册账户' }]} onChange={setMode} /><form onSubmit={(event) => { event.preventDefault(); void enter(mode === 'login' ? '/api/auth/sign-in/email' : '/api/auth/sign-up/email', mode === 'login' ? { email, password } : { email, password, name }); }}>{mode === 'register' && <label>昵称<input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required /></label>}<label>邮箱<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" placeholder="name@example.com" required /></label><label>密码<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required /></label><button className="primary" type="submit" disabled={busy}>{mode === 'login' ? '登录' : '注册并登录'}</button></form><p className="note">无需邮箱？选择访客进入，使用房间码或签到链接直接选择座位加入牌桌。</p><button type="button" disabled={busy} onClick={() => void enter('/api/auth/sign-in/anonymous', {})}>访客进入</button>{error && <div className="notice invalid" role="alert">{error}</div>}</section></main>;
+  return <main className="page narrow"><p className="eyebrow">ACCOUNT / 账户</p><h1>登录一姬</h1><section className="panel"><Segmented label="登录方式" value={mode} options={[{ value: 'login', label: '邮箱登录' }, { value: 'register', label: '注册账户' }]} onChange={setMode} /><form onSubmit={(event) => { event.preventDefault(); void enter(mode === 'login' ? '/api/auth/sign-in/email' : '/api/auth/sign-up/email', mode === 'login' ? { email, password } : { email, password, name }); }}>{mode === 'register' && <label>昵称<input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required /></label>}<label>邮箱<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" placeholder="name@example.com" required /></label><label>密码<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required /></label><button className="primary" type="submit" disabled={busy}>{mode === 'login' ? '登录' : '注册并登录'}</button></form><p className="note">无需邮箱？选择访客进入，使用房间码或玩家加入链接加入牌桌，等待房主抽风定座。</p><button type="button" disabled={busy} onClick={() => void enter('/api/auth/sign-in/anonymous', {})}>访客进入</button>{error && <div className="notice invalid" role="alert">{error}</div>}</section></main>;
 }
 
 function Payments({ output }: { output: SettlementOutput }) {
@@ -392,102 +392,108 @@ function Create({ guest }: { guest: boolean }) {
       <div className="sticky-actions"><p>模板只读；调整后的完整规则随本桌保存。</p><button type="button" className="primary" disabled={!!validation || busy} onClick={() => void create()}>{guest ? '创建本地对局 →' : '仅用于本桌 →'}</button></div>
     </>}
     {step === 3 && created && <section className="panel">
-      <p className="eyebrow">{guest ? 'LOCAL TABLE / 本地对局' : 'TABLE READY / 入桌签到'}</p>
+      <p className="eyebrow">{guest ? 'LOCAL TABLE / 本地对局' : 'TABLE READY / 牌桌已创建'}</p>
       <h2>{created.template} · 已开桌</h2>
-      <p className="muted">{guest ? '牌局已保存在此设备。进入牌桌即可记分，无需签到或联网。' : '牌局已创建。进入牌桌继续座次确认与签到。'}</p>
-      <Link className="button primary" to={`/table/${created.id}`}>{guest ? '进入本地牌桌 →' : '入桌签到 →'}</Link>
+      <p className="muted">{guest ? '牌局已保存在此设备。进入牌桌即可记分，无需签到或联网。' : '房主已加入牌桌。分享玩家加入链接，人齐后抽风定座。'}</p>
+      <Link className="button primary" to={`/table/${created.id}`}>{guest ? '进入本地牌桌 →' : '进入牌桌 →'}</Link>
     </section>}
     {error && <div className="notice invalid" role="alert">{error}</div>}
   </main>;
 }
 
+const checkInWindNames: Record<string, string> = { E: '东', S: '南', W: '西', N: '北' };
+
 function CheckInPage({ matchId, token }: { matchId: string; token: string | null }) {
+  const navigate = useNavigate();
   const [room, setRoom] = useState<CheckInRoom | null>(null);
-  const [chosenSeatNo, setChosenSeatNo] = useState<number | null>(null);
   const [alias, setAlias] = useState('');
-  const [joinedSeatNo, setJoinedSeatNo] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(!!token);
   const [busy, setBusy] = useState(false);
   const base = `/api/matches/${encodeURIComponent(matchId)}`;
   const requestRef = useRef(0);
-  const refreshSeats = useCallback(async () => {
-    if (!token) return false;
+  const refreshRoom = useCallback(async () => {
+    if (!token) return;
     const request = ++requestRef.current;
     setLoading(true);
     try {
       const next = await api<CheckInRoom>(`${base}/check-in-seats?token=${encodeURIComponent(token)}`);
-      if (request !== requestRef.current) return false;
+      if (request !== requestRef.current) return;
+      if (next.caller.isOwner) {
+        navigate(`/table/${encodeURIComponent(matchId)}`, { replace: true });
+        return;
+      }
       setRoom(next);
-      setChosenSeatNo((previous) => previous !== null && next.seats.some((seat) => seat.seatNo === previous && !seat.principalId) ? previous : null);
       setError('');
-      return true;
     } catch (cause) {
-      if (request === requestRef.current) setError(checkInError(cause));
-      return false;
+      if (request === requestRef.current) {
+        setRoom(null);
+        setError(checkInError(cause));
+      }
     } finally {
       if (request === requestRef.current) setLoading(false);
     }
-  }, [base, token]);
+  }, [base, matchId, navigate, token]);
   useEffect(() => {
-    void refreshSeats();
+    void refreshRoom();
     return () => { ++requestRef.current; };
-  }, [refreshSeats]);
+  }, [refreshRoom]);
 
   async function join(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!token || !room || busy) return;
+    if (!token || !room || room.caller.isOwner || room.caller.isMember || busy ||
+      room.seating.memberCount >= room.match.playerCount) return;
     setBusy(true);
     setError('');
     try {
-      const result = await post<{ seat: { seatNo: number }; grantId: string }>(`${base}/check-ins`,
-        checkInBody(token, alias, chosenSeatNo));
+      const result = await post<{ member: { principalId: string; displayName: string }; seated: boolean; grantId: string }>(
+        `${base}/check-ins`, checkInBody(token, alias));
       const cleaned = new URL(window.location.href);
       cleaned.searchParams.delete('token');
       window.history.replaceState(window.history.state, '', `${cleaned.pathname}${cleaned.search}${cleaned.hash}`);
-      setJoinedSeatNo(result.seat.seatNo);
+      setRoom((current) => {
+        if (!current) return current;
+        const exists = current.members.some((member) => member.principalId === result.member.principalId);
+        return {
+          ...current,
+          caller: { ...current.caller, isMember: true },
+          members: exists ? current.members : [...current.members, {
+            ...result.member, isOwner: false, seatNo: null, wind: null,
+          }],
+          seating: { ...current.seating, memberCount: current.seating.memberCount + (exists ? 0 : 1) },
+        };
+      });
     } catch (cause) {
       setError(checkInError(cause));
-      if (cause instanceof ApiError && cause.code === 'seat_taken') {
-        setChosenSeatNo(null);
-        if (await refreshSeats()) setError(checkInError(cause));
-      }
     } finally { setBusy(false); }
   }
 
-  const available = room?.seats.filter((seat) => !seat.principalId).length ?? 0;
+  const full = room !== null && room.seating.memberCount >= room.match.playerCount;
   return <main className="page narrow check-in-page">
-    <p className="eyebrow">CHECK IN / 签到</p><h1>选择座位 · 直接加入</h1>
+    <p className="eyebrow">CHECK IN / 签到</p><h1>加入牌桌</h1>
     <section className="panel">
-      {joinedSeatNo !== null ? <>
-        <h2>已加入 · 座位 {joinedSeatNo + 1}</h2>
-        <p className="muted">已入座，等待房主确认座次并开局。</p>
-        <Link className="button primary" to={`/table/${matchId}`}>查看牌桌 →</Link>
-      </> : <>
-        {!token && <div className="notice invalid" role="alert">签到链接缺少令牌，请重新扫码或输入房间码。</div>}
-        {loading && <p className="muted" role="status">正在读取座位…</p>}
-        {error && <div className="notice invalid" role="alert">{error}</div>}
-        {token && error && !room && !loading && <button type="button" onClick={() => void refreshSeats()}>重新读取座位</button>}
-        {room && !loading && <>
-          {room.match.status !== 'preparing' ? <p className="notice invalid" role="alert">牌局已开始，无法加入。</p> : <>
-            <p className="muted">{room.match.playerCount} 人牌桌 · {available ? `剩余 ${available} 个座位` : '座位已满，暂时无法加入'}</p>
-            <form onSubmit={(event) => void join(event)}>
-              <fieldset className="check-in-seats" disabled={busy || available === 0}>
-                <legend>请选择入座方式</legend>
-                <label className="check-in-seat">
-                  <input type="radio" name="check-in-seat" checked={chosenSeatNo === null} onChange={() => setChosenSeatNo(null)} />
-                  <span><strong>自动分配</strong><small>自动选择最靠前的空座</small></span>
-                </label>
-                {[...room.seats].sort((a, b) => a.seatNo - b.seatNo).map((seat) => <label className={`check-in-seat${seat.principalId ? ' occupied' : ''}`} key={seat.seatNo}>
-                  <input type="radio" name="check-in-seat" value={seat.seatNo} checked={chosenSeatNo === seat.seatNo} disabled={!!seat.principalId} onChange={() => setChosenSeatNo(seat.seatNo)} />
-                  <span><strong>座位 {seat.seatNo + 1}</strong><small>{seat.principalId ? seat.displayName || '已入座' : '空座 · 可选择'}</small></span>
-                </label>)}
-              </fieldset>
-              <label className="check-in-alias">本桌昵称（可选）<input value={alias} onChange={(event) => setAlias(event.target.value)} maxLength={80} placeholder="不填写则使用当前昵称" /></label>
-              <button className="primary" type="submit" disabled={busy || available === 0}>{busy ? '正在加入…' : '确认加入牌桌'}</button>
-              <button type="button" className="text-button" disabled={busy} onClick={() => void refreshSeats()}>刷新座位</button>
-            </form>
-          </>}
+      {!token && !room && <div className="notice invalid" role="alert">{checkInError(new ApiError(400, '', 'missing_token'))}</div>}
+      {loading && <p className="muted" role="status">正在读取房间…</p>}
+      {error && <div className="notice invalid" role="alert">{error}</div>}
+      {token && error && !room && !loading && <button type="button" onClick={() => void refreshRoom()}>重新读取房间</button>}
+      {room && !room.caller.isOwner && !loading && <>
+        <h2>{room.match.playerCount} 人牌桌 · 成员 {room.seating.memberCount} / {room.match.playerCount}</h2>
+        <div className="member-list">{room.members.map((member) => <div key={member.principalId}>
+          <span className="wind-badge">{member.wind ? checkInWindNames[member.wind] ?? member.wind : member.seatNo !== null ? member.seatNo + 1 : '·'}</span>
+          <span>{member.displayName}{member.isOwner && <small className="tag">房主</small>}{member.principalId === room.caller.principalId ? ' · 我' : ''}</span>
+          <small>{member.seatNo !== null ? `已入座${member.wind ? ` · ${checkInWindNames[member.wind] ?? member.wind} · 座位 ${member.seatNo + 1}` : ` · 座位 ${member.seatNo + 1}`}` : '等待抽风'}</small>
+        </div>)}</div>
+        {room.caller.isMember ? <>
+          <h2>已加入牌桌</h2>
+          <p className="muted">{room.seating.drawn ? '座次已抽取，请进入牌桌查看。' : '等待房主抽风定座…'}</p>
+          <Link className="button primary" to={`/table/${encodeURIComponent(matchId)}`}>查看牌桌 →</Link>
+        </> : room.match.status !== 'preparing' ? <p className="notice invalid" role="alert">牌局已开始，无法加入。</p> : <>
+          {full && <p className="notice invalid" role="alert">牌桌已满员</p>}
+          <form onSubmit={(event) => void join(event)}>
+            <label className="check-in-alias">本桌昵称（可选）<input value={alias} onChange={(event) => setAlias(event.target.value)} maxLength={64} placeholder="不填写则使用当前昵称" disabled={busy || full} /></label>
+            <button className="primary" type="submit" disabled={busy || full}>{busy ? '正在加入…' : '加入牌桌'}</button>
+            <button type="button" className="text-button" disabled={busy} onClick={() => void refreshRoom()}>刷新房间</button>
+          </form>
         </>}
       </>}
     </section>

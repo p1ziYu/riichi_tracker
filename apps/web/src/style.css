@@ -22,7 +22,7 @@ h1,h2{letter-spacing:.015em}
   .table-heading{gap:8px;margin-bottom:12px}
   .table-heading h1{font-size:1.7rem;margin-bottom:4px}
   .table-heading .eyebrow,.table-heading .muted{margin-bottom:4px}
-  .table-checkin:not(.table-checkin-owner){display:none}
+  .table-checkin:not(.table-checkin-preparing):not(.table-checkin-owner){display:none}
   .table-checkin{padding:14px;margin-bottom:12px}
   .table-checkin .member-list{display:none}
   .table-controls button{flex:1 1 130px}
@@ -192,9 +192,9 @@ h1,h2{letter-spacing:.015em}
   .local-setup .member-list .wind-badge{grid-row:1;grid-column:1;align-self:center}
   .local-setup .member-list label:not(.toggle){grid-row:1;grid-column:2;min-width:0;width:100%}
   .local-setup .member-list .toggle{grid-row:2;grid-column:1/-1;width:100%;min-height:48px;padding:10px 14px;margin:0;white-space:nowrap;font-size:13.5px}
-  .table-page .table-checkin-owner .member-list{display:grid;grid-template-columns:1fr;gap:8px}
-  .table-page .table-checkin-owner .member-list>div{flex-wrap:wrap;padding:10px;gap:8px}
-  .table-page .table-checkin-owner .member-list button{min-height:44px;white-space:nowrap}
+  .table-page .table-checkin-preparing .member-list{display:grid;grid-template-columns:1fr;gap:8px}
+  .table-page .table-checkin-preparing .member-list>div{flex-wrap:wrap;padding:10px;gap:8px}
+  .table-page .table-checkin .member-list button{min-height:44px;white-space:nowrap}
   .table-controls{gap:8px;align-items:center}
   .table-controls button{flex:1 1 130px;min-height:44px;white-space:nowrap}
   .table-controls span{white-space:nowrap}
@@ -286,14 +286,6 @@ h1,h2{letter-spacing:.015em}
 }
 
 .check-in-page .panel{padding:clamp(18px,4vw,30px)}
-.check-in-seats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;border:0;padding:0;margin:18px 0}
-.check-in-seats legend{color:#e4d3a9;font-weight:700;margin-bottom:10px}
-.check-in-seat{display:flex;align-items:center;gap:10px;min-width:0;min-height:76px;padding:12px;border:1px solid #ffffff40;border-radius:12px;background:#162d39;cursor:pointer}
-.check-in-seat:has(input:checked){border-color:#e4c88b;background:#254351;box-shadow:0 0 0 1px #e4c88b}
-.check-in-seat.occupied{opacity:.65;cursor:not-allowed}
-.check-in-seat input[type=radio]{flex:none;width:18px;height:18px;margin:0;padding:0;min-height:0;accent-color:#c4a66a}
-.check-in-seat span{display:flex;flex-direction:column;gap:3px;min-width:0}
-.check-in-seat small{color:#b7c8cb;overflow-wrap:anywhere;line-height:1.4}
 .check-in-alias{display:block;margin:18px 0}
 .check-in-alias input{width:100%;margin-top:8px}
 .check-in-page form>button{min-height:44px;margin-right:10px;margin-bottom:8px}
@@ -301,7 +293,6 @@ h1,h2{letter-spacing:.015em}
 .seat-reassign select{flex:1 1 150px;min-width:0;min-height:44px}
 .seat-reassign button{flex:none;white-space:nowrap}
 @media(max-width:600px){
-  .check-in-seats{grid-template-columns:1fr}
   .seat-reassign{flex:1 1 100%;width:100%}
-  .table-page .table-checkin-owner .member-list .seat-reassign button{white-space:normal}
+  .table-page .table-checkin .member-list .seat-reassign button{white-space:normal}
 }

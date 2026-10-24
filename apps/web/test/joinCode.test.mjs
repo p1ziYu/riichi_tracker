@@ -38,10 +38,12 @@ test('lookup uses the public GET route and preserves the returned check-in token
   assert.equal(checkInRoute({ ...match, matchId: 'match/2' }), '/checkin/match%2F2?token=a%2B%2F%3Db');
 });
 
-test('lookup maps status errors to actionable Chinese inline messages', () => {
-  assert.equal(joinCodeError(new ApiError(404, 'not found')), '房间码无效，或对局已结束');
-  assert.equal(joinCodeError(new ApiError(409, 'conflict')), '对局已开始，无法加入');
-  assert.equal(joinCodeError(new ApiError(429, 'limited')), '尝试过于频繁，请稍后再试');
-  assert.equal(joinCodeError(new ApiError(500, '服务器繁忙')), '服务器繁忙');
-  assert.equal(joinCodeError(new Error('网络连接失败')), '网络连接失败');
+test('lookup maps codes first and uses generic copy for missing or unknown codes', () => {
+  assert.equal(joinCodeError(new ApiError(404, 'private', 'join_code_not_found')), '房间码不正确，或牌桌已结束。');
+  assert.equal(joinCodeError(new ApiError(429, 'private', 'rate_limited')), '尝试过于频繁，请稍后再试。');
+  assert.equal(joinCodeError(new ApiError(409, 'private', 'match_already_started')), '牌局已开始，无法加入。');
+  assert.equal(joinCodeError(new ApiError(404, 'private', 'rate_limited')), '尝试过于频繁，请稍后再试。');
+  assert.equal(joinCodeError(new ApiError(404, 'private')), '操作失败，请稍后重试');
+  assert.equal(joinCodeError(new ApiError(404, 'private server detail', 'unknown_code')), '操作失败，请稍后重试');
+  assert.equal(joinCodeError(new Error('private network detail')), '操作失败，请稍后重试');
 });
