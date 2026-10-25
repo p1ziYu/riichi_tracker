@@ -151,7 +151,7 @@ private fun MatchRow(match: MatchSummary, templates: List<TemplateDto>, onOpen: 
     Card(onClick = { onOpen(match.id) }, modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = Brand.panel),
         border = BorderStroke(1.dp, Brand.hairline)) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             EastTile(Modifier.size(34.dp, 40.dp))
             Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Text(title, color = Brand.goldText, style = MaterialTheme.typography.titleMedium)
@@ -254,7 +254,7 @@ fun MatchListScreen(
                     }
                     if (loading && matches == null) item { CircularProgressIndicator() }
                     if (error != null) item { Text("加载失败：$error", color = MaterialTheme.colorScheme.error); TextButton(onClick = onRefresh) { Text("重试") } }
-                    if (!loading && matches != null && live.isEmpty()) item { Caption("暂无正在进行的牌桌，下拉刷新试试") }
+                    if (!loading && matches != null && live.isEmpty()) item { BrandPanel(Modifier.fillMaxWidth()) { Text("暂无正在进行的牌桌，下拉刷新试试", color = Brand.muted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(16.dp)) } }
                     items(live, key = { "live:${it.id}" }) { DeletableRow(it) }
                     item {
                         BrandPanel(Modifier.fillMaxWidth().clickable(onClick = onHistory)) {
@@ -272,7 +272,7 @@ fun MatchListScreen(
                     item { Caption("自己的对局记录 · 下拉刷新") }
                     if (loading && matches == null) item { CircularProgressIndicator() }
                     if (error != null) item { Text("加载失败：$error", color = MaterialTheme.colorScheme.error); TextButton(onClick = onRefresh) { Text("重试") } }
-                    if (!loading && matches != null && history.isEmpty()) item { Caption("暂无对局记录。") }
+                    if (!loading && matches != null && history.isEmpty()) item { BrandPanel(Modifier.fillMaxWidth()) { Text("暂无对局记录。", color = Brand.muted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(16.dp)) } }
                     items(history, key = { it.id }) { DeletableRow(it) }
                 }
             }

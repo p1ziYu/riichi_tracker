@@ -865,4 +865,147 @@ final class ScreenshotTourTests: XCTestCase {
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "四麻家规")).firstMatch.exists,
                       "Cancelling must leave the local table in place")
     }
+    // iosfix9: alignment pack + frame proof. What XCUITest frames can
+    // honestly prove (learned from the baseline run, 2026-10-25):
+    // - List ROW BUTTON and SECTION HEADER elements report full-width
+    //   container frames (0..402), NOT their visual card/text edges.
+    //   Card edges and header ink columns are therefore proven by
+    //   screenshot pixels (see the fix9 report), never by these frames.
+    // - Text GLYPH frames ARE meaningful: row titles, local titles.
+    // So this test asserts the glyph columns (online title 76pt =
+    // 16 card + 16 inner + 30 tile + 14 spacing; local title 32pt =
+    // 16 card + 16 inner), the 88pt delete block geometry, and the
+    // screenshots themselves. Nothing is deleted: swipes are left
+    // revealed (switching tabs does not need a collapse) and any
+    // confirm dialog is cancelled, so all fixtures survive.
+    func testFix9AlignmentPack() throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(environment["UITEST_DISPOSABLE"] == "1", "Requires disposable API (UITEST_DISPOSABLE=1)")
+        let email = environment["UITEST_EMAIL"] ?? ""
+        let password = environment["UITEST_PASSWORD"] ?? ""
+        try XCTSkipUnless(!email.isEmpty && !password.isEmpty, "Set UITEST_EMAIL and UITEST_PASSWORD for disposable online test")
+        let app = launch(["-UITestSeed"])
+        installPromptMonitor()
+        showSignedOutAuth(in: app)
+        let emailField = app.textFields["邮箱"]
+        let passwordField = app.secureTextFields["密码"]
+        tap(emailField)
+        emailField.typeText(email)
+        tap(passwordField)
+        passwordField.typeText(password)
+        tap(app.buttons["登录"])
+        XCTAssertTrue(app.buttons["开桌 ↗"].waitForExistence(timeout: timeout), "Disposable account did not enter the signed-in lobby")
+        dismissPasswordPromptIfPresent(in: app)
+        let rows = app.buttons.matching(NSPredicate(format: "identifier == %@", "online.match.active"))
+        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: timeout), "Lobby matches did not load")
+        XCTAssertEqual(rows.count, 2, "Disposable backend must seed two preparing matches")
+        // Unswiped lobby: hero + ongoing rows together.
+        capture("fix9-lobby", in: app)
+        let row = rows.firstMatch
+        scrollTo(row, in: app)
+        Thread.sleep(forTimeInterval: 1)
+        let rowFrame = row.frame
+        let lobbyTitle = app.staticTexts.matching(NSPredicate(format: "label == %@", "四麻家规")).firstMatch
+        XCTAssertTrue(lobbyTitle.waitForExistence(timeout: timeout))
+        XCTAssertEqual(lobbyTitle.frame.minX, 76.0, accuracy: 1.5, "Ongoing row title must sit at card edge + inner padding + tile + spacing")
+        XCTAssertTrue(app.staticTexts["正在进行的牌桌"].waitForExistence(timeout: timeout))
+        // The lobby's empty 战绩 bar sits below the rows: scroll to it.
+        let emptyBar = app.staticTexts["暂无对局记录，下拉刷新试试"]
+        scrollTo(emptyBar, in: app)
+        Thread.sleep(forTimeInterval: 1)
+        capture("fix9-lobby-empty", in: app)
+        XCTAssertTrue(app.staticTexts["战绩 · 最近对局"].exists)
+        // Mid-swipe lobby row (revealed state): drag, capture, leave revealed.
+        scrollTo(row, in: app)
+        Thread.sleep(forTimeInterval: 1)
+        let rowFrame2 = row.frame
+        let dragRow = {
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+                .withOffset(CGVector(dx: rowFrame2.maxX - 10, dy: rowFrame2.midY))
+            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+                .withOffset(CGVector(dx: rowFrame2.minX + 10, dy: rowFrame2.midY))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
+        dragRow()
+        Thread.sleep(forTimeInterval: 1)
+        if !app.buttons["删除"].firstMatch.isHittable {
+            dragRow()
+            Thread.sleep(forTimeInterval: 1)
+        }
+        let deleteButton = app.buttons["删除"].firstMatch
+        XCTAssertTrue(deleteButton.isHittable, "Swipe-left must reveal a hittable 删除 on an online row")
+        capture("fix9-lobby-swipe", in: app)
+        XCTAssertEqual(deleteButton.frame.width, 88.0, accuracy: 4.0, "删除 block must be the 88pt trailing block")
+        XCTAssertEqual(deleteButton.frame.height, rowFrame2.height, accuracy: 2.0, "删除 block height must equal the row height")
+        XCTAssertEqual(deleteButton.frame.maxX, app.frame.width - 16.0, accuracy: 2.0, "删除 block must end at the row's trailing edge")
+        // History tab, unswiped + mid-swipe.
+        for _ in 0..<3 {
+            tab("战绩", in: app)
+            if app.staticTexts["战绩 · 对局记录"].waitForExistence(timeout: 5) { break }
+        }
+        XCTAssertTrue(app.staticTexts["战绩 · 对局记录"].exists, "History tab must show its 对局记录 section")
+        capture("fix9-history", in: app)
+        let historyRow = rows.firstMatch
+        XCTAssertTrue(historyRow.waitForExistence(timeout: timeout))
+        scrollTo(historyRow, in: app)
+        Thread.sleep(forTimeInterval: 1)
+        let historyRowFrame = historyRow.frame
+        let dragHistory = {
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+                .withOffset(CGVector(dx: historyRowFrame.maxX - 10, dy: historyRowFrame.midY))
+            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+                .withOffset(CGVector(dx: historyRowFrame.minX + 10, dy: historyRowFrame.midY))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
+        dragHistory()
+        Thread.sleep(forTimeInterval: 1)
+        if !app.buttons["删除"].firstMatch.isHittable {
+            dragHistory()
+            Thread.sleep(forTimeInterval: 1)
+        }
+        XCTAssertTrue(app.buttons["删除"].firstMatch.isHittable, "Swipe-left must reveal a hittable 删除 on a history row")
+        capture("fix9-history-swipe", in: app)
+        // Local tab: create one table, then intro card + row unswiped and mid-swipe.
+        if app.tabBars.buttons["本地"].waitForExistence(timeout: 3) {
+            tab("本地", in: app)
+        } else {
+            tab("本地牌桌", in: app)
+        }
+        XCTAssertTrue(app.buttons["离线开桌"].waitForExistence(timeout: timeout))
+        tap(app.buttons["离线开桌"])
+        XCTAssertTrue(app.buttons["local.template.house_4p"].waitForExistence(timeout: timeout))
+        tap(app.buttons["local.template.house_4p"])
+        tap(app.buttons["local.wizard.nextRules"])
+        XCTAssertTrue(app.staticTexts["起点与成绩"].waitForExistence(timeout: timeout))
+        scrollToAndTap(app.buttons["local.wizard.nextNames"], in: app)
+        XCTAssertTrue(app.textFields["牌桌名称"].waitForExistence(timeout: timeout))
+        tap(app.buttons["local.wizard.create"])
+        XCTAssertTrue(app.staticTexts["座位与点数"].waitForExistence(timeout: 30))
+        returnToLocalLobby(in: app)
+        let localIntro = app.staticTexts["本机独立牌桌 · 无账户、签到或云端同步"]
+        XCTAssertTrue(localIntro.waitForExistence(timeout: timeout))
+        capture("fix9-local", in: app)
+        let localRow = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "四麻家规")).firstMatch
+        XCTAssertTrue(localRow.waitForExistence(timeout: timeout))
+        XCTAssertEqual(localRow.frame.minX, 32.0, accuracy: 1.5, "Local row title must sit at card edge + shared inner padding")
+        XCTAssertTrue(app.staticTexts["进行中"].exists)
+        let localFrame = localRow.frame
+        let dragLocal = {
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+                .withOffset(CGVector(dx: app.frame.width - 30, dy: localFrame.midY))
+            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+                .withOffset(CGVector(dx: 30, dy: localFrame.midY))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
+        dragLocal()
+        Thread.sleep(forTimeInterval: 1)
+        capture("fix9-local-swipe", in: app)
+        XCTAssertTrue(app.buttons["删除"].firstMatch.isHittable || app.buttons["继续确认"].exists, "Swipe-left must reveal a hittable 删除 on a local row")
+        if app.buttons["继续确认"].exists {
+            tap(app.buttons["保留牌桌"])
+        }
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "四麻家规")).firstMatch.exists,
+                      "Cancelling must leave the local table in place")
+    }
+
 }

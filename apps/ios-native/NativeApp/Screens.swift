@@ -35,6 +35,13 @@ enum Brand {
     // and section headers are shifted to 16pt in BrandSectionHeader.
     // Every card and header in the app aligns to this edge.
     static let contentLeading: CGFloat = 16
+    // iosfix9: the single INNER padding for card content. A bar's text,
+    // a row's tile/text and the hero's content all start at
+    // contentLeading + cardInnerPadding (16 + 16 = 32pt) on every
+    // screen, so no bar text is ever flush against its card edge
+    // (the fix8 empty-state bar was 0pt, the local strips ~4pt).
+    // Boxes themselves stay on contentLeading exactly.
+    static let cardInnerPadding: CGFloat = 16
     // iosfix8 item 1: the row-inset token, REVERTING fix7. fix7 set
     // this to 0 horizontal on the theory that the insetGrouped
     // section supplies 16pt; on the screens Ryan actually uses
@@ -97,6 +104,16 @@ private struct BrandPanel: ViewModifier {
 }
 
 struct BrandSectionHeader: View {
+    // iosfix9: a plain List lays a section header's TEXT at 16pt
+    // (the List's header inset, measured by gold ink on all three
+    // tabs -- the header view itself spans full width, so its
+    // accessibility frame is not the text column). The plain shift
+    // is therefore derived from the token, not a magic 0: if
+    // contentLeading ever moves, headers move with the cards.
+    // Form screens keep the old default (-contentLeading), because a
+    // Form header's base is 32pt (16 section + 16 header inset).
+    static let plainHeaderBase: CGFloat = 16
+    static let plainLeadingShift: CGFloat = Brand.contentLeading - plainHeaderBase
     let title: String
     let leadingShift: CGFloat
 
@@ -140,6 +157,12 @@ struct BrandCard: ViewModifier {
     func body(content: Content) -> some View {
         content
             .background(Brand.panel, in: RoundedRectangle(cornerRadius: cornerRadius))
+            // iosfix9: clip the CONTENT to the same rounded shape.
+            // The panel's top corners curve inward (radius 12/10) while
+            // a square-ish tile does not, so an unclipped tile pokes
+            // ~1pt past the corner on every list. Clipping here fixes
+            // all three lists at once, with no per-row geometry.
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
     }
@@ -574,6 +597,7 @@ struct AuthScreen: View {
                 }
             }
             .padding(.vertical, 5)
+            .padding(.horizontal, Brand.cardInnerPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .brandCard()
@@ -624,14 +648,20 @@ struct AuthScreen: View {
                         Text(session.canHost ? "选择模板、调整规则、预览支付后创建；加入牌桌可用房间码或扫码" : "访客不能开桌，可用「加入牌桌」扫码或输房间码加入")
                             .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                     }
-                    .padding(20)
+                    .padding(Brand.cardInnerPadding)
                     .background(LinearGradient(stops: [
                         .init(color: Brand.panel, location: 0),
                         .init(color: Color(red: 27 / 255, green: 56 / 255, blue: 68 / 255), location: 0.58),
                         .init(color: Color(red: 38 / 255, green: 78 / 255, blue: 66 / 255), location: 1)
                     ], startPoint: .topLeading, endPoint: .bottomTrailing),
                     in: RoundedRectangle(cornerRadius: 18))
-                    .overlay(RoundedRectangle(cornerRadius: 18).stroke(Brand.gold.opacity(0.7), lineWidth: 1))
+                    // iosfix9: strokeBorder keeps the 1pt gold stroke
+                    // INSIDE the box (a centered stroke extends 0.5pt
+                    // past it, which is how the hero measured 1pt wider
+                    // per side than the rows on a real phone). Clip so
+                    // the rotated 66pt tile cannot poke past a corner.
+                    .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Brand.gold.opacity(0.7), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 18))
                     // iosfix8 item 1: hero shares the horizontal token
                     // with the rows (Brand.heroRowInsets).
                     .listRowInsets(Brand.heroRowInsets)
@@ -640,26 +670,26 @@ struct AuthScreen: View {
                 }
             }
             if loading && matches == nil {
-                ProgressView("读取对局中…").frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
+                ProgressView("读取对局中…").padding(Brand.cardInnerPadding).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
             }
             if let error {
                 Section {
-                    Text("加载失败：\(error)").foregroundStyle(Brand.loss).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
-                    Button("重试") { Task { await refresh() } }.frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
+                    Text("加载失败：\(error)").foregroundStyle(Brand.loss).padding(Brand.cardInnerPadding).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
+                    Button("重试") { Task { await refresh() } }.padding(Brand.cardInnerPadding).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
                 }
             }
             if lobby {
                 Section {
-                    if matches != nil && liveMatches.isEmpty { Text("暂无进行中的牌桌").foregroundStyle(Brand.muted).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets) }
+                    if matches != nil && liveMatches.isEmpty { Text("暂无进行中的牌桌").foregroundStyle(Brand.muted).padding(Brand.cardInnerPadding).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets) }
                     ForEach(liveMatches, id: \.id) { match in row(match) }
-                } header: { BrandSectionHeader("正在进行的牌桌", leadingShift: 0) }
+                } header: { BrandSectionHeader("正在进行的牌桌", leadingShift: BrandSectionHeader.plainLeadingShift) }
             }
             Section {
                 if matches != nil && recentMatches.isEmpty {
-                    Text("暂无对局记录，下拉刷新试试").foregroundStyle(Brand.muted).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
+                    Text("暂无对局记录，下拉刷新试试").foregroundStyle(Brand.muted).padding(Brand.cardInnerPadding).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
                 }
                 ForEach(recentMatches, id: \.id) { match in row(match) }
-            } header: { BrandSectionHeader(lobby ? "战绩 · 最近对局" : "战绩 · 对局记录", leadingShift: 0) }
+            } header: { BrandSectionHeader(lobby ? "战绩 · 最近对局" : "战绩 · 对局记录", leadingShift: BrandSectionHeader.plainLeadingShift) }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)

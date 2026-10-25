@@ -54,7 +54,7 @@ import androidx.compose.ui.unit.dp
         }
         if (state.loading) CircularProgressIndicator()
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error); TextButton(onClick = model::reload) { Text("重试读取（不清除数据）") } }
-        if (!state.loading && state.error == null && matches.isEmpty()) Text("暂无本地牌局", color = Brand.muted)
+        if (!state.loading && state.error == null && matches.isEmpty()) BrandPanel(Modifier.fillMaxWidth()) { Text("暂无本地牌局", color = Brand.muted, modifier = Modifier.padding(16.dp)) }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             items(matches, key = { it.id }) { match ->
                 // iosfix8 item 2: stock SwipeToDismissBox, REVERTING
@@ -81,7 +81,7 @@ import androidx.compose.ui.unit.dp
                     },
                     enableDismissFromStartToEnd = false) {
                     BrandPanel(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(match.name, color = Brand.goldText, style = MaterialTheme.typography.titleLarge)
                             Text("${match.templateName} · ${reviewLabel(match.reviewStatus)} · ${match.seats.size} 麻", color = Brand.text)
                             val changes = remember(match.rules, match.seedKey) { match.customizedRules() }

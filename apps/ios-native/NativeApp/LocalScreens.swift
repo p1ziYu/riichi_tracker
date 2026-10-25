@@ -18,18 +18,31 @@ private extension View {
 
     var body: some View {
         List {
-            if let failure = store.failure { Section { Text(failure).foregroundStyle(Brand.loss).frame(maxWidth: .infinity, alignment: .leading).brandCard(cornerRadius: 10).listRowInsets(Brand.rowInsets) } }
-            if let issue { Section { Text(issue).foregroundStyle(Brand.loss).frame(maxWidth: .infinity, alignment: .leading).brandCard(cornerRadius: 10).listRowInsets(Brand.rowInsets) } }
+            if let failure = store.failure { Section { Text(failure).foregroundStyle(Brand.loss).padding(Brand.cardInnerPadding).frame(maxWidth: .infinity, alignment: .leading).brandCard(cornerRadius: 10).listRowInsets(Brand.rowInsets) } }
+            if let issue { Section { Text(issue).foregroundStyle(Brand.loss).padding(Brand.cardInnerPadding).frame(maxWidth: .infinity, alignment: .leading).brandCard(cornerRadius: 10).listRowInsets(Brand.rowInsets) } }
+            // iosfix9: ONE inset card with a hairline divider (the
+            // fix7-era treatment), not two thin strips whose text had
+            // ~4pt of left padding and read as full-bleed bands. Text
+            // sits at card edge + shared inner padding (32pt), the
+            // same column as the local row titles below.
             Section {
-                Text("本机独立牌桌 · 无账户、签到或云端同步").foregroundStyle(Brand.muted).frame(maxWidth: .infinity, alignment: .leading).brandCard(cornerRadius: 10).listRowInsets(Brand.rowInsets)
-                Button("离线开桌") { creating = true }.disabled(store.failure != nil).frame(maxWidth: .infinity, alignment: .leading).brandCard(cornerRadius: 10).listRowInsets(Brand.rowInsets)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("本机独立牌桌 · 无账户、签到或云端同步").foregroundStyle(Brand.muted)
+                    Rectangle().fill(Brand.hairline).frame(height: 1)
+                    Button("离线开桌") { creating = true }.disabled(store.failure != nil)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(Brand.cardInnerPadding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .brandCard(cornerRadius: 10)
+                .listRowInsets(Brand.rowInsets)
             }
             Section {
                 ForEach(store.matches.filter { $0.status == "active" }) { match in row(match) }
-            } header: { BrandSectionHeader("进行中", leadingShift: 0) }
+            } header: { BrandSectionHeader("进行中", leadingShift: BrandSectionHeader.plainLeadingShift) }
             Section {
                 ForEach(store.matches.filter { $0.status == "finished" }) { match in row(match) }
-            } header: { BrandSectionHeader("已结束 · 逐局明细", leadingShift: 0) }
+            } header: { BrandSectionHeader("已结束 · 逐局明细", leadingShift: BrandSectionHeader.plainLeadingShift) }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden).background(Brand.background).tint(Brand.gold).foregroundStyle(Brand.text)
@@ -72,6 +85,7 @@ private extension View {
             }
                 .buttonStyle(.borderless).accessibilityLabel("删除整桌 \(match.name)")
         }
+        .padding(.horizontal, Brand.cardInnerPadding)
         .frame(maxWidth: .infinity)
         .brandCard(cornerRadius: 10)
         .padding(.vertical, 4)
