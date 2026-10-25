@@ -35,9 +35,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -211,26 +208,12 @@ fun MatchListScreen(
     val finished = finishedOwnMatches(matches.orEmpty())
     val live = matches.orEmpty().filterNot { isFinishedMatch(it.status) }.sortedByDescending { it.createdAt }
     var pendingDelete by remember { mutableStateOf<MatchSummary?>(null) }
-    // One wrapper per row: swiping left reveals 删除; the swipe itself
-    // never deletes — confirmValueChange snaps the row back and opens the
-    // confirm dialog, so a stray swipe cannot destroy anything.
+    // iosfix7 item 2: full-row 删除 button (see SwipeDeleteRow.kt).
+    // The swipe itself never deletes — it only reveals the button,
+    // whose tap opens the existing Chinese confirm dialog.
     @Composable
     fun DeletableRow(match: MatchSummary) {
-        val dismissState = rememberSwipeToDismissBoxState(
-            confirmValueChange = { value ->
-                if (value == SwipeToDismissBoxValue.EndToStart) {
-                    pendingDelete = match
-                    false
-                } else true
-            })
-        SwipeToDismissBox(state = dismissState,
-            backgroundContent = {
-                Box(Modifier.fillMaxSize().background(Brand.loss.copy(alpha = 0.25f)).padding(horizontal = 16.dp),
-                    contentAlignment = Alignment.CenterEnd) {
-                    Text("删除", color = Brand.loss, style = MaterialTheme.typography.titleMedium)
-                }
-            },
-            enableDismissFromStartToEnd = false) {
+        FullWidthSwipeDeleteRow(onDeleteTap = { pendingDelete = match }) {
             MatchRow(match, templates, onOpen)
         }
     }

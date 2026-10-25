@@ -3,6 +3,7 @@ package com.p1ziyu.riichitracker.p1
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -56,23 +57,14 @@ import androidx.compose.ui.unit.dp
         if (!state.loading && state.error == null && matches.isEmpty()) Text("暂无本地牌局", color = Brand.muted)
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             items(matches, key = { it.id }) { match ->
-                // iosfix6 item 5: swipe left reveals 删除; the swipe only
-                // opens the existing two-step confirm dialog, never deletes.
-                val dismissState = rememberSwipeToDismissBoxState(
-                    confirmValueChange = { value ->
-                        if (value == SwipeToDismissBoxValue.EndToStart) {
-                            deleting = match.id; confirmDelete = false
-                            false
-                        } else true
-                    })
-                SwipeToDismissBox(state = dismissState,
-                    backgroundContent = {
-                        Box(Modifier.fillMaxSize().background(Brand.loss.copy(alpha = 0.25f)).padding(horizontal = 16.dp),
-                            contentAlignment = Alignment.CenterEnd) {
-                            Text("删除", color = Brand.loss, style = MaterialTheme.typography.titleMedium)
-                        }
-                    },
-                    enableDismissFromStartToEnd = false) {
+                // iosfix7 item 2: full-row 删除 button (see SwipeDeleteRow.kt).
+                // The swipe only opens the existing two-step confirm
+                // dialog, never deletes. BrandPanel is 10dp, so the
+                // revealed button uses the same shape.
+                FullWidthSwipeDeleteRow(
+                    onDeleteTap = { deleting = match.id; confirmDelete = false },
+                    shape = RoundedCornerShape(10.dp),
+                ) {
                     BrandPanel(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(match.name, color = Brand.goldText, style = MaterialTheme.typography.titleLarge)

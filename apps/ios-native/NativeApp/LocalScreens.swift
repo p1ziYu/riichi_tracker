@@ -18,11 +18,11 @@ private extension View {
 
     var body: some View {
         List {
-            if let failure = store.failure { Section { Text(failure).foregroundStyle(Brand.loss).brandPanel() } }
-            if let issue { Section { Text(issue).foregroundStyle(Brand.loss).brandPanel() } }
+            if let failure = store.failure { Section { Text(failure).foregroundStyle(Brand.loss).brandPanel().listRowInsets(Brand.rowInsets) } }
+            if let issue { Section { Text(issue).foregroundStyle(Brand.loss).brandPanel().listRowInsets(Brand.rowInsets) } }
             Section {
-                Text("本机独立牌桌 · 无账户、签到或云端同步").foregroundStyle(Brand.muted).brandPanel()
-                Button("离线开桌") { creating = true }.disabled(store.failure != nil).brandPanel()
+                Text("本机独立牌桌 · 无账户、签到或云端同步").foregroundStyle(Brand.muted).brandPanel().listRowInsets(Brand.rowInsets)
+                Button("离线开桌") { creating = true }.disabled(store.failure != nil).brandPanel().listRowInsets(Brand.rowInsets)
             }
             Section {
                 ForEach(store.matches.filter { $0.status == "active" }) { match in row(match) }
@@ -53,7 +53,8 @@ private extension View {
         } message: { Text("无法恢复这张本机牌桌的全部记录。") }
     }
     private func row(_ match: LocalMatch) -> some View {
-        HStack {
+        FullWidthSwipeDeleteRow(deleteIdentifier: "local.match.delete.\(match.id)") { deleteFirst = match.id } content: {
+            HStack {
             NavigationLink(value: match.id) {
                 VStack(alignment: .leading) {
                     Text(match.name).font(Brand.font(.headline))
@@ -68,11 +69,10 @@ private extension View {
                 Image(systemName: "trash").foregroundStyle(Brand.loss)
             }
                 .buttonStyle(.borderless).accessibilityLabel("删除整桌 \(match.name)")
-        }.brandPanel()
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button("删除", role: .destructive) { deleteFirst = match.id }
-                .accessibilityIdentifier("local.match.delete.\(match.id)")
         }
+        }
+        .brandPanel()
+        .listRowInsets(Brand.rowInsets)
     }
 }
 

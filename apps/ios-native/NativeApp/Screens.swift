@@ -35,6 +35,20 @@ enum Brand {
     // and section headers are shifted to 16pt in BrandSectionHeader.
     // Every card and header in the app aligns to this edge.
     static let contentLeading: CGFloat = 16
+    // iosfix7 item 1: the row-inset token. Measured on the shipped
+    // List (insetGrouped): the section itself already insets every
+    // row by contentLeading (16pt) from the screen edge, and
+    // listRowInsets STACK on top of that section inset. fix6 set the
+    // hero to 16pt, so it landed at 32pt (screenshot: hero
+    // 31.3-370.3pt) while rows, at the bare section inset, sat at
+    // 16pt (16.0-385.7pt). The per-row token is therefore zero
+    // horizontally: hero and rows both use it and both land exactly
+    // on contentLeading. Vertical 0 keeps section rows contiguous
+    // (hairline dividers, no gaps).
+    static let rowInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0)
+    // Hero only: the same horizontal token, plus its own 8pt vertical
+    // rhythm (a lone row in its section; the gap above/below the card).
+    static let heroRowInsets = EdgeInsets(top: 8, leading: rowInsets.leading, bottom: 8, trailing: rowInsets.trailing)
     static let background = Color(red: 16 / 255, green: 28 / 255, blue: 40 / 255)
     static let panel = Color(red: 28 / 255, green: 41 / 255, blue: 66 / 255)
     static let deep = Color(red: 21 / 255, green: 43 / 255, blue: 59 / 255)
@@ -97,6 +111,83 @@ struct BrandSectionHeader: View {
 
 extension View {
     func brandPanel() -> some View { modifier(BrandPanel()) }
+}
+
+// iosfix7 item 2: stock swipeActions sizes its button to the label, so the
+// shipped 删除 was a narrow gold pill at the trailing edge. This row is
+// gesture-driven instead: a left drag slides the content off and the full
+// row area underneath is one gold 删除 button. The drag never deletes by
+// itself — tapping the revealed button calls onDeleteTap, which opens the
+// existing Chinese confirm dialog. A right drag collapses the row again.
+// The row content is transparent (its panel colour comes from
+// listRowBackground BEHIND this row), so the gold button must stay
+// invisible until revealed — otherwise it shows through every row.
+// Opacity follows the drag offset and hit-testing follows `revealed`.
+struct FullWidthSwipeDeleteRow<Content: View>: View {
+    let deleteIdentifier: String
+    let onDeleteTap: () -> Void
+    @ViewBuilder let content: Content
+    @State private var offset: CGFloat = 0
+    @State private var revealed = false
+    @State private var dragging = false
+    @State private var rowWidth: CGFloat = 0
+
+    private var buttonOpacity: Double {
+        guard rowWidth > 0 else { return revealed ? 1 : 0 }
+        return min(1, max(0, -offset / (rowWidth * 0.5)))
+    }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            // The expanding frame lives on the LABEL, not just the
+            // Button: a plain-styled Button reports its label's frame
+            // to accessibility (measured 34pt), so the label itself
+            // must fill the row for the button to be full-row in both
+            // paint and hit area.
+            Button(action: onDeleteTap) {
+                Text("删除")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Brand.gold)
+                    .foregroundStyle(Brand.background)
+                    .font(Brand.font(.headline, weight: .semibold))
+            }
+                .accessibilityIdentifier(deleteIdentifier)
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .opacity(buttonOpacity)
+                .allowsHitTesting(revealed)
+            content
+                .offset(x: offset)
+                .onGeometryChange(for: CGFloat.self, of: { $0.size.width }) { rowWidth = $0 }
+                .disabled(revealed)
+        }
+        .clipped()
+        // simultaneousGesture, not gesture: a plain gesture competes
+        // with the List's scroll gesture, and when the List wins the
+        // drag's onEnded never fires, freezing the row mid-slide
+        // (seen 2026-10-24: local row stuck ~14pt left, no reveal).
+        // Simultaneous recognition lets the row drag fire reliably;
+        // vertical scrolls only nudge the offset slightly and snap
+        // back on end, and taps still reach the NavigationLink.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 12, coordinateSpace: .local)
+                .onChanged { value in
+                    dragging = true
+                    let base = revealed ? -rowWidth : 0
+                    offset = min(0, max(-rowWidth, base + value.translation.width))
+                }
+                .onEnded { value in
+                    dragging = false
+                    if revealed {
+                        revealed = !(value.translation.width > 60)
+                    } else {
+                        revealed = value.translation.width < -60
+                    }
+                    offset = revealed ? -rowWidth : 0
+                }
+        )
+        .animation(dragging ? nil : .easeOut(duration: 0.22), value: offset)
+    }
 }
 
 func localDate(_ value: String?) -> String {
@@ -425,7 +516,8 @@ struct AuthScreen: View {
     private var recentMatches: [MatchSummary] { lobby ? ordered.filter { isFinished($0.status) } : ordered }
 
     private func row(_ match: MatchSummary) -> some View {
-        NavigationLink(value: match.id) {
+        FullWidthSwipeDeleteRow(deleteIdentifier: "online.match.delete.\(match.id)") { pendingDelete = match } content: {
+            NavigationLink(value: match.id) {
             HStack(alignment: .top, spacing: 14) {
                 EastTile(size: 30)
                 VStack(alignment: .leading, spacing: 6) {
@@ -441,13 +533,11 @@ struct AuthScreen: View {
             }
             .padding(.vertical, 5)
             .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .accessibilityIdentifier(!isFinished(match.status) ? "online.match.active" : "online.match.finished")
         }
         .brandPanel()
-        .accessibilityIdentifier(!isFinished(match.status) ? "online.match.active" : "online.match.finished")
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button("删除", role: .destructive) { pendingDelete = match }
-                .accessibilityIdentifier("online.match.delete.\(match.id)")
-        }
+        .listRowInsets(Brand.rowInsets)
     }
 
     var body: some View {
@@ -499,32 +589,31 @@ struct AuthScreen: View {
                     ], startPoint: .topLeading, endPoint: .bottomTrailing),
                     in: RoundedRectangle(cornerRadius: 18))
                     .overlay(RoundedRectangle(cornerRadius: 18).stroke(Brand.gold.opacity(0.7), lineWidth: 1))
-                    // iosfix6 item 2: this hero row forced leading/trailing
-                    // insets of 0, so its card bled full-width (0pt) while
-                    // the large title and every other card sit at 16pt.
-                    .listRowInsets(EdgeInsets(top: 8, leading: Brand.contentLeading, bottom: 8, trailing: Brand.contentLeading))
+                    // iosfix7 item 1: hero shares the horizontal token
+                    // with the rows (Brand.heroRowInsets).
+                    .listRowInsets(Brand.heroRowInsets)
                     .listRowBackground(Brand.background)
                 }
             }
             if loading && matches == nil {
-                ProgressView("读取对局中…").brandPanel()
+                ProgressView("读取对局中…").brandPanel().listRowInsets(Brand.rowInsets)
             }
             if let error {
                 Section {
-                    Text("加载失败：\(error)").foregroundStyle(Brand.loss)
-                    Button("重试") { Task { await refresh() } }
+                    Text("加载失败：\(error)").foregroundStyle(Brand.loss).listRowInsets(Brand.rowInsets)
+                    Button("重试") { Task { await refresh() } }.listRowInsets(Brand.rowInsets)
                 }
                 .brandPanel()
             }
             if lobby {
                 Section {
-                    if matches != nil && liveMatches.isEmpty { Text("暂无进行中的牌桌").foregroundStyle(Brand.muted).brandPanel() }
+                    if matches != nil && liveMatches.isEmpty { Text("暂无进行中的牌桌").foregroundStyle(Brand.muted).brandPanel().listRowInsets(Brand.rowInsets) }
                     ForEach(liveMatches, id: \.id) { match in row(match) }
                 } header: { BrandSectionHeader("正在进行的牌桌") }
             }
             Section {
                 if matches != nil && recentMatches.isEmpty {
-                    Text("暂无对局记录，下拉刷新试试").foregroundStyle(Brand.muted).brandPanel()
+                    Text("暂无对局记录，下拉刷新试试").foregroundStyle(Brand.muted).brandPanel().listRowInsets(Brand.rowInsets)
                 }
                 ForEach(recentMatches, id: \.id) { match in row(match) }
             } header: { BrandSectionHeader(lobby ? "战绩 · 最近对局" : "战绩 · 对局记录") }
