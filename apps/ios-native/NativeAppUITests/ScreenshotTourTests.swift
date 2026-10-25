@@ -225,11 +225,26 @@ final class ScreenshotTourTests: XCTestCase {
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "四麻家规")).firstMatch.waitForExistence(timeout: timeout))
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "三麻家规")).firstMatch.waitForExistence(timeout: timeout))
         let fourRow = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "四麻家规")).firstMatch
-        fourRow.swipeLeft()
+        let fourFrame = fourRow.frame
+        let dragFourRow = {
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+                .withOffset(CGVector(dx: app.frame.width - 30, dy: fourFrame.midY))
+            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+                .withOffset(CGVector(dx: 30, dy: fourFrame.midY))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
+        dragFourRow()
+        Thread.sleep(forTimeInterval: 1)
         let deleteButton = app.buttons["删除"].firstMatch
-        XCTAssertTrue(deleteButton.waitForExistence(timeout: timeout), "Swipe-left must reveal 删除")
+        if !deleteButton.isHittable && !app.buttons["继续确认"].exists {
+            dragFourRow()
+            Thread.sleep(forTimeInterval: 1)
+        }
+        XCTAssertTrue(deleteButton.isHittable || app.buttons["继续确认"].exists, "Swipe-left must reveal 删除")
         capture("fix6-local-swipe", in: app)
-        deleteButton.tap()
+        if !app.buttons["继续确认"].exists {
+            deleteButton.tap()
+        }
         XCTAssertTrue(app.buttons["继续确认"].waitForExistence(timeout: timeout))
         capture("fix6-local-delete-dialog", in: app)
         tap(app.buttons["继续确认"])
@@ -669,12 +684,18 @@ final class ScreenshotTourTests: XCTestCase {
                 .withOffset(CGVector(dx: rowFrame.minX + 10, dy: rowFrame.midY))
             start.press(forDuration: 0.1, thenDragTo: end)
         }
+        dismissPasswordPromptIfPresent(in: app)
         dragOnlineRow()
         Thread.sleep(forTimeInterval: 1)
-        if rows.firstMatch.frame.minX > rowFrame.minX - 50 {
+        // Full reveal means the link slid off-screen. A merely
+        // moved row (interrupted drag) must not be tapped.
+        let fullyRevealed = { rows.firstMatch.frame.minX <= rowFrame.minX - rowFrame.width + 50 }
+        if !fullyRevealed() {
+            dismissPasswordPromptIfPresent(in: app)
             dragOnlineRow()
             Thread.sleep(forTimeInterval: 1)
         }
+        XCTAssertTrue(fullyRevealed(), "Online row must be fully revealed before tapping 删除")
         let deleteButton = app.buttons["删除"].firstMatch
         XCTAssertTrue(deleteButton.waitForExistence(timeout: timeout), "Swipe-left must reveal 删除 on an online row")
         // The Save Password prompt appears with a delay after

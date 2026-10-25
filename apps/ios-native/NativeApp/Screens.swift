@@ -159,9 +159,29 @@ struct FullWidthSwipeDeleteRow<Content: View>: View {
             content
                 .offset(x: offset)
                 .onGeometryChange(for: CGFloat.self, of: { $0.size.width }) { rowWidth = $0 }
-                .disabled(revealed)
+                // Disabled whenever slid, not only when revealed:
+                // an interrupted drag (system alert) freezes the row
+                // mid-slide with revealed=false, and a live link
+                // there would navigate on tap-through.
+                .disabled(revealed || offset != 0)
         }
         .clipped()
+        // Tap-to-collapse recovery for that frozen state: a tap on
+        // a slid row closes it instead of acting. It lives on the
+        // ZStack (never disabled) with a content shape, not on the
+        // content (disabled views receive no gestures). When
+        // collapsed it is a no-op and the row's own tap wins, so
+        // ordinary taps still reach the NavigationLink; when
+        // revealed, taps hit the gold button, not this gesture.
+        .contentShape(Rectangle())
+        .gesture(
+            TapGesture().onEnded {
+                if revealed || offset != 0 {
+                    revealed = false
+                    offset = 0
+                }
+            }
+        )
         // simultaneousGesture, not gesture: a plain gesture competes
         // with the List's scroll gesture, and when the List wins the
         // drag's onEnded never fires, freezing the row mid-slide
