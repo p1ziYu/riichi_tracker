@@ -691,15 +691,6 @@ final class ScreenshotTourTests: XCTestCase {
         dismissPasswordPromptIfPresent(in: app)
         dragOnlineRow()
         Thread.sleep(forTimeInterval: 1)
-        // Hittability is the reveal signal: the button only accepts
-        // hits once revealed. A retry runs only while unrevealed,
-        // so it can never start on a live gold button and fire it.
-        if !deleteButton.isHittable {
-            dismissPasswordPromptIfPresent(in: app)
-            dragOnlineRow()
-            Thread.sleep(forTimeInterval: 1)
-        }
-        XCTAssertTrue(deleteButton.isHittable, "Online row must be fully revealed before tapping 删除")
         // The Save Password prompt appears with a delay after
         // sign-in, so the early dismiss can miss it; it then sits
         // over the lobby and swallows the delete tap (run #4).
@@ -713,6 +704,11 @@ final class ScreenshotTourTests: XCTestCase {
         dismissPasswordPromptIfPresent(in: app)
         deleteButton.tap()
         if !app.alerts["删除牌桌？"].waitForExistence(timeout: 5) {
+            // First drag may have been interrupted mid-slide;
+            // re-drag to recover, then tap again.
+            dismissPasswordPromptIfPresent(in: app)
+            dragOnlineRow()
+            Thread.sleep(forTimeInterval: 1)
             dismissPasswordPromptIfPresent(in: app)
             deleteButton.tap()
         }
