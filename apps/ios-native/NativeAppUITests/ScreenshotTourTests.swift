@@ -684,20 +684,22 @@ final class ScreenshotTourTests: XCTestCase {
                 .withOffset(CGVector(dx: rowFrame.minX + 10, dy: rowFrame.midY))
             start.press(forDuration: 0.1, thenDragTo: end)
         }
+        // The gold button's identifier is online.match.delete.<id>;
+        // the alert's destructive button shares only the label.
+        let deleteButtons = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "online.match.delete."))
+        let deleteButton = deleteButtons.firstMatch
         dismissPasswordPromptIfPresent(in: app)
         dragOnlineRow()
         Thread.sleep(forTimeInterval: 1)
-        // Full reveal means the link slid off-screen. A merely
-        // moved row (interrupted drag) must not be tapped.
-        let fullyRevealed = { rows.firstMatch.frame.minX <= rowFrame.minX - rowFrame.width + 50 }
-        if !fullyRevealed() {
+        // Hittability is the reveal signal: the button only accepts
+        // hits once revealed. A retry runs only while unrevealed,
+        // so it can never start on a live gold button and fire it.
+        if !deleteButton.isHittable {
             dismissPasswordPromptIfPresent(in: app)
             dragOnlineRow()
             Thread.sleep(forTimeInterval: 1)
         }
-        XCTAssertTrue(fullyRevealed(), "Online row must be fully revealed before tapping 删除")
-        let deleteButton = app.buttons["删除"].firstMatch
-        XCTAssertTrue(deleteButton.waitForExistence(timeout: timeout), "Swipe-left must reveal 删除 on an online row")
+        XCTAssertTrue(deleteButton.isHittable, "Online row must be fully revealed before tapping 删除")
         // The Save Password prompt appears with a delay after
         // sign-in, so the early dismiss can miss it; it then sits
         // over the lobby and swallows the delete tap (run #4).
