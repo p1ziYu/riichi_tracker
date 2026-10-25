@@ -16,9 +16,10 @@ final class ScreenshotTourTests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
-        // iosfix7: proof-pack dump. Only when FIX7_SHOT_DIR is set, so
-        // ordinary tour runs are unaffected.
-        if let dir = ProcessInfo.processInfo.environment["FIX7_SHOT_DIR"], !dir.isEmpty {
+        // iosfix7/iosfix8: proof-pack dump. Only when FIX8_SHOT_DIR
+        // (or the legacy FIX7_SHOT_DIR) is set, so ordinary tour runs
+        // are unaffected.
+        if let dir = ProcessInfo.processInfo.environment["FIX8_SHOT_DIR"] ?? ProcessInfo.processInfo.environment["FIX7_SHOT_DIR"], !dir.isEmpty {
             try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
             try? shot.pngRepresentation.write(to: URL(fileURLWithPath: dir).appendingPathComponent("\(name).png"))
         }
@@ -235,10 +236,21 @@ final class ScreenshotTourTests: XCTestCase {
         }
         dragFourRow()
         Thread.sleep(forTimeInterval: 1)
-        let deleteButton = app.buttons["删除"].firstMatch
+        // Custom rows carry one 删除 button per row (unlike stock
+        // swipeActions, which expose only the revealed row's
+        // button), so firstMatch can bind an unrevealed row's
+        // button. Resolve to the hittable one -- the row the drag
+        // revealed -- re-resolving after the retry drag. A genuine
+        // reveal failure still falls back to firstMatch and fails
+        // the unchanged assertion below.
+        func revealedDelete() -> XCUIElement {
+            app.buttons.matching(NSPredicate(format: "label == %@", "删除")).allElementsBoundByIndex.first(where: { $0.isHittable }) ?? app.buttons["删除"].firstMatch
+        }
+        var deleteButton = revealedDelete()
         if !deleteButton.isHittable && !app.buttons["继续确认"].exists {
             dragFourRow()
             Thread.sleep(forTimeInterval: 1)
+            deleteButton = revealedDelete()
         }
         XCTAssertTrue(deleteButton.isHittable || app.buttons["继续确认"].exists, "Swipe-left must reveal 删除")
         capture("fix6-local-swipe", in: app)
@@ -636,15 +648,19 @@ final class ScreenshotTourTests: XCTestCase {
         capture("tour-online-08-profile", in: app)
     }
 
-    // iosfix7 item 1+2 (online lobby, disposable backend only): the lobby
-    // is captured with hero and rows together; the row frame is recorded
-    // BEFORE swiping, then the revealed 删除 button must span exactly
-    // that frame, and tapping it must open the Chinese delete dialog
+
+    // iosfix8 item 1+2 (online lobby, disposable backend only): the
+    // lobby is captured with hero and rows together; swiping a row
+    // left must reveal a SMALL trailing gold 删除 block — width well
+    // under the row width, trailing edge on the row's trailing edge,
+    // and height exactly the row height (flush top/bottom, no
+    // floating pill gaps). Tapping it opens the Chinese delete dialog
     // (cancelled here, so both seeded matches survive later runs).
-    // Hero-vs-row edge equality is measured from the captured screenshot
-    // in pixels: the hero card is deliberately not an accessibility
-    // element, because its inner buttons must stay reachable by UI tests.
-    func testFix7LobbyHeroAndDelete() throws {
+    // Hero-vs-row edge equality is measured from the captured
+    // screenshot in pixels: the hero card is deliberately not an
+    // accessibility element, because its inner buttons must stay
+    // reachable by UI tests.
+    func testFix8LobbyHeroAndDelete() throws {
         let environment = ProcessInfo.processInfo.environment
         try XCTSkipUnless(environment["UITEST_DISPOSABLE"] == "1", "Requires disposable API (UITEST_DISPOSABLE=1)")
         let email = environment["UITEST_EMAIL"] ?? ""
@@ -664,19 +680,15 @@ final class ScreenshotTourTests: XCTestCase {
         dismissPasswordPromptIfPresent(in: app)
         let rows = app.buttons.matching(NSPredicate(format: "identifier == %@", "online.match.active"))
         XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: timeout), "Lobby matches did not load")
-        capture("fix7-lobby-top", in: app)
+        capture("fix8-lobby-top", in: app)
         let row = rows.firstMatch
         scrollTo(row, in: app)
         Thread.sleep(forTimeInterval: 1)
-        capture("fix7-lobby", in: app)
+        capture("fix8-lobby", in: app)
         let rowFrame = row.frame
-        // Full-width coordinate drag, not swipeLeft: swipeLeft
-        // re-resolves the element (fails when the list settles) and
-        // drags only within the element's own width, which is too
-        // short to cross the reveal threshold on narrow elements.
-        // A drag across the recorded row frame is deterministic.
-        // The delete button exists in the tree even while hidden,
-        // so reveal is detected via the row link sliding off-screen.
+        // Coordinate drag, not swipeLeft: the delete row is gesture
+        // driven, and a flick on the link does not reliably cross the
+        // 44pt reveal threshold. Drag across the recorded row frame.
         let dragOnlineRow = {
             let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
                 .withOffset(CGVector(dx: rowFrame.maxX - 10, dy: rowFrame.midY))
@@ -684,46 +696,116 @@ final class ScreenshotTourTests: XCTestCase {
                 .withOffset(CGVector(dx: rowFrame.minX + 10, dy: rowFrame.midY))
             start.press(forDuration: 0.1, thenDragTo: end)
         }
-        // The gold button's identifier is online.match.delete.<id>;
-        // the alert's destructive button shares only the label.
-        let deleteButtons = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "online.match.delete."))
-        let deleteButton = deleteButtons.firstMatch
-        dismissPasswordPromptIfPresent(in: app)
         dragOnlineRow()
         Thread.sleep(forTimeInterval: 1)
-        // The Save Password prompt appears with a delay after
-        // sign-in, so the early dismiss can miss it; it then sits
-        // over the lobby and swallows the delete tap (run #4).
-        // Dismiss again right before the shot and the tap.
-        dismissPasswordPromptIfPresent(in: app)
-        capture("fix7-online-swipe", in: app)
-        let deleteFrame = deleteButton.frame
-        XCTAssertEqual(deleteFrame.width, rowFrame.width, accuracy: 2.0, "删除 button must span the full row width")
-        XCTAssertEqual(deleteFrame.height, rowFrame.height, accuracy: 2.0, "删除 button must span the full row height")
-        XCTAssertEqual(deleteFrame.minX, rowFrame.minX, accuracy: 2.0, "删除 button must share the row's leading edge")
-        dismissPasswordPromptIfPresent(in: app)
-        deleteButton.tap()
-        if !app.alerts["删除牌桌？"].waitForExistence(timeout: 5) {
-            // First drag may have been interrupted mid-slide;
-            // re-drag to recover, then tap again.
-            dismissPasswordPromptIfPresent(in: app)
+        if !app.buttons["删除"].firstMatch.isHittable {
             dragOnlineRow()
             Thread.sleep(forTimeInterval: 1)
-            dismissPasswordPromptIfPresent(in: app)
-            deleteButton.tap()
         }
+        let deleteButton = app.buttons["删除"].firstMatch
+        XCTAssertTrue(deleteButton.isHittable, "Swipe-left must reveal a hittable 删除 on an online row")
+        dismissPasswordPromptIfPresent(in: app)
+        capture("fix8-online-swipe", in: app)
+        let deleteFrame = deleteButton.frame
+        XCTAssertEqual(deleteFrame.height, rowFrame.height, accuracy: 2.0, "删除 block height must equal the row height")
+        XCTAssertEqual(deleteFrame.width, 88.0, accuracy: 4.0, "删除 block must be the small 88pt trailing block, not full-width")
+        XCTAssertGreaterThan(deleteFrame.minX, rowFrame.minX + 100, "删除 block must start inside the row")
+        XCTAssertLessThanOrEqual(deleteFrame.maxX, rowFrame.maxX, "删除 block must end at or inside the row's trailing edge")
+        XCTAssertGreaterThanOrEqual(deleteFrame.maxX, rowFrame.maxX - 20, "删除 block must reach the row's trailing edge")
+        dismissPasswordPromptIfPresent(in: app)
+        deleteButton.tap()
         XCTAssertTrue(app.alerts["删除牌桌？"].waitForExistence(timeout: timeout), "Tapping 删除 must open the Chinese delete dialog")
-        capture("fix7-online-delete-dialog", in: app)
+        capture("fix8-online-delete-dialog", in: app)
         tap(app.alerts["删除牌桌？"].buttons["取消"])
         XCTAssertTrue(rows.firstMatch.exists, "Cancelling must leave the row in place")
     }
 
-    // iosfix7 item 2 (local rows, no backend): swipe reveals the full-row
-    // 删除 button and tapping it opens the existing two-step local
-    // confirm; cancelled, so the table survives. Width is measured from
-    // the captured screenshot (the local row's text element is not the
-    // row frame, and the wrapper is deliberately not an element).
-    func testFix7LocalFullWidthDelete() {
+    // iosfix8 item 2 (history list, disposable backend only): the
+    // 战绩 tab lists the same rows through the same row() code path
+    // as the lobby, so its swipe action must be the same small
+    // trailing full-height gold block — audited here on a real
+    // history-tab row, not inferred from the lobby. Cancelled, so the
+    // seeded match survives.
+    func testFix8HistorySwipe() throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(environment["UITEST_DISPOSABLE"] == "1", "Requires disposable API (UITEST_DISPOSABLE=1)")
+        let email = environment["UITEST_EMAIL"] ?? ""
+        let password = environment["UITEST_PASSWORD"] ?? ""
+        try XCTSkipUnless(!email.isEmpty && !password.isEmpty, "Set UITEST_EMAIL and UITEST_PASSWORD for disposable online test")
+        let app = launch(["-UITestSeed"])
+        installPromptMonitor()
+        showSignedOutAuth(in: app)
+        let emailField = app.textFields["邮箱"]
+        let passwordField = app.secureTextFields["密码"]
+        tap(emailField)
+        emailField.typeText(email)
+        tap(passwordField)
+        passwordField.typeText(password)
+        tap(app.buttons["登录"])
+        XCTAssertTrue(app.buttons["开桌 ↗"].waitForExistence(timeout: timeout), "Disposable account did not enter the signed-in lobby")
+        dismissPasswordPromptIfPresent(in: app)
+        // Prove the tab actually switched: the history tab's header
+        // is "战绩 · 对局记录", the lobby's recent section is
+        // "战绩 · 最近对局". Rows exist on both screens, so without
+        // this the test can pass on lobby rows without ever auditing
+        // the history tab (observed in the 02:23 run). The tap right
+        // after sign-in is sometimes swallowed by the transition, so
+        // retry it until the header appears; the assertion below
+        // still requires the header, so a genuinely broken tab
+        // switch still fails.
+        for _ in 0..<3 {
+            tab("战绩", in: app)
+            if app.staticTexts["战绩 · 对局记录"].waitForExistence(timeout: 5) { break }
+        }
+        XCTAssertTrue(app.staticTexts["战绩 · 对局记录"].exists, "History tab must show its 对局记录 section")
+        let rows = app.buttons.matching(NSPredicate(format: "identifier == %@", "online.match.active"))
+        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: timeout), "History rows did not load")
+        capture("fix8-history", in: app)
+        let row = rows.firstMatch
+        scrollTo(row, in: app)
+        Thread.sleep(forTimeInterval: 1)
+        let rowFrame = row.frame
+        let dragHistoryRow = {
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+                .withOffset(CGVector(dx: rowFrame.maxX - 10, dy: rowFrame.midY))
+            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+                .withOffset(CGVector(dx: rowFrame.minX + 10, dy: rowFrame.midY))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
+        dragHistoryRow()
+        Thread.sleep(forTimeInterval: 1)
+        if !app.buttons["删除"].firstMatch.isHittable {
+            dragHistoryRow()
+            Thread.sleep(forTimeInterval: 1)
+        }
+        let deleteButton = app.buttons["删除"].firstMatch
+        XCTAssertTrue(deleteButton.isHittable, "Swipe-left must reveal a hittable 删除 on a history row")
+        dismissPasswordPromptIfPresent(in: app)
+        capture("fix8-history-swipe", in: app)
+        let deleteFrame = deleteButton.frame
+        XCTAssertEqual(deleteFrame.height, rowFrame.height, accuracy: 2.0, "删除 block height must equal the row height")
+        XCTAssertEqual(deleteFrame.width, 88.0, accuracy: 4.0, "删除 block must be the small 88pt trailing block, not full-width")
+        XCTAssertGreaterThan(deleteFrame.minX, rowFrame.minX + 100, "删除 block must start inside the row")
+        XCTAssertLessThanOrEqual(deleteFrame.maxX, rowFrame.maxX, "删除 block must end at or inside the row's trailing edge")
+        XCTAssertGreaterThanOrEqual(deleteFrame.maxX, rowFrame.maxX - 20, "删除 block must reach the row's trailing edge")
+        dismissPasswordPromptIfPresent(in: app)
+        deleteButton.tap()
+        XCTAssertTrue(app.alerts["删除牌桌？"].waitForExistence(timeout: timeout), "Tapping 删除 must open the Chinese delete dialog")
+        capture("fix8-history-delete-dialog", in: app)
+        tap(app.alerts["删除牌桌？"].buttons["取消"])
+        XCTAssertTrue(rows.firstMatch.exists, "Cancelling must leave the row in place")
+    }
+
+    // iosfix8 item 1+2 (local rows, no backend): the unswiped local
+    // lobby capture proves the intro card is not clipped and shares
+    // the rows' edges; swiping a local row left reveals the same
+    // small trailing full-height gold block, and tapping it opens
+    // the existing two-step local confirm; cancelled, so the table
+    // survives. The coordinate drag is kept from fix7: the local
+    // title text is only ~70pt wide, so swipeLeft on it drags too
+    // short a distance to reveal, and the drag start near the right
+    // edge is what demonstrably reveals.
+    func testFix8LocalSwipe() {
         let app = launch(["-UITestSeed"])
         if app.tabBars.buttons["本地"].waitForExistence(timeout: 3) {
             tab("本地", in: app)
@@ -743,19 +825,9 @@ final class ScreenshotTourTests: XCTestCase {
         returnToLocalLobby(in: app)
         let fourRow = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "四麻家规")).firstMatch
         XCTAssertTrue(fourRow.waitForExistence(timeout: timeout))
-        capture("fix7-local-lobby", in: app)
-        // Same coordinate-drag rationale as the online test: the
-        // title text is only ~70pt wide, so swipeLeft on it drags
-        // too short a distance to cross the 60pt reveal threshold.
-        // Drag across the full row width at the title's height.
+        capture("fix8-local-lobby", in: app)
         let fourFrame = fourRow.frame
         let dragLocalRow = {
-            // Start near the row's right edge: this start
-            // demonstrably reveals (run #4 shot); starting further
-            // left navigated instead (runs #5/#6, XCUI quirk).
-            // It can also trip the inner trash button and open the
-            // confirm during the drag; the checks below tolerate
-            // both outcomes.
             let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
                 .withOffset(CGVector(dx: app.frame.width - 30, dy: fourFrame.midY))
             let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
@@ -765,24 +837,28 @@ final class ScreenshotTourTests: XCTestCase {
         dragLocalRow()
         Thread.sleep(forTimeInterval: 1)
         let deleteButton = app.buttons["删除"].firstMatch
-        print("FIX7 local: fourFrame=\(fourFrame) deleteExists=\(deleteButton.exists) deleteHittable=\(deleteButton.isHittable)")
-        if !deleteButton.isHittable {
+        if !deleteButton.isHittable && !app.buttons["继续确认"].exists {
             dragLocalRow()
             Thread.sleep(forTimeInterval: 1)
-            print("FIX7 local retry: deleteExists=\(deleteButton.exists) deleteHittable=\(deleteButton.isHittable)")
         }
-        capture("fix7-local-swipe", in: app)
+        capture("fix8-local-swipe", in: app)
         // Reveal is proven by a hittable button, or by the confirm
         // already being open (drag start tripped the trash button).
         XCTAssertTrue(deleteButton.isHittable || app.buttons["继续确认"].exists, "Swipe-left must reveal a hittable 删除 on a local row")
+        if deleteButton.isHittable {
+            // The local row's own frame is the title text, not the
+            // row, so height equality is proven by the screenshot
+            // measurement (gold band vs card height); here assert
+            // the block is the 88pt trailing block and taller than
+            // any floating pill (stock was ~80pt on a ~110pt row).
+            XCTAssertEqual(deleteButton.frame.width, 88.0, accuracy: 4.0, "删除 block must be the small 88pt trailing block")
+            XCTAssertGreaterThan(deleteButton.frame.height, 80, "删除 block must be row-height, not a floating pill")
+        }
         if !app.buttons["继续确认"].exists {
             deleteButton.tap()
         }
         XCTAssertTrue(app.buttons["继续确认"].waitForExistence(timeout: timeout), "Tapping 删除 must open the two-step local confirm")
-        capture("fix7-local-delete-dialog", in: app)
-        // The confirmation dialog cancel is not exposed as a 取消
-        // button in this hierarchy; step through to the second dialog
-        // and take its 保留牌桌 cancel instead - the table survives.
+        capture("fix8-local-delete-dialog", in: app)
         tap(app.buttons["继续确认"])
         XCTAssertTrue(app.buttons["不可恢复地删除"].waitForExistence(timeout: timeout), "Second local confirm must appear")
         tap(app.buttons["保留牌桌"])

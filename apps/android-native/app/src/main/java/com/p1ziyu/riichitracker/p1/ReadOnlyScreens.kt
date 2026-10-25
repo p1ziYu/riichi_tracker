@@ -9,11 +9,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -35,6 +37,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -208,12 +213,33 @@ fun MatchListScreen(
     val finished = finishedOwnMatches(matches.orEmpty())
     val live = matches.orEmpty().filterNot { isFinishedMatch(it.status) }.sortedByDescending { it.createdAt }
     var pendingDelete by remember { mutableStateOf<MatchSummary?>(null) }
-    // iosfix7 item 2: full-row 删除 button (see SwipeDeleteRow.kt).
-    // The swipe itself never deletes — it only reveals the button,
-    // whose tap opens the existing Chinese confirm dialog.
+    // iosfix8 item 2: stock SwipeToDismissBox, REVERTING fix7's
+    // full-width custom row. The revealed action is a SMALL trailing
+    // gold block (88dp wide, full row height via fillMaxHeight, flush
+    // with the row's top and bottom edges), not a full-width button
+    // and not fix6's floating pill / translucent band. The swipe
+    // itself never deletes — confirmValueChange snaps the row back
+    // and opens the existing Chinese confirm dialog, so a stray
+    // swipe cannot destroy anything.
     @Composable
     fun DeletableRow(match: MatchSummary) {
-        FullWidthSwipeDeleteRow(onDeleteTap = { pendingDelete = match }) {
+        val dismissState = rememberSwipeToDismissBoxState(
+            confirmValueChange = { value ->
+                if (value == SwipeToDismissBoxValue.EndToStart) {
+                    pendingDelete = match
+                    false
+                } else true
+            })
+        SwipeToDismissBox(state = dismissState,
+            backgroundContent = {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterEnd) {
+                    Box(Modifier.fillMaxHeight().width(88.dp).background(Brand.gold, RoundedCornerShape(12.dp)),
+                        contentAlignment = Alignment.Center) {
+                        Text("删除", color = Brand.background, style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+            },
+            enableDismissFromStartToEnd = false) {
             MatchRow(match, templates, onOpen)
         }
     }

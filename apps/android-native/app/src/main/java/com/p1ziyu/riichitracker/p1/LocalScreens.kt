@@ -57,14 +57,29 @@ import androidx.compose.ui.unit.dp
         if (!state.loading && state.error == null && matches.isEmpty()) Text("暂无本地牌局", color = Brand.muted)
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             items(matches, key = { it.id }) { match ->
-                // iosfix7 item 2: full-row 删除 button (see SwipeDeleteRow.kt).
-                // The swipe only opens the existing two-step confirm
-                // dialog, never deletes. BrandPanel is 10dp, so the
-                // revealed button uses the same shape.
-                FullWidthSwipeDeleteRow(
-                    onDeleteTap = { deleting = match.id; confirmDelete = false },
-                    shape = RoundedCornerShape(10.dp),
-                ) {
+                // iosfix8 item 2: stock SwipeToDismissBox, REVERTING
+                // fix7's full-width custom row. Small trailing gold
+                // block (88dp, full row height, BrandPanel's 10dp
+                // shape), exactly as on the online rows. The swipe
+                // only opens the existing two-step confirm dialog,
+                // never deletes.
+                val dismissState = rememberSwipeToDismissBoxState(
+                    confirmValueChange = { value ->
+                        if (value == SwipeToDismissBoxValue.EndToStart) {
+                            deleting = match.id; confirmDelete = false
+                            false
+                        } else true
+                    })
+                SwipeToDismissBox(state = dismissState,
+                    backgroundContent = {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterEnd) {
+                            Box(Modifier.fillMaxHeight().width(88.dp).background(Brand.gold, RoundedCornerShape(10.dp)),
+                                contentAlignment = Alignment.Center) {
+                                Text("删除", color = Brand.background, style = MaterialTheme.typography.titleMedium)
+                            }
+                        }
+                    },
+                    enableDismissFromStartToEnd = false) {
                     BrandPanel(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(match.name, color = Brand.goldText, style = MaterialTheme.typography.titleLarge)

@@ -35,17 +35,24 @@ enum Brand {
     // and section headers are shifted to 16pt in BrandSectionHeader.
     // Every card and header in the app aligns to this edge.
     static let contentLeading: CGFloat = 16
-    // iosfix7 item 1: the row-inset token. Measured on the shipped
-    // List (insetGrouped): the section itself already insets every
-    // row by contentLeading (16pt) from the screen edge, and
-    // listRowInsets STACK on top of that section inset. fix6 set the
-    // hero to 16pt, so it landed at 32pt (screenshot: hero
-    // 31.3-370.3pt) while rows, at the bare section inset, sat at
-    // 16pt (16.0-385.7pt). The per-row token is therefore zero
-    // horizontally: hero and rows both use it and both land exactly
-    // on contentLeading. Vertical 0 keeps section rows contiguous
-    // (hairline dividers, no gaps).
-    static let rowInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0)
+    // iosfix8 item 1: the row-inset token, REVERTING fix7. fix7 set
+    // this to 0 horizontal on the theory that the insetGrouped
+    // section supplies 16pt; on the screens Ryan actually uses
+    // (online lobby, local tab) that section inset does not move the
+    // content, so rows and cards landed at the screen edge with the
+    // east tile / intro text clipped. The fix is one shared EXPLICIT
+    // 16pt inset applied directly to every element, and a list style
+    // that supplies no section inset of its own: the two lists below
+    // use .listStyle(.plain), so 16pt here is 16pt on screen, never
+    // 0 and never 16+16. Hero, ongoing rows, history rows and the
+    // local intro card all share this token, so hero left == row
+    // left and hero right == row right on every screen. Vertical 4
+    // gives 8pt gaps between cards (separators hidden).
+    static let rowInsets = EdgeInsets(top: 4, leading: Brand.contentLeading, bottom: 4, trailing: Brand.contentLeading)
+    // Swipe rows only: vertical 0, because their 4pt spacing lives
+    // INSIDE the row (padding outside the card) so the trailing
+    // delete block spans the full row slot, not just the card.
+    static let swipeRowInsets = EdgeInsets(top: 0, leading: Brand.contentLeading, bottom: 0, trailing: Brand.contentLeading)
     // Hero only: the same horizontal token, plus its own 8pt vertical
     // rhythm (a lone row in its section; the gap above/below the card).
     static let heroRowInsets = EdgeInsets(top: 8, leading: rowInsets.leading, bottom: 8, trailing: rowInsets.trailing)
@@ -91,8 +98,12 @@ private struct BrandPanel: ViewModifier {
 
 struct BrandSectionHeader: View {
     let title: String
+    let leadingShift: CGFloat
 
-    init(_ title: String) { self.title = title }
+    init(_ title: String, leadingShift: CGFloat = -Brand.contentLeading) {
+        self.title = title
+        self.leadingShift = leadingShift
+    }
 
     var body: some View {
         Text(title)
@@ -105,7 +116,10 @@ struct BrandSectionHeader: View {
             // title and the card backgrounds sit at Brand.contentLeading
             // (16pt). Shift once, here, so every header in the app shares
             // the title/card leading edge instead of per-screen padding.
-            .padding(.leading, -Brand.contentLeading)
+            // iosfix8: the plain lists below pass 0 here: a plain
+            // header's base is already ~16pt, so +16 put headers at
+            // 33pt (measured); 0 lands them on the 16pt card edge.
+            .padding(.leading, leadingShift)
     }
 }
 
@@ -113,66 +127,81 @@ extension View {
     func brandPanel() -> some View { modifier(BrandPanel()) }
 }
 
-// iosfix7 item 2: stock swipeActions sizes its button to the label, so the
-// shipped 删除 was a narrow gold pill at the trailing edge. This row is
-// gesture-driven instead: a left drag slides the content off and the full
-// row area underneath is one gold 删除 button. The drag never deletes by
-// itself — tapping the revealed button calls onDeleteTap, which opens the
-// existing Chinese confirm dialog. A right drag collapses the row again.
-// The row content is transparent (its panel colour comes from
-// listRowBackground BEHIND this row), so the gold button must stay
-// invisible until revealed — otherwise it shows through every row.
-// Opacity follows the drag offset and hit-testing follows `revealed`.
-struct FullWidthSwipeDeleteRow<Content: View>: View {
+// iosfix8 item 1: the plain-list card. In .plain style
+// listRowBackground fills the full screen width, so brandPanel()
+// (a listRowBackground) makes rows full-width bands, not cards.
+// A card must therefore be painted on the row content itself: the
+// content area is already 16-385.7pt via Brand.rowInsets, so a panel
+// background here spans exactly hero left == row left, hero right ==
+// row right. The list row behind it is clear, separators hidden
+// (cards are separated by the 4+4pt row insets instead).
+struct BrandCard: ViewModifier {
+    let cornerRadius: CGFloat
+    func body(content: Content) -> some View {
+        content
+            .background(Brand.panel, in: RoundedRectangle(cornerRadius: cornerRadius))
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+    }
+}
+
+extension View {
+    func brandCard(cornerRadius: CGFloat = 12) -> some View { modifier(BrandCard(cornerRadius: cornerRadius)) }
+}
+
+// iosfix8 item 2: the trailing delete row. Stock swipeActions sizes
+// its button with a system inset (measured: 80pt tall on a 110.7pt
+// row, 10pt off the trailing edge) -- the fix6 floating pill, and
+// no listRowInsets value changes it. This row is gesture-driven
+// instead (same simultaneousGesture + tap-to-collapse machinery as
+// fix7's row, which proved reliable against List scroll competition
+// and interrupted-drag freezes), but it is NOT full-width: the
+// content slides only 88pt and a SMALL trailing gold block is
+// revealed. The block's height is the row height by construction:
+// it fills the row-high ZStack (maxHeight: .infinity), flush with
+// the row's top and bottom edges, trailing edge on the row's
+// trailing edge. The drag never deletes by itself -- tapping the
+// revealed block calls onDeleteTap, which opens the existing
+// Chinese confirm dialog. Opacity follows the drag so the gold
+// never shows through the card's rounded corners while unrevealed.
+private let trailingDeleteWidth: CGFloat = 88
+
+struct TrailingSwipeDeleteRow<Content: View>: View {
+    var cornerRadius: CGFloat = 12
     let deleteIdentifier: String
     let onDeleteTap: () -> Void
     @ViewBuilder let content: Content
     @State private var offset: CGFloat = 0
     @State private var revealed = false
     @State private var dragging = false
-    @State private var rowWidth: CGFloat = 0
 
     private var buttonOpacity: Double {
-        guard rowWidth > 0 else { return revealed ? 1 : 0 }
-        return min(1, max(0, -offset / (rowWidth * 0.5)))
+        min(1, max(0, -offset / (trailingDeleteWidth * 0.5)))
     }
 
     var body: some View {
-        ZStack(alignment: .leading) {
-            // The expanding frame lives on the LABEL, not just the
-            // Button: a plain-styled Button reports its label's frame
-            // to accessibility (measured 34pt), so the label itself
-            // must fill the row for the button to be full-row in both
-            // paint and hit area.
+        ZStack(alignment: .trailing) {
             Button(action: onDeleteTap) {
                 Text("删除")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(minWidth: trailingDeleteWidth, maxWidth: trailingDeleteWidth, maxHeight: .infinity)
                     .background(Brand.gold)
                     .foregroundStyle(Brand.background)
                     .font(Brand.font(.headline, weight: .semibold))
             }
                 .accessibilityIdentifier(deleteIdentifier)
                 .buttonStyle(.plain)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: trailingDeleteWidth, maxWidth: trailingDeleteWidth, maxHeight: .infinity)
+                .background(Brand.gold, in: UnevenRoundedRectangle(
+                    topLeadingRadius: 0, bottomLeadingRadius: 0,
+                    bottomTrailingRadius: cornerRadius, topTrailingRadius: cornerRadius))
                 .opacity(buttonOpacity)
-                .allowsHitTesting(revealed)
+                .accessibilityHidden(!(revealed || offset < -trailingDeleteWidth * 0.5))
+                .allowsHitTesting(revealed || offset < -trailingDeleteWidth * 0.5)
             content
                 .offset(x: offset)
-                .onGeometryChange(for: CGFloat.self, of: { $0.size.width }) { rowWidth = $0 }
-                // Disabled whenever slid, not only when revealed:
-                // an interrupted drag (system alert) freezes the row
-                // mid-slide with revealed=false, and a live link
-                // there would navigate on tap-through.
                 .disabled(revealed || offset != 0)
         }
         .clipped()
-        // Tap-to-collapse recovery for that frozen state: a tap on
-        // a slid row closes it instead of acting. It lives on the
-        // ZStack (never disabled) with a content shape, not on the
-        // content (disabled views receive no gestures). When
-        // collapsed it is a no-op and the row's own tap wins, so
-        // ordinary taps still reach the NavigationLink; when
-        // revealed, taps hit the gold button, not this gesture.
         .contentShape(Rectangle())
         .gesture(
             TapGesture().onEnded {
@@ -182,28 +211,21 @@ struct FullWidthSwipeDeleteRow<Content: View>: View {
                 }
             }
         )
-        // simultaneousGesture, not gesture: a plain gesture competes
-        // with the List's scroll gesture, and when the List wins the
-        // drag's onEnded never fires, freezing the row mid-slide
-        // (seen 2026-10-24: local row stuck ~14pt left, no reveal).
-        // Simultaneous recognition lets the row drag fire reliably;
-        // vertical scrolls only nudge the offset slightly and snap
-        // back on end, and taps still reach the NavigationLink.
         .simultaneousGesture(
             DragGesture(minimumDistance: 12, coordinateSpace: .local)
                 .onChanged { value in
                     dragging = true
-                    let base = revealed ? -rowWidth : 0
-                    offset = min(0, max(-rowWidth, base + value.translation.width))
+                    let base = revealed ? -trailingDeleteWidth : 0
+                    offset = min(0, max(-trailingDeleteWidth, base + value.translation.width))
                 }
                 .onEnded { value in
                     dragging = false
                     if revealed {
-                        revealed = !(value.translation.width > 60)
+                        revealed = !(value.translation.width > trailingDeleteWidth * 0.5)
                     } else {
-                        revealed = value.translation.width < -60
+                        revealed = value.translation.width < -trailingDeleteWidth * 0.5
                     }
-                    offset = revealed ? -rowWidth : 0
+                    offset = revealed ? -trailingDeleteWidth : 0
                 }
         )
         .animation(dragging ? nil : .easeOut(duration: 0.22), value: offset)
@@ -536,8 +558,8 @@ struct AuthScreen: View {
     private var recentMatches: [MatchSummary] { lobby ? ordered.filter { isFinished($0.status) } : ordered }
 
     private func row(_ match: MatchSummary) -> some View {
-        FullWidthSwipeDeleteRow(deleteIdentifier: "online.match.delete.\(match.id)") { pendingDelete = match } content: {
-            NavigationLink(value: match.id) {
+        TrailingSwipeDeleteRow(deleteIdentifier: "online.match.delete.\(match.id)") { pendingDelete = match } content: {
+        NavigationLink(value: match.id) {
             HStack(alignment: .top, spacing: 14) {
                 EastTile(size: 30)
                 VStack(alignment: .leading, spacing: 6) {
@@ -553,11 +575,12 @@ struct AuthScreen: View {
             }
             .padding(.vertical, 5)
             .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .accessibilityIdentifier(!isFinished(match.status) ? "online.match.active" : "online.match.finished")
         }
-        .brandPanel()
-        .listRowInsets(Brand.rowInsets)
+        .brandCard()
+        .padding(.vertical, 4)
+        .accessibilityIdentifier(!isFinished(match.status) ? "online.match.active" : "online.match.finished")
+        }
+        .listRowInsets(Brand.swipeRowInsets)
     }
 
     var body: some View {
@@ -609,35 +632,36 @@ struct AuthScreen: View {
                     ], startPoint: .topLeading, endPoint: .bottomTrailing),
                     in: RoundedRectangle(cornerRadius: 18))
                     .overlay(RoundedRectangle(cornerRadius: 18).stroke(Brand.gold.opacity(0.7), lineWidth: 1))
-                    // iosfix7 item 1: hero shares the horizontal token
+                    // iosfix8 item 1: hero shares the horizontal token
                     // with the rows (Brand.heroRowInsets).
                     .listRowInsets(Brand.heroRowInsets)
                     .listRowBackground(Brand.background)
+                    .listRowSeparator(.hidden)
                 }
             }
             if loading && matches == nil {
-                ProgressView("读取对局中…").brandPanel().listRowInsets(Brand.rowInsets)
+                ProgressView("读取对局中…").frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
             }
             if let error {
                 Section {
-                    Text("加载失败：\(error)").foregroundStyle(Brand.loss).listRowInsets(Brand.rowInsets)
-                    Button("重试") { Task { await refresh() } }.listRowInsets(Brand.rowInsets)
+                    Text("加载失败：\(error)").foregroundStyle(Brand.loss).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
+                    Button("重试") { Task { await refresh() } }.frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
                 }
-                .brandPanel()
             }
             if lobby {
                 Section {
-                    if matches != nil && liveMatches.isEmpty { Text("暂无进行中的牌桌").foregroundStyle(Brand.muted).brandPanel().listRowInsets(Brand.rowInsets) }
+                    if matches != nil && liveMatches.isEmpty { Text("暂无进行中的牌桌").foregroundStyle(Brand.muted).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets) }
                     ForEach(liveMatches, id: \.id) { match in row(match) }
-                } header: { BrandSectionHeader("正在进行的牌桌") }
+                } header: { BrandSectionHeader("正在进行的牌桌", leadingShift: 0) }
             }
             Section {
                 if matches != nil && recentMatches.isEmpty {
-                    Text("暂无对局记录，下拉刷新试试").foregroundStyle(Brand.muted).brandPanel().listRowInsets(Brand.rowInsets)
+                    Text("暂无对局记录，下拉刷新试试").foregroundStyle(Brand.muted).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
                 }
                 ForEach(recentMatches, id: \.id) { match in row(match) }
-            } header: { BrandSectionHeader(lobby ? "战绩 · 最近对局" : "战绩 · 对局记录") }
+            } header: { BrandSectionHeader(lobby ? "战绩 · 最近对局" : "战绩 · 对局记录", leadingShift: 0) }
         }
+        .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(Brand.background)
         .tint(Brand.gold)
