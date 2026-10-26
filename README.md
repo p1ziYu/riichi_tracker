@@ -13,6 +13,8 @@
 `apps/api` 提供 Better Auth 登录、只读规则模板、牌桌、签到、记分和 WebSocket 同步。创建牌桌时可在选定模板版本上提交 `rulesOverride`（仅本桌生效）；服务端验证规则、生成归属桌主的不可变临时规则版本并绑定快照与哈希，其他账户不能引用该版本。未调整时直接使用模板版本；原有 `config` 创建入口仍兼容旧的 `startPoints`、本场及流局罚点别名。
 
 `apps/api` 的 API 在启动时先创建 `public` 中的 Better Auth 表，再初始化 Better Auth 的 schema 检查；业务表在 `app`，数据库迁移 001–013 仍须手工执行。本次直接入桌没有新增迁移。通过 `pnpm -r build`、`pnpm --filter @riichi/api test` 和 `pnpm --filter @riichi/web test` 校验。API E2E 只允许显式设置 `DATABASE_URL` 为独立 PostgreSQL 测试库（库名含 `test`、`e2e`、`disp` 或 `tmp`，且不能是 `riichi` 或 `apps/api/.env` 配置的库）；未设置或指向其他库时测试入口在任何数据库连接前拒绝运行。先用该库的 `DATABASE_URL` 执行 `pnpm --filter @riichi/api exec tsx src/migrate.ts`，再用相同的 URL 执行 API 测试。
+
+账户页 `/account` 可通过 `POST /api/auth/sign-out` 退出，或在二次确认并输入当前密码后调用 `POST /api/me/delete-account`，请求体为 `{ currentPassword, confirmed: true }`。服务端使用 Better Auth 的密码校验器验证当前密码；注销将账户主体标记为 `已注销玩家` 并删除认证用户及会话，历史成员、牌局、终局得点保留。唯一在职管理员不能自助注销，须先指定另一位管理员；管理员删除玩家的接口仍禁止删除自己，`GET /api/admin/players` 只显示非已注销的用户主体，不包含访客。开发用 Vite 代理可设置 `RIICHI_API_PORT` 指向隔离 API，默认仍为 `3101`；若 Web 运行在默认 `5173` 以外的端口，隔离 API 同时设置 `RIICHI_WEB_ORIGIN` 为该 Web 的完整来源，供跨站来源检查与 Better Auth 验证使用。
 每局每座立直标记最多宣言 2 次、取消 1 次（宣言→取消→再宣言后锁定）；只计未标记与已标记之间的转换，不计已标记时的类型修改。此限制固定，不随规则模板变化；需重新标记时由桌主作废并重开本局。`GET /api/matches/:id` 的 `currentHand.seats[].riichiChangeUsage` 提供已用 `{declares,cancels}`；超额更新返回 HTTP 409、`error: riichi_change_budget_exceeded`，标记及 `markRevision` 均不变。
 原生应用向服务端提交 Bearer 会话令牌，明确提供 Bearer 时不会回退到 Cookie 身份；401 会清理对应的本地令牌，退出登录即使网络失败也会清理本地令牌。离线退出无法立即撤销服务器端会话，重新联网前旧令牌仍可能有效。WebSocket 在发出每条事件前重新检查会话和桌内权限，空闲连接不会主动收到撤销通知。
 

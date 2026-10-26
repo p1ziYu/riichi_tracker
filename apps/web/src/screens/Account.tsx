@@ -8,7 +8,9 @@ import { Notice } from './ui';
 
 type Message = { ok: boolean; text: string };
 
-export default function Account({ me, onUpdated }: { me: Me; onUpdated: (me: Me) => void }) {
+export default function Account({ me, onUpdated, onLogout, onDeleted, logoutError }: {
+  me: Me; onUpdated: (me: Me) => void; onLogout: () => void; onDeleted: () => void; logoutError: string;
+}) {
   const [displayName, setDisplayName] = useState(me.principal.displayName);
   const [nameBusy, setNameBusy] = useState(false);
   const [nameMessage, setNameMessage] = useState<Message | null>(null);
@@ -18,6 +20,10 @@ export default function Account({ me, onUpdated }: { me: Me; onUpdated: (me: Me)
   const [confirmPassword, setConfirmPassword] = useState('');
   const [pwBusy, setPwBusy] = useState(false);
   const [pwMessage, setPwMessage] = useState<Message | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deletePassword, setDeletePassword] = useState('');
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
 
   async function saveName(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -58,6 +64,26 @@ export default function Account({ me, onUpdated }: { me: Me; onUpdated: (me: Me)
     }
   }
 
+  async function deleteAccount(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setDeleteBusy(true);
+    setDeleteError('');
+    try {
+      await post('/api/me/delete-account', { currentPassword: deletePassword, confirmed: true });
+      setDeletePassword('');
+      try {
+        await post('/api/auth/sign-out');
+      } catch {
+        // The auth user and all sessions were already removed by the deletion.
+      }
+      onDeleted();
+    } catch (cause) {
+      setDeleteError(errorTextZh(cause));
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
+
   return <main className="page narrow">
     <p className="eyebrow">ACCOUNT / 账户</p>
     <h1>账户设置</h1>
@@ -91,6 +117,25 @@ export default function Account({ me, onUpdated }: { me: Me; onUpdated: (me: Me)
         <button className="primary" type="submit" disabled={pwBusy}>{pwBusy ? '请稍候…' : '修改密码'}</button>
       </form>
       {pwMessage && <Notice invalid={!pwMessage.ok}>{pwMessage.text}</Notice>}
+    </section>
+
+    <section className="panel">
+      <h2>账户操作</h2>
+      <button type="button" className="text-button" onClick={onLogout}>退出</button>
+      {logoutError && <Notice invalid>退出登录失败：{logoutError}，请重试。</Notice>}
+      <p><button type="button" className="text-button danger" onClick={() => { setConfirmingDelete(true); setDeleteError(''); }}>注销账户</button></p>
+      {confirmingDelete && <div>
+        <p className="muted">注销账户不可逆；注销后立即退出登录。历史对局记录保留，过去对局中的名字将显示为已注销玩家。</p>
+        <form onSubmit={(event) => void deleteAccount(event)}>
+          <label>当前密码
+            <input type="password" autoComplete="current-password" value={deletePassword}
+              onChange={(event) => setDeletePassword(event.target.value)} required />
+          </label>
+          <button type="submit" className="text-button danger" disabled={deleteBusy}>{deleteBusy ? '正在注销…' : '确认注销账户'}</button>
+          <button type="button" className="text-button" disabled={deleteBusy} onClick={() => { setConfirmingDelete(false); setDeletePassword(''); setDeleteError(''); }}>取消</button>
+        </form>
+        {deleteError && <Notice invalid>{deleteError}</Notice>}
+      </div>}
     </section>
 
     <p><Link className="text-button" to="/">回大厅 →</Link></p>

@@ -16,6 +16,9 @@ const ALLOWED_CORS_ORIGINS: Record<string, true> = {
   'capacitor://localhost': true,
   'https://localhost': true,
 };
+if (process.env.RIICHI_WEB_ORIGIN) {
+  ALLOWED_CORS_ORIGINS[process.env.RIICHI_WEB_ORIGIN] = true;
+}
 
 export async function buildApp() {
   // Better Auth checks the schema as soon as it initializes; create its tables first.

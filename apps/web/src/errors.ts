@@ -51,6 +51,12 @@ const COPY: Record<string, string> = {
   invalid_display_name: '显示名字须为 1 至 64 个字符',
   cannot_delete_self: '不能删除自己的账号',
   player_not_found: '找不到该玩家',
+  account_required: '访客没有可注销的账户',
+  account_inactive: '账户已不可注销',
+  confirmation_required: '请确认注销账户',
+  current_password_required: '请输入当前密码',
+  invalid_current_password: '当前密码错误',
+  sole_admin: '不能注销唯一管理员账户，请先指定另一位管理员，以免所有人失去管理权限',
 };
 
 function statusFallback(status: number): string {

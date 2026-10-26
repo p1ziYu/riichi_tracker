@@ -361,3 +361,11 @@ h1,h2{letter-spacing:.015em}
     padding-top: 28px;
   }
 }
+
+/* Keep member annotations distinct without changing the right-aligned seat info. */
+.table-page .member-identity .tag{margin-left:8px}
+.table-page .member-self{display:inline-block;margin-left:8px}
+
+/* Align the share heading with the hall hero's first content line. */
+.share-page{padding-top:118px}
+@media(max-width:600px){.share-page{padding-top:53px}}

@@ -87,8 +87,7 @@ export default function TablePage({ me }: { me: Me }) {
     {view.status === 'waiting' && <section className="panel">
       <h2>等待人齐 · 成员 {view.members.length} / {total}</h2>
       <div className="member-list">{view.members.map((member) => <div key={member.userId}>
-        <span className="wind-badge">·</span>
-        <span className="ellipsis">{member.displayName}{member.isHost && <small className="tag">房主</small>}{member.userId === me.principal.id ? ' · 我' : ''}</span>
+        <span className="ellipsis member-identity"><span className="member-name">{member.displayName}</span>{member.isHost && <small className="tag">房主</small>}{member.userId === me.principal.id && <span className="member-self">· 我</span>}</span>
       </div>)}</div>
       <p className="muted">人齐后系统直接随机分座，东座即庄家，座次锁定。</p>
       <div className="share-code-block">
@@ -105,7 +104,7 @@ export default function TablePage({ me }: { me: Me }) {
       <h2>本场进行中 · 座次已锁定</h2>
       <div className="member-list">{seats.map((seat) => <div key={seat.seatNo}>
         <WindTile wind={seat.wind ?? ''} />
-        <span className="ellipsis">{memberName(view, seat.userId)}{seat.seatNo === 0 && <small className="tag">庄家</small>}{seat.userId === me.principal.id ? ' · 我' : ''}</span>
+        <span className="ellipsis member-identity"><span className="member-name">{memberName(view, seat.userId)}</span>{seat.seatNo === 0 && <small className="tag">庄家</small>}{seat.userId === me.principal.id && <span className="member-self">· 我</span>}</span>
         <small>{seat.wind ? `座位 ${seat.seatNo + 1}` : ''}</small>
       </div>)}</div>
       {isHost

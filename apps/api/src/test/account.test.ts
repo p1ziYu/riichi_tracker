@@ -180,10 +180,40 @@ test('Account self-service + admin soft-delete', async () => {
     const signinBody = (await signin.json()) as { code: string };
     assert.equal(signinBody.code, 'INVALID_EMAIL_OR_PASSWORD');
 
-    // 4. Admin players list no longer contains the deleted principal id.
+    // 4. Guests and erased users never appear in admin players.
+    const guest = await pool.query<{ id: string }>(
+      `INSERT INTO app.principals (kind, auth_user_id, display_name, status)
+       VALUES ('guest', NULL, '临时访客', 'active') RETURNING id`,
+    );
+    const guestId = guest.rows[0].id;
     const players = await request<{ players: { id: string }[] }>('/api/admin/players', { cookie: admin.cookie });
     assert.equal(players.status, 200);
     assert.equal(players.data.players.some((p) => p.id === victim.principalId), false);
+    assert.equal(players.data.players.some((p) => p.id === guestId), false);
+    const listedKinds = await pool.query<{ kind: string }>(
+      `SELECT kind FROM app.principals WHERE id = ANY($1::uuid[])`,
+      [players.data.players.map((p) => p.id)],
+    );
+    assert.ok(listedKinds.rows.every((row) => row.kind === 'user'), 'admin list contains only users');
+    const guestDelete = await request<{ error: string }>(`/api/admin/players/${guestId}`, {
+      method: 'DELETE', cookie: admin.cookie,
+    });
+    assert.equal(guestDelete.status, 404);
+    assert.equal(guestDelete.data.error, 'player_not_found');
+    const anonymous = await fetch(`${baseUrl}/api/auth/sign-in/anonymous`, {
+      method: 'POST', headers: { origin: 'http://127.0.0.1:5173', 'content-type': 'application/json' }, body: '{}',
+    });
+    assert.equal(anonymous.status, 200);
+    const guestCookie = (anonymous.headers.getSetCookie?.() ?? []).map((v) => v.split(';')[0]).join('; ');
+    const guestSelfDelete = await request<{ error: string }>('/api/me/delete-account', {
+      method: 'POST', cookie: guestCookie, body: { currentPassword: other.password, confirmed: true },
+    });
+    assert.equal(guestSelfDelete.status, 403);
+    assert.equal(guestSelfDelete.data.error, 'account_required');
+    const nonAdminDelete = await request<{ error: string }>(`/api/admin/players/${other.principalId}`, {
+      method: 'DELETE', cookie: filler2.cookie,
+    });
+    assert.equal(nonAdminDelete.status, 403);
 
     // 5. Match survives: finished, finalScores unchanged, victim renders as 已注销玩家.
     const afterDetail = await request<MatchView>(`/api/matches/${match.id}`, { cookie: other.cookie });
@@ -212,6 +242,50 @@ test('Account self-service + admin soft-delete', async () => {
     });
     assert.equal(nonexistent.status, 404);
     assert.equal(nonexistent.data.error, 'player_not_found');
+
+    // Self-service deletion rejects both incomplete consent and incorrect credentials.
+    const missingConfirmation = await request<{ error: string }>('/api/me/delete-account', {
+      method: 'POST', cookie: other.cookie, body: { currentPassword: other.password },
+    });
+    assert.equal(missingConfirmation.status, 400);
+    assert.equal(missingConfirmation.data.error, 'confirmation_required');
+    const wrongPassword = await request<{ error: string }>('/api/me/delete-account', {
+      method: 'POST', cookie: other.cookie, body: { currentPassword: `${other.password}!`, confirmed: true },
+    });
+    assert.equal(wrongPassword.status, 401);
+    assert.equal(wrongPassword.data.error, 'invalid_current_password');
+    assert.equal((await request('/api/me', { cookie: other.cookie })).status, 200);
+    const stillListed = await request<{ players: { id: string }[] }>('/api/admin/players', { cookie: admin.cookie });
+    assert.ok(stillListed.data.players.some((p) => p.id === other.principalId));
+    const stillSignsIn = await request('/api/auth/sign-in/email', {
+      method: 'POST', body: { email: other.email, password: other.password },
+    });
+    assert.equal(stillSignsIn.status, 200);
+
+    const soleAdmin = await request<{ error: string; message: string }>('/api/me/delete-account', {
+      method: 'POST', cookie: admin.cookie, body: { currentPassword: admin.password, confirmed: true },
+    });
+    assert.equal(soleAdmin.status, 403);
+    assert.equal(soleAdmin.data.error, 'sole_admin');
+    assert.match(soleAdmin.data.message, /唯一管理员/);
+    assert.equal((await request('/api/me', { cookie: admin.cookie })).status, 200);
+
+    const selfDeleted = await request<{ deleted: boolean }>('/api/me/delete-account', {
+      method: 'POST', cookie: other.cookie, body: { currentPassword: other.password, confirmed: true },
+    });
+    assert.equal(selfDeleted.status, 200);
+    assert.equal(selfDeleted.data.deleted, true);
+    assert.equal((await request('/api/me', { cookie: other.cookie })).status, 401);
+    const selfSignin = await request('/api/auth/sign-in/email', {
+      method: 'POST', body: { email: other.email, password: other.password },
+    });
+    assert.equal(selfSignin.status, 401);
+    const afterSelfList = await request<{ players: { id: string }[] }>('/api/admin/players', { cookie: admin.cookie });
+    assert.equal(afterSelfList.data.players.some((p) => p.id === other.principalId), false);
+    const afterSelfMatch = await request<MatchView>(`/api/matches/${match.id}`, { cookie: filler2.cookie });
+    assert.equal(afterSelfMatch.status, 200);
+    assert.equal(JSON.stringify(afterSelfMatch.data.finalScores), beforeScores);
+    assert.equal(afterSelfMatch.data.members.find((m) => m.userId === other.principalId)?.displayName, '已注销玩家');
 
     delete process.env.ADMIN_EMAILS;
   } finally {

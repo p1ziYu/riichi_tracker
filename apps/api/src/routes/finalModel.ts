@@ -412,7 +412,7 @@ export function registerFinalModelRoutes(app: FastifyInstance): void {
       `SELECT p.id, p.display_name, COUNT(DISTINCT mm.match_id)::text AS match_count
        FROM app.principals p
        LEFT JOIN app.match_members mm ON mm.principal_id = p.id
-       WHERE p.status <> 'erased'
+       WHERE p.kind = 'user' AND p.status <> 'erased'
        GROUP BY p.id, p.display_name
        ORDER BY COUNT(DISTINCT mm.match_id) DESC, p.display_name ASC`,
     );

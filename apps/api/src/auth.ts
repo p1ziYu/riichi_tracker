@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { verifyPassword } from 'better-auth/crypto';
 import { betterAuth, type Auth, type BetterAuthOptions } from 'better-auth';
 import { anonymous, bearer } from 'better-auth/plugins';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -176,6 +177,7 @@ const authOptions = {
     'http://localhost:5173',
     'capacitor://localhost',
     'https://localhost',
+    ...(process.env.RIICHI_WEB_ORIGIN ? [process.env.RIICHI_WEB_ORIGIN] : []),
   ],
   // Password policy: better-auth 1.7.11 defaults with NO min/max override here.
   // Enforced range is 8–128 chars, no character-kind rules. The web hint
@@ -280,6 +282,13 @@ export async function resolvePrincipal(req: FastifyRequest): Promise<ResolvedPri
   };
 }
 
+function adminEmails(): string[] {
+  return (process.env.ADMIN_EMAILS ?? 'rj2613haha@gmail.com')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 // Final-native admin gate. Admin is Ryan's own account: identified by the
 // linked auth user's email (ADMIN_EMAILS, default rj2613haha@gmail.com) or by
 // the known principal id prefix e466d953 (only the prefix was specified, so
@@ -290,11 +299,7 @@ export async function isAdminPrincipal(principal: {
   authUserId: string;
 }): Promise<boolean> {
   if (principal.id.startsWith('e466d953')) return true;
-  const emails = (process.env.ADMIN_EMAILS ?? 'rj2613haha@gmail.com')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  if (emails.length === 0) return false;
+  const emails = adminEmails();
   const row = (await pool.query<{ email: string | null }>(
     `SELECT email FROM public."user" WHERE id = $1`,
     [principal.authUserId],
@@ -390,6 +395,73 @@ export function registerAuthRoutes(app: FastifyInstance): void {
       // callers still get 401 above; this branch never turns that into a 500.
       isAdmin: await isAdminPrincipal(principal),
     };
+  });
+
+  // Explicit confirmation and the caller's current credential are required.
+  // Keep the principal tombstone and auth-user deletion atomic with the admin guard.
+  app.post<{ Body: { currentPassword?: unknown; confirmed?: unknown } }>('/api/me/delete-account', async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (principal.kind !== 'user') {
+      return reply.code(403).send({ error: 'account_required', message: '访客没有可注销的账户' });
+    }
+    if (req.body?.confirmed !== true) {
+      return reply.code(400).send({ error: 'confirmation_required', message: '请确认注销账户' });
+    }
+    const password = req.body?.currentPassword;
+    if (typeof password !== 'string' || !password) {
+      return reply.code(400).send({ error: 'current_password_required', message: '请输入当前密码' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Serializes simultaneous self-deletions of administrators.
+      await client.query('SELECT pg_advisory_xact_lock(91719, 1)');
+      const locked = (await client.query<{ auth_user_id: string | null }>(
+        `SELECT auth_user_id FROM app.principals WHERE id = $1 AND kind = 'user' AND status = 'active' FOR UPDATE`,
+        [principal.id],
+      )).rows[0];
+      if (!locked || locked.auth_user_id !== principal.authUserId) {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'account_inactive', message: '账户已不可注销' });
+      }
+      const credential = (await client.query<{ password: string | null }>(
+        `SELECT password FROM public.account WHERE "userId" = $1 AND "providerId" = 'credential'`,
+        [principal.authUserId],
+      )).rows[0]?.password;
+      if (!credential || !(await verifyPassword({ hash: credential, password }))) {
+        await client.query('ROLLBACK');
+        return reply.code(401).send({ error: 'invalid_current_password', message: '当前密码错误' });
+      }
+      if (await isAdminPrincipal(principal)) {
+        const admins = await client.query<{ count: string }>(
+          `SELECT COUNT(*)::text AS count FROM app.principals p
+           JOIN public."user" u ON u.id = p.auth_user_id
+           WHERE p.kind = 'user' AND p.status = 'active'
+             AND (p.id::text LIKE 'e466d953%' OR lower(u.email) = ANY($1::text[]))`,
+          [adminEmails()],
+        );
+        if (Number(admins.rows[0]?.count) <= 1) {
+          await client.query('ROLLBACK');
+          return reply.code(403).send({
+            error: 'sole_admin', message: '不能注销唯一管理员账户，请先指定另一位管理员，以免所有人失去管理权限',
+          });
+        }
+      }
+      await client.query(
+        `UPDATE app.principals SET kind = 'erased', status = 'erased', auth_user_id = NULL, display_name = '已注销玩家' WHERE id = $1`,
+        [principal.id],
+      );
+      await client.query(`DELETE FROM public."user" WHERE id = $1`, [principal.authUserId]);
+      await client.query('COMMIT');
+      return { deleted: true };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   });
 
   // PATCH /api/me/display-name -> rename the caller's principal + auth user name.

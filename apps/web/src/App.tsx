@@ -100,7 +100,7 @@ export default function App() {
         <Route path="/share/:id" element={<Protected me={me}><Share /></Protected>} />
         <Route path="/table/:id" element={<Protected me={me}>{me && <TablePage me={me} />}</Protected>} />
         <Route path="/history" element={<Protected me={me}>{me && <History me={me} />}</Protected>} />
-        <Route path="/account" element={<Protected me={me}>{me && <Account me={me} onUpdated={setMe} />}</Protected>} />
+        <Route path="/account" element={<Protected me={me}>{me && <Account me={me} onUpdated={setMe} onLogout={() => void logout()} logoutError={logoutError} onDeleted={() => { setMe(null); window.location.assign('/login'); }} />}</Protected>} />
         <Route path="/admin" element={<Protected me={me}>{me && <Admin me={me} />}</Protected>} />
         <Route path="/checkin/:matchId" element={<Protected me={me}><Join /></Protected>} />
         <Route path="*" element={<Navigate to="/" replace />} />
