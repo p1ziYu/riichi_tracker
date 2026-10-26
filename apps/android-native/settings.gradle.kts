@@ -14,4 +14,3 @@ dependencyResolutionManagement {
 }
 rootProject.name = "ichihime-android-native"
 include(":app")
-includeBuild("../../packages/mobile-engine")

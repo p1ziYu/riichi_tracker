@@ -176,7 +176,8 @@ describe('isolated migration runner negative probes', () => {
   });
 
   it('applies 014 after 013, records its checksum, and skips it on rerun', async () => {
-    const all = loadMigrations();
+    // Same <= filter pattern as the 013 test: 014 is no longer the last migration.
+    const all = loadMigrations().filter((m) => m.version <= '014');
     const m014 = all.find((m) => m.version === '014');
     assert.ok(m014, 'migration 014 exists');
     const db = new FakeDatabase();
@@ -189,6 +190,24 @@ describe('isolated migration runner negative probes', () => {
     assert.deepEqual(db.executedSql, [m014.sql]);
     await applyMigrations(new FakeClient(db), all);
     assert.deepEqual(db.executedSql, [m014.sql]);
+  });
+
+  it('applies 015 after 014, records its checksum, and skips it on rerun', async () => {
+    const all = loadMigrations().filter((m) => m.version <= '015');
+    const m015 = all.find((m) => m.version === '015');
+    assert.ok(m015, 'migration 015 exists');
+    assert.match(m015.sql, /final_scores/);
+    assert.match(m015.sql, /corrected_at/);
+    const db = new FakeDatabase();
+    for (const migration of all) {
+      if (migration.version === '015') break;
+      db.versions.set(migration.version, migration.checksum);
+    }
+    await applyMigrations(new FakeClient(db), all);
+    assert.equal(db.versions.get('015'), m015.checksum);
+    assert.deepEqual(db.executedSql, [m015.sql]);
+    await applyMigrations(new FakeClient(db), all);
+    assert.deepEqual(db.executedSql, [m015.sql]);
   });
 
 });

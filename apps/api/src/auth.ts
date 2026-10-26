@@ -277,6 +277,29 @@ export async function resolvePrincipal(req: FastifyRequest): Promise<ResolvedPri
   };
 }
 
+// Final-native admin gate. Admin is Ryan's own account: identified by the
+// linked auth user's email (ADMIN_EMAILS, default rj2613haha@gmail.com) or by
+// the known principal id prefix e466d953 (only the prefix was specified, so
+// the check is a prefix match). Read dynamically per call so tests can point
+// ADMIN_EMAILS at a throwaway account.
+export async function isAdminPrincipal(principal: {
+  id: string;
+  authUserId: string;
+}): Promise<boolean> {
+  if (principal.id.startsWith('e466d953')) return true;
+  const emails = (process.env.ADMIN_EMAILS ?? 'rj2613haha@gmail.com')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (emails.length === 0) return false;
+  const row = (await pool.query<{ email: string | null }>(
+    `SELECT email FROM public."user" WHERE id = $1`,
+    [principal.authUserId],
+  )).rows[0];
+  const email = row?.email?.toLowerCase();
+  return !!email && emails.includes(email);
+}
+
 export async function requirePrincipal(
   req: FastifyRequest,
   reply: FastifyReply,
@@ -360,6 +383,9 @@ export function registerAuthRoutes(app: FastifyInstance): void {
         displayName: principal.displayName,
         createdAt: principal.createdAt,
       },
+      // Final-native: admin flag for the client admin entry. Unauthenticated
+      // callers still get 401 above; this branch never turns that into a 500.
+      isAdmin: await isAdminPrincipal(principal),
     };
   });
 }

@@ -29,7 +29,7 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
 
-@Composable fun InvitationQr(link: String, description: String = "签到二维码") {
+@Composable fun InvitationQr(link: String, description: String = "加入二维码") {
     val bitmap = remember(link) { runCatching {
         val matrix = MultiFormatWriter().encode(link, BarcodeFormat.QR_CODE, 512, 512,
             mapOf(EncodeHintType.MARGIN to 2, EncodeHintType.ERROR_CORRECTION to com.google.zxing.qrcode.decoder.ErrorCorrectionLevel.M))
@@ -44,7 +44,7 @@ import com.google.zxing.MultiFormatWriter
 }
 
 @androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
-@Composable fun CheckInScanner(accept: (String) -> Boolean = { parseCheckInLink(it)?.hasToken == true }, onFound: (String) -> Unit) {
+@Composable fun CheckInScanner(accept: (String) -> Boolean = { parseJoinLink(it) != null }, onFound: (String) -> Unit) {
     val context = LocalContext.current
     val owner = LocalLifecycleOwner.current
     var permission by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }

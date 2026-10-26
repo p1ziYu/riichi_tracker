@@ -3,74 +3,14 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
-struct CheckInDestination {
-    let matchID: String
-    let token: String
-    init?(_ raw: String) {
-        guard let components = URLComponents(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
-              components.user == nil, components.password == nil,
-              components.port == nil, components.fragment == nil else { return nil }
-        let acceptedHTTPS = components.scheme?.lowercased() == "https" && components.host?.lowercased() == "riichi.p1ziyu.com"
-        let acceptedScheme = components.scheme?.lowercased() == "ichihime-native" && components.host?.lowercased() == "checkin"
-        guard acceptedHTTPS || acceptedScheme else { return nil }
-        let path = components.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false)
-        let query = components.queryItems ?? []
-        let ids = query.filter { $0.name == "matchId" }
-        let id: String
-        if acceptedHTTPS, path.count == 3, path[0].isEmpty, path[1] == "checkin", ids.isEmpty {
-            id = String(path[2])
-        } else if acceptedScheme, path.count == 2, path[0].isEmpty, ids.isEmpty {
-            id = String(path[1])
-        } else if acceptedScheme, (components.percentEncodedPath.isEmpty || components.percentEncodedPath == "/"),
-                  ids.count == 1, let specified = ids.first?.value {
-            id = specified
-        } else { return nil }
-        guard id.count == 36, UUID(uuidString: id) != nil else { return nil }
-        let tokens = query.filter { $0.name == "token" }
-        guard tokens.count == 1, let value = tokens[0].value,
-              !value.isEmpty, !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
-              query.count == (ids.isEmpty ? 1 : 2) else { return nil }
-        matchID = id
-        token = value
-    }
-}
-
-struct CheckInCommand: Encodable {
-    let token: String
-    let alias: String?
-}
-
-@MainActor
-extension APIClient {
-    func checkInSeats(matchID: String, token: String) async throws -> CheckInSeatsDTO {
-        var url = URLComponents()
-        url.path = "/api/matches/\(matchID)/check-in-seats"
-        url.queryItems = [URLQueryItem(name: "token", value: token)]
-        guard let path = url.string else { throw APIError(status: nil, message: "签到链接无效") }
-        return try await get(path)
-    }
-
-    func checkIn(matchID: String, command: CheckInCommand) async throws -> CheckInResultDTO {
-        try await post("/api/matches/\(matchID)/check-ins", body: command)
-    }
-}
-
-enum JoinFlow {
-    static func canonicalCode(_ code: String) -> String? {
-        let canonical = code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        guard canonical.count == 6,
-              canonical.allSatisfy({ "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains($0) }) else { return nil }
-        return canonical
-    }
-    static func tokenExpired(_ error: APIError) -> Bool {
-        error.status == 400 && (error.code == "token_consumed_or_expired" || error.code == "invalid_token")
-    }
-}
+// 最后一版原生加入流程（旧签到页已删除）：
+// 输房间码 / 扫码 / 粘贴链接 → 直接进桌成为成员；满员中文提示；重复进幂等。
+// 链接解析见 FinalModels.JoinDestination；房间码校验见 JoinFlow.canonicalCode。
 
 final class CameraCoordinator: NSObject, AVCaptureMetadataOutputObjectsDelegate {
     let session = AVCaptureSession()
     let queue = DispatchQueue(label: "ichihime.camera.capture")
-    var stopped = false // Accessed only on queue.
+    var stopped = false
     var onScan: ((String) -> Void)?
     private var scanned = false
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
@@ -116,333 +56,123 @@ struct CameraScanner: UIViewRepresentable {
 }
 
 @MainActor
-struct CheckInScreen: View {
-    @ObservedObject var session: AppSession
-    @State private var input: String
+struct JoinScreen: View {
+    let service: any FinalMatchService
+    let initialLink: String?
+    let onJoined: (FinalMatch) -> Void
+    init(service: any FinalMatchService, initialLink: String? = nil, onJoined: @escaping (FinalMatch) -> Void) {
+        self.service = service
+        self.initialLink = initialLink
+        self.onJoined = onJoined
+    }
     @State private var code = ""
-    @State private var alias = ""
+    @State private var link = ""
     @State private var scanning = false
     @State private var busy = false
-    @State private var loadingSeats = false
+    @State private var error: String?
     @State private var notice: String?
-    @State private var resolved: JoinCodeDTO?
-    @State private var preview: CheckInSeatsDTO?
-    @State private var previewKey: String?
-    @State private var recoverableKey: String?
-    @State private var joined = false
-    @State private var waitingMembers: [MatchMemberDTO]?
-    @State private var seatsRequest = 0
-    let link: String?
-    let onCompleted: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
 
-    init(session: AppSession, link: String?, onCompleted: @escaping (String) -> Void = { _ in }) {
-        self.session = session
-        self.link = link
-        self.onCompleted = onCompleted
-        _input = State(initialValue: link ?? "")
-    }
-    private var destination: CheckInDestination? {
-        if let resolved {
-            var components = URLComponents(string: "https://riichi.p1ziyu.com/checkin/\(resolved.matchId)")!
-            components.queryItems = [URLQueryItem(name: "token", value: resolved.token)]
-            return components.url.flatMap { CheckInDestination($0.absoluteString) }
-        }
-        return CheckInDestination(input)
-    }
-    private var destinationKey: String? {
-        guard let destination else { return nil }
-        return "\(destination.matchID):\(destination.token)"
-    }
-    private func memberRows(for preview: CheckInSeatsDTO) -> [MatchMemberDTO] {
-        joined ? (waitingMembers ?? preview.members) : preview.members
-    }
     var body: some View {
-        Form {
-            if !joined {
-                Section {
-                    SecureField("HTTPS 签到链接", text: $input, prompt: Text("HTTPS 签到链接").foregroundColor(Brand.muted))
-                        .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
-                        .textContentType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .onChange(of: input) { _, _ in
-                            resolved = nil
-                            preview = nil
-                            previewKey = nil
-                        }
-                        .brandPanel()
-                    Button("粘贴剪贴板中的链接") { input = UIPasteboard.general.string ?? "" }.brandPanel()
-                    Button("扫描二维码") { requestCamera() }
-                        .accessibilityIdentifier("checkIn.scanQRCode").brandPanel()
-                    if let displayedDestination = destination {
-                        Text("牌桌：\(displayedDestination.matchID) · 含签到凭证")
-                            .foregroundStyle(Brand.muted).brandPanel()
-                    } else if !input.isEmpty {
-                        Text("仅接受一姬 HTTPS 签到链接和有效 UUID").foregroundStyle(Brand.loss).brandPanel()
-                    }
-                } header: { BrandSectionHeader("扫码或粘贴签到链接") }
-                Section {
-                    TextField("6 位房间码", text: $code, prompt: Text("6 位房间码").foregroundColor(Brand.muted))
-                        .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
-                        .textInputAutocapitalization(.characters).autocorrectionDisabled()
-                        .onChange(of: code) { _, _ in
-                            resolved = nil
-                            input = ""
-                            preview = nil
-                            previewKey = nil
-                        }
-                        .accessibilityIdentifier("checkIn.roomCode").brandPanel()
-                    Button("换取签到凭证") { Task { await lookupCode() } }
-                        .disabled(!session.authenticated || busy || code.isEmpty)
-                        .accessibilityIdentifier("checkIn.redeemCode").brandPanel()
-                    Text("房间码换取短时签到凭证；加入后由房主抽风定座。")
-                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
-                } header: { BrandSectionHeader("通过房间码") }
-            }
-            if !session.authenticated {
-                Section {
-                    Text("请先登录账户或选择在线临时访客，再回到此处签到。离线本地身份不能签到。")
-                        .foregroundStyle(Brand.muted).brandPanel()
+        List {
+            Section {
+                Text("输入 6 位房间码，或粘贴加入链接、扫描二维码，点加入即直接进桌。")
+                    .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+                TextField("房间码", text: $code, prompt: Text("6 位房间码").foregroundColor(Brand.muted))
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .padding(12)
+                    .background(Brand.deep, in: RoundedRectangle(cornerRadius: 10))
+                    .accessibilityIdentifier("join.roomCode")
+                Button(busy ? "加入中…" : "用房间码加入") { Task { await joinByCode() } }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Brand.gold)
+                    .foregroundStyle(Brand.background)
+                    .disabled(busy || JoinFlow.canonicalCode(code) == nil)
+                    .accessibilityIdentifier("join.submitCode")
+                if JoinFlow.canonicalCode(code) == nil && !code.isEmpty {
+                    Text("房间码为 6 位大写字母与数字（不含 0、1、I、O）。")
+                        .font(Brand.font(.footnote)).foregroundStyle(Brand.loss)
                 }
-            }
-            if let notice {
-                Section { Text(notice).foregroundStyle(joined ? Brand.gain : Brand.gold).brandPanel() }
-            }
-            joinControls
+            } header: { BrandSectionHeader("房间码") }
+            .brandPanel()
+            Section {
+                TextField("加入链接", text: $link, prompt: Text("粘贴加入链接").foregroundColor(Brand.muted))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .padding(12)
+                    .background(Brand.deep, in: RoundedRectangle(cornerRadius: 10))
+                    .accessibilityIdentifier("join.link")
+                Button(busy ? "加入中…" : "用链接加入") { Task { await joinByLink() } }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Brand.gold)
+                    .foregroundStyle(Brand.background)
+                    .disabled(busy || JoinDestination(link) == nil)
+                    .accessibilityIdentifier("join.submitLink")
+                Button(scanning ? "关闭扫码" : "扫描二维码") { scanning.toggle() }
+                    .accessibilityIdentifier("join.scan.toggle")
+                if scanning {
+                    CameraScanner { value in
+                        link = value
+                        scanning = false
+                        Task { await joinByLink() }
+                    }
+                    .frame(height: 320)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+                if let notice { Text(notice).foregroundStyle(Brand.gain) }
+                if let error { Text(error).foregroundStyle(Brand.loss) }
+            } header: { BrandSectionHeader("链接 / 扫码") }
+            .brandPanel()
         }
+        .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .foregroundStyle(Brand.text)
         .background(Brand.background)
         .tint(Brand.gold)
-        .navigationTitle("签到")
+        .foregroundStyle(Brand.text)
+        .navigationTitle("加入牌桌")
         .keyboardDismissal()
-        .task(id: destinationKey) {
-            preview = nil
-            previewKey = nil
-            recoverableKey = nil
-            waitingMembers = nil
-            // iosfix10 M2: clear the stale failure banner the moment a
-            // new input starts validating, and debounce 600ms so a
-            // typed link fires ONE validation after the input settles
-            // instead of one per keystroke (each intermediate 400 used
-            // to plant a banner that success never cleared). The sleep
-            // throws on cancellation, so an intermediate keystroke
-            // abandons its task before any request fires.
-            notice = nil
-            do { try await Task.sleep(nanoseconds: 600_000_000) } catch { return }
-            guard !Task.isCancelled else { return }
-            if destination != nil && session.authenticated && !joined { await loadSeats() }
-        }
-        .onChange(of: link) { _, newLink in
-            guard let newLink else { return }
-            joined = false
-            waitingMembers = nil
-            notice = nil
-            resolved = nil
-            input = newLink
-        }
-        .sheet(isPresented: $scanning) {
-            NavigationStack {
-                CameraScanner { value in
-                    scanning = false
-                    input = value
-                    if CheckInDestination(value) == nil { notice = "二维码不是有效的一姬签到链接" }
-                }
-                .navigationTitle("扫描签到二维码")
-                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { scanning = false } } }
-            }
-        }
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("关闭") { dismiss() } } }
+        .onAppear { if let initialLink { link = initialLink } }
     }
-    @ViewBuilder private var joinControls: some View {
-        if let destination, session.authenticated {
-            Section {
-                if loadingSeats { ProgressView("读取成员中…").brandPanel() }
-                if let preview, previewKey == destinationKey, preview.match.id == destination.matchID {
-                    let members = memberRows(for: preview)
-                    Text("成员 \(members.count)/\(preview.match.playerCount)")
-                        .foregroundStyle(Brand.muted).brandPanel()
-                    ForEach(members) { member in
-                        HStack {
-                            Text(member.displayName)
-                            if member.isOwner { Text("房主").foregroundStyle(Brand.gold) }
-                        }.brandPanel()
-                    }
-                    if joined || preview.caller.isMember {
-                        Text("已加入牌桌，等待房主抽风定座")
-                            .accessibilityIdentifier("checkIn.waiting").brandPanel()
-                        Button("查看牌桌") { onCompleted(destination.matchID) }
-                            .accessibilityIdentifier("checkIn.viewTable").brandPanel()
-                    } else if !preview.caller.isOwner {
-                        if preview.seating.memberCount >= preview.match.playerCount {
-                            Text("牌桌已满员").foregroundStyle(Brand.gold).brandPanel()
-                        }
-                        TextField("昵称（可选；更新个人展示名）", text: $alias,
-                                  prompt: Text("昵称（可选；更新个人展示名）").foregroundColor(Brand.muted))
-                            .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
-                            .textInputAutocapitalization(.words).brandPanel()
-                        Button(busy ? "正在加入…" : "加入牌桌") { Task { await checkIn() } }
-                            .disabled(busy || loadingSeats || preview.match.status != "preparing" ||
-                                      preview.seating.memberCount >= preview.match.playerCount)
-                            .accessibilityIdentifier("checkIn.join").brandPanel()
-                    }
-                } else if joined {
-                    if let waitingMembers {
-                        ForEach(waitingMembers) { member in
-                            HStack {
-                                Text(member.displayName)
-                                if member.isOwner { Text("房主").foregroundStyle(Brand.gold) }
-                            }.brandPanel()
-                        }
-                    }
-                    Text("已加入牌桌，等待房主抽风定座")
-                        .accessibilityIdentifier("checkIn.waiting").brandPanel()
-                    Button("查看牌桌") { onCompleted(destination.matchID) }
-                        .accessibilityIdentifier("checkIn.viewTable").brandPanel()
-                }
-                if recoverableKey == destinationKey && preview == nil && !joined {
-                    Button("已加入？找回成员身份") { Task { await recoverCheckIn() } }
-                        .disabled(busy || loadingSeats).brandPanel()
-                }
-                if !joined {
-                    Button("刷新成员") { Task { await loadSeats() } }
-                        .disabled(loadingSeats || busy).brandPanel()
-                }
-            } header: { BrandSectionHeader(joined ? "已加入牌桌" : "加入牌桌") }
-        }
-    }
-    private func requestCamera() {
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized: scanning = true
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .video) { allowed in
-                DispatchQueue.main.async {
-                    if allowed { scanning = true }
-                    else { notice = "相机权限未授予，请粘贴签到链接或到系统设置开启相机权限" }
-                }
-            }
-        default: notice = "相机不可用；请粘贴签到链接或到系统设置开启权限"
-        }
-    }
-    private func lookupCode() async {
-        guard !busy, session.authenticated else { return }
-        busy = true; notice = nil; resolved = nil
+
+    @MainActor private func joinByCode() async {
+        guard let canonical = JoinFlow.canonicalCode(code), !busy else { return }
+        busy = true
+        error = nil
+        notice = nil
         defer { busy = false }
-        guard let canonical = JoinFlow.canonicalCode(code) else {
-            notice = "请输入 6 位房间码（不含 I、O、0、1）"
+        do {
+            let match = try await service.joinByCode(canonical)
+            onJoined(match)
+        } catch let failure as APIError {
+            self.error = APIErrorCopy.text(failure)
+        } catch {
+            self.error = "网络异常，请稍后重试。"
+        }
+    }
+
+    @MainActor private func joinByLink() async {
+        guard let destination = JoinDestination(link), !busy else {
+            error = "加入链接无效，请检查后重试，或使用房间码。"
             return
         }
-        do {
-            let found: JoinCodeDTO = try await session.api.get("/api/matches/by-code/\(canonical)")
-            guard JoinFlow.canonicalCode(code) == canonical, input.isEmpty else { return }
-            resolved = found
-        } catch let failure as APIError {
-            guard JoinFlow.canonicalCode(code) == canonical, input.isEmpty else { return }
-            notice = APIErrorCopy.text(failure)
-        } catch {
-            guard JoinFlow.canonicalCode(code) == canonical, input.isEmpty else { return }
-            notice = error.localizedDescription
+        guard destination.token != nil || destination.code != nil else {
+            // API 实测：无凭证的链接会被 400 missing_credential；本机先提示，不发请求。
+            error = "此链接没有加入凭证，请用房间码加入，或请房主重新分享带凭证的链接。"
+            return
         }
-    }
-    private func loadSeats() async {
-        guard let destination = destination, let key = destinationKey else { return }
-        seatsRequest += 1
-        let request = seatsRequest
-        loadingSeats = true
-        defer { if seatsRequest == request { loadingSeats = false } }
-        do {
-            let seats = try await session.api.checkInSeats(matchID: destination.matchID, token: destination.token)
-            guard !Task.isCancelled, seatsRequest == request, destinationKey == key else { return }
-            guard seats.match.id == destination.matchID else {
-                throw APIError(status: nil, message: "座位预览与签到链接不匹配")
-            }
-            preview = seats
-            previewKey = key
-            recoverableKey = nil
-            // iosfix10 M2: a successful preview clears any earlier
-            // failure banner (the started-match notice below still
-            // overrides this when the match already started).
-            notice = nil
-            if seats.caller.isOwner {
-                onCompleted(destination.matchID)
-                return
-            }
-            joined = seats.caller.isMember
-            if seats.match.status != "preparing" {
-                notice = APIErrorCopy.text(APIError(status: 409, code: "match_already_started", message: ""))
-            }
-        } catch let failure as APIError {
-            guard seatsRequest == request, destinationKey == key else { return }
-            preview = nil; previewKey = nil
-            recoverableKey = failure.code == "token_consumed_or_expired" ? key : nil
-            notice = APIErrorCopy.text(failure)
-        } catch {
-            guard seatsRequest == request, destinationKey == key else { return }
-            preview = nil; previewKey = nil
-            recoverableKey = nil
-            notice = "网络异常，请稍后重试。"
-        }
-    }
-    private func recoverCheckIn() async {
-        guard !busy, let destination, let key = destinationKey, recoverableKey == key else { return }
         busy = true
+        error = nil
+        notice = nil
         defer { busy = false }
         do {
-            let result: CheckInResultDTO = try await session.api.checkIn(
-                matchID: destination.matchID,
-                command: CheckInCommand(token: destination.token, alias: nil))
-            guard destinationKey == key else { return }
-            joined = true
-            recoverableKey = nil
-            notice = nil
-            waitingMembers = [MatchMemberDTO(principalId: result.member.principalId,
-                                             displayName: result.member.displayName, isOwner: false,
-                                             seatNo: nil, wind: nil)]
-            Task { await refreshWaitingMembers(matchID: destination.matchID, key: key) }
+            let match = try await service.joinLink(destination)
+            onJoined(match)
         } catch let failure as APIError {
-            guard destinationKey == key else { return }
-            if failure.code == "owner_auto_check_in" { onCompleted(destination.matchID); return }
-            notice = APIErrorCopy.text(failure)
+            self.error = APIErrorCopy.text(failure)
         } catch {
-            guard destinationKey == key else { return }
-            notice = error.localizedDescription
+            self.error = "网络异常，请稍后重试。"
         }
-    }
-    private func checkIn() async {
-        guard !busy, !loadingSeats, let destination, let key = destinationKey,
-              let current = preview, previewKey == key, current.match.status == "preparing",
-              !current.caller.isOwner, !current.caller.isMember,
-              current.seating.memberCount < current.match.playerCount else { return }
-        busy = true; notice = nil
-        defer { busy = false }
-        do {
-            let chosenAlias = alias.trimmingCharacters(in: .whitespacesAndNewlines)
-            let result: CheckInResultDTO = try await session.api.checkIn(
-                matchID: destination.matchID,
-                command: CheckInCommand(token: destination.token, alias: chosenAlias.isEmpty ? nil : chosenAlias))
-            guard destinationKey == key else { return }
-            joined = true
-            notice = nil
-            waitingMembers = current.members.contains(where: { $0.principalId == result.member.principalId })
-                ? current.members
-                : current.members + [MatchMemberDTO(principalId: result.member.principalId,
-                                                    displayName: result.member.displayName, isOwner: false,
-                                                    seatNo: nil, wind: nil)]
-            Task { await refreshWaitingMembers(matchID: destination.matchID, key: key) }
-        } catch let failure as APIError {
-            guard destinationKey == key else { return }
-            if failure.code == "owner_auto_check_in" { onCompleted(destination.matchID); return }
-            notice = APIErrorCopy.text(failure)
-            if failure.code == "match_full" { await loadSeats() }
-            if JoinFlow.tokenExpired(failure) {
-                preview = nil; previewKey = nil
-                resolved = nil; input = ""
-            }
-        } catch {
-            guard destinationKey == key else { return }
-            notice = error.localizedDescription
-        }
-    }
-    private func refreshWaitingMembers(matchID: String, key: String) async {
-        guard let updated: TableSnapshot = try? await session.api.get("/api/matches/\(matchID)"),
-              destinationKey == key, joined, updated.match.id == matchID else { return }
-        waitingMembers = updated.members
     }
 }

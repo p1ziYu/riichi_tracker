@@ -24,6 +24,7 @@ class ApiClient(private val store: TokenStore, val client: OkHttpClient = OkHttp
 
     override suspend fun get(path: String): String = call(path)
     override suspend fun post(path: String, body: String): String = call(path, body)
+    override suspend fun patch(path: String, body: String): String = call(path, body, method = "PATCH")
     // iosfix6 item 5: DELETE for owner preparing rooms; hide/unhide go
     // through post() like every other write.
     suspend fun delete(path: String): String = call(path, method = "DELETE")
@@ -35,6 +36,7 @@ class ApiClient(private val store: TokenStore, val client: OkHttpClient = OkHttp
             builder.header("Origin", "https://riichi.p1ziyu.com")
         if (token != null) builder.header("Authorization", "Bearer $token")
         if (method == "DELETE") builder.delete()
+        else if (method == "PATCH") builder.patch((body ?: "{}").toRequestBody("application/json".toMediaType()))
         else if (body == null) builder.get()
         else builder.post(body.toRequestBody("application/json".toMediaType()))
         try {

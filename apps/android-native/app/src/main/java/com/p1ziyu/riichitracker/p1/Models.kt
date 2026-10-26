@@ -1,108 +1,103 @@
 package com.p1ziyu.riichitracker.p1
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonPrimitive
 
-@Serializable data class MatchSummary(
-    val id: String, val status: String, val playerCount: Int, val createdAt: String,
-    val updatedAt: String? = null, val rulesSnapshot: JsonObject? = null,
-    val rulesetVersionId: String? = null, val isOwner: Boolean = false,
-    val hidden: Boolean = false,
-)
-@Serializable data class TemplateDto(
-    val versionId: String, val name: String, val scope: String,
-    val reviewStatus: String, val config: JsonObject? = null,
-    val templateKey: String? = null, val kind: String? = null,
-)
-@Serializable data class MatchDto(
-    val id: String, val status: String, val playerCount: Int,
-    val rulesSnapshot: JsonObject? = null, val rulesetVersionId: String? = null,
-    val createdAt: String? = null, val ownerPrincipalId: String? = null,
-    val joinCode: String? = null, val version: Long? = null,
-    val seatingDrawnAt: String? = null, val dealerSeatNo: Int? = null,
-    val settlementConfirmed: Boolean = false,
-)
-@Serializable data class SeatDto(
-    val seatNo: Int, val displayName: String? = null, val points: Int? = null,
-    val status: String? = null, val principalId: String? = null,
-)
-@Serializable data class RiichiUsage(val declares: Int = 0, val cancels: Int = 0)
-@Serializable data class HandSeatDto(
-    val seatNo: Int, val isRiichi: Boolean? = null, val points: Int? = null,
-    val riichiChangeUsage: RiichiUsage = RiichiUsage(),
-)
-@Serializable data class CurrentHandDto(
-    val id: String? = null, val roundWind: String? = null, val roundNumber: Int? = null,
-    val dealerSeatNo: Int? = null, val honba: Int? = null, val riichiPool: Int? = null,
-    val markRevision: Long? = null, val status: String? = null,
-    val seats: List<HandSeatDto> = emptyList(),
-)
-@Serializable data class TableSnapshot(
-    val match: MatchDto, val seats: List<SeatDto>, val currentHand: CurrentHandDto? = null,
-    val members: List<MemberDto> = emptyList(),
-)
-@Serializable data class HandDeltaDto(val seatNo: Int, val netPoints: Int)
-@Serializable data class HandDto(
-    val handNo: Int, val roundWind: String, val roundNumber: Int,
-    val dealerSeatNo: Int, val honba: Int, val kind: String,
-    val perSeat: List<HandDeltaDto>,
-)
-@Serializable data class StandingDto(
-    val seatNo: Int, val rank: Int, val finalPoints: Int, val totalTenths: Int,
-)
-@Serializable data class SettlementPreview(
-    val terminalTenths: List<Int>, val standings: List<StandingDto> = emptyList(),
-)
-@Serializable data class PaymentPart(val reason: String, val amount: Int)
-@Serializable data class PaymentSeat(val seatNo: Int, val netPoints: Int, val breakdown: List<PaymentPart> = emptyList())
-@Serializable data class NextHandDto(val roundWind: String, val roundNumber: Int, val dealerSeatNo: Int, val honba: Int, val riichiPool: Int)
-@Serializable data class PaymentPreview(val perSeat: List<PaymentSeat>, val nextHand: NextHandDto)
-@Serializable data class CreatedMatch(val match: CreatedMatchData)
-@Serializable data class CreatedMatchData(val id: String, val joinCode: String? = null)
-@Serializable data class CheckInTokenDto(val token: String, val expiresAt: String)
-@Serializable data class ByCodeDto(val matchId: String, val token: String, val expiresAt: String)
-@Serializable data class MemberDto(
-    val principalId: String, val displayName: String, val isOwner: Boolean = false,
-    val seatNo: Int? = null, val wind: String? = null,
-)
-@Serializable data class CheckInCallerDto(val principalId: String, val isOwner: Boolean, val isMember: Boolean)
-@Serializable data class SeatingDto(
-    val drawn: Boolean, val dealerSeatNo: Int? = null, val memberCount: Int, val seatedCount: Int,
-)
-@Serializable data class CheckInSeatsDto(
-    val match: CheckInMatchDto, val caller: CheckInCallerDto, val members: List<MemberDto>,
-    val seating: SeatingDto, val seats: List<SeatDto> = emptyList(),
-)
-@Serializable data class CheckInMatchDto(val id: String, val playerCount: Int, val status: String)
-@Serializable data class CheckInRequestDto(val token: String, val alias: String? = null)
-@Serializable data class CheckInDto(val member: CheckInMemberDto, val seated: Boolean, val grantId: String)
-@Serializable data class CheckInMemberDto(val principalId: String, val displayName: String)
-@Serializable data class DrawSeatsDto(val seats: List<DrawSeatDto>, val dealerSeatNo: Int)
-@Serializable data class DrawSeatDto(
-    val seatNo: Int, val principalId: String, val displayName: String, val wind: String,
-)
-@Serializable data class ReassignDto(val fromSeatNo: Int, val toSeatNo: Int, val swapped: Boolean)
-@Serializable data class RemoveMemberDto(val removed: Boolean)
+/**
+ * Final-native model (spec §1–§2): only final scores are recorded.
+ * No per-hand rounds, no settlements, no draw-winds, no templates.
+ * Every field that the new API may omit has a default, so a summary
+ * shape from /api/matches/mine and a full detail shape both decode.
+ */
 @Serializable data class PrincipalDto(
-    val id: String, val displayName: String, val type: String, val createdAt: String? = null,
+    val id: String, val displayName: String, val type: String = "account",
+    val createdAt: String? = null,
 )
-@Serializable data class MeResponse(val principal: PrincipalDto)
-@Serializable data class TicketDto(val ticket: String)
-@Serializable data class ApiErrorDto(val message: String? = null, val error: String? = null)
-data class RuleDetails(val title: String, val source: String, val reviewStatus: String, val customizedKeys: List<String>)
 
-fun poolSticks(points: Int): Int = points / 1000
+/** GET /api/me: isAdmin added by spec §2; old responses without it decode as false. */
+@Serializable data class MeResponse(
+    val principal: PrincipalDto, val isAdmin: Boolean = false,
+)
 
-fun ruleDetails(snapshot: JsonObject?, template: TemplateDto?): RuleDetails {
-    val metadata = snapshot?.get("metadata") as? JsonObject
-    val name = metadata?.get("baseTemplateName")?.jsonPrimitive?.content ?: template?.name ?: "规则模板未提供"
-    val source = template?.scope ?: metadata?.get("baseTemplateScope")?.jsonPrimitive?.content ?: "来源未提供"
-    val review = template?.reviewStatus ?: metadata?.get("reviewStatus")?.jsonPrimitive?.content ?: "审核状态未提供"
-    val base = (metadata?.get("baseConfig") as? JsonObject) ?: template?.config
-    val excluded = setOf("metadata", "oka", "okaTenths", "umaTenths", "startPoints", "endTarget", "ryuukyokuPenaltyTotal", "ryuukyokuPoolTotal", "bustEndsMatch")
-    val changes = if (snapshot != null && base != null) snapshot.keys.filter {
-        it !in excluded && it in base && snapshot[it] != base[it]
-    }.sorted() else emptyList()
-    return RuleDetails(name, source, review, changes)
+@Serializable data class MemberDto(
+    val userId: String, val displayName: String,
+    // Tolerate the old member shape (principalId) if a backend still sends it.
+    val principalId: String? = null, val isOwner: Boolean = false,
+    val isHost: Boolean = false, // new contract field (spec follow-up §5)
+) {
+    val id: String get() = userId.ifBlank { principalId.orEmpty() }
+    val host: Boolean get() = isHost || isOwner
 }
+
+/** New contract: seats[{seatNo, userId, wind}], empty until full (follow-up §5). */
+@Serializable data class SeatDto(val userId: String, val wind: String, val seatNo: Int? = null)
+
+@Serializable data class FinalScoreDto(val wind: String, val score: Int, val rank: Int? = null)
+
+@Serializable data class MatchDetail(
+    val id: String,
+    val mode: String? = null, // '3p' | '4p'
+    val status: String = "waiting",
+    val hostId: String? = null,
+    val ownerPrincipalId: String? = null, // tolerated old field
+    val joinCode: String? = null,
+    val members: List<MemberDto> = emptyList(),
+    val seats: List<SeatDto> = emptyList(),
+    val finalScores: List<FinalScoreDto>? = null,
+    val createdAt: String? = null,
+    val startedAt: String? = null,
+    val finishedAt: String? = null,
+    val correctedAt: String? = null,
+    // Tolerated old summary fields, so /api/matches/mine rows decode either way.
+    val playerCount: Int? = null,
+) {
+    val host: String? get() = hostId ?: ownerPrincipalId
+    /** Seats if drawn, else members in join order (waiting screen). */
+    val seatCount: Int get() = if (seats.isNotEmpty()) seats.size else members.size
+    val expectedCount: Int get() = when (mode) {
+        "3p" -> 3
+        "4p" -> 4
+        else -> playerCount ?: seatCount
+    }
+    val isHost: (String?) -> Boolean = { me -> me != null && host == me }
+    fun displayNameFor(userId: String): String =
+        members.firstOrNull { it.id == userId }?.displayName ?: "玩家"
+    fun windFor(userId: String): String? = seats.firstOrNull { it.userId == userId }?.wind
+    /** Ordered seat rows for table / final-score screens: wind order, then members. */
+    fun seatRows(): List<SeatRow> {
+        val winds = windsFor(mode ?: if (expectedCount == 3) "3p" else "4p")
+        val byWind = seats.associateBy { it.wind }
+        return winds.mapNotNull { wind ->
+            val seat = byWind[wind] ?: return@mapNotNull null
+            SeatRow(wind, seat.userId, displayNameFor(seat.userId))
+        }.ifEmpty {
+            members.mapIndexed { index, member ->
+                SeatRow(winds.getOrNull(index) ?: "?", member.id, member.displayName)
+            }
+        }
+    }
+    fun finalByWind(): Map<String, Int> =
+        finalScores?.associate { it.wind to it.score }.orEmpty()
+}
+
+data class SeatRow(val wind: String, val userId: String, val displayName: String)
+
+/** POST /api/matches {mode} response; also used for join results (same shape). */
+@Serializable data class CreatedMatch(val match: MatchDetail? = null, val id: String? = null,
+    val joinCode: String? = null) {
+    val matchId: String? get() = match?.id ?: id
+}
+
+/** GET /api/matches/by-code/:code (existing shape, kept). */
+@Serializable data class ByCodeDto(val matchId: String, val token: String? = null,
+    val expiresAt: String? = null)
+
+/** Admin (spec §2, isAdmin only). */
+@Serializable data class AdminPlayerDto(val id: String, val name: String? = null,
+    val displayName: String? = null, val matchCount: Int = 0) {
+    val label: String get() = displayName ?: name ?: id
+}
+
+@Serializable data class ApiErrorDto(val message: String? = null, val error: String? = null)
+
+/** Follow-up §5: GET /api/admin/players wraps the list. */
+@Serializable data class AdminPlayersDto(val players: List<AdminPlayerDto> = emptyList())

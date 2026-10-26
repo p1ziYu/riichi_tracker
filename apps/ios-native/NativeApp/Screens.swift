@@ -89,7 +89,7 @@ enum Brand {
     }
 }
 
-private struct EastTile: View {
+struct EastTile: View {
     var size: CGFloat = 48
 
     var body: some View {
@@ -325,40 +325,15 @@ private extension DateFormatter {
     }()
 }
 
-// iosfix10 B3: shared with LocalScreens (was private; the local
-// history rows need the same kind labels as the online history).
-func handLabel(_ kind: String) -> String {
-    switch kind.lowercased() {
-    case "ron": "荣和"
-    case "tsumo": "自摸"
-    case "draw", "ryuukyoku", "exhaustive_draw": "流局"
-    case "abortive_draw": "途中流局"
-    case "nagashi_mangan": "流局满贯"
-    case "chombo": "犯规罚符"
-    default: "其他结果"
-    }
-}
 
-private func accountLabel(_ type: String) -> String {
+// MARK: - 新模型共享文案（spec §1/§3，全中文；接口英文原文不进 UI）
+
+func accountLabel(_ type: String) -> String {
     switch type.lowercased() {
     case "anonymous", "guest": "访客"
     case "account", "user", "email", "registered": "注册用户"
     case "admin": "管理员"
     default: "账号类型未提供"
-    }
-}
-
-private func isFinished(_ status: String) -> Bool {
-    ["finished", "completed", "settled"].contains(status.lowercased())
-}
-
-private func statusLabel(_ status: String) -> String {
-    switch status.lowercased() {
-    case "preparing", "lobby": "等待抽风定座"
-    case "active", "in_progress": "牌局进行中"
-    case "finished", "completed", "settled": "牌局已结束"
-    case "abandoned", "cancelled": "牌局已取消"
-    default: "未知状态"
     }
 }
 
@@ -372,76 +347,185 @@ func windLabel(_ wind: String?) -> String {
     }
 }
 
-/// iosfix10 P9: point fields and preset chips share one format
-/// (25,000). The field's getter formats the stored digits, so typed
-/// values display grouped; parsing strips grouping separators so a
-/// grouped display (or paste) still parses back to the same value.
+/// fix10 数字格式保留：显示分组；解析走 FinalScoreLogic（支持负数与 0）。
 func formatPoints(_ value: Int) -> String { value.formatted() }
-func parsePoints(_ text: String) -> Int? {
-    let digits = text.filter { $0.isASCII && $0.isNumber }
-    guard !digits.isEmpty else { return nil }
-    return Int(digits)
+func parsePoints(_ text: String) -> Int? { FinalScoreLogic.parse(text) }
+
+func localDateOnly(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "zh_CN")
+    formatter.dateFormat = "yyyy-MM-dd HH:mm"
+    return formatter.string(from: date)
 }
 
-func reviewLabel(_ review: String) -> String {
-    switch review.lowercased() {
-    // iosfix10 P10: reviewed and approved are the same state in the
-    // UI — one word (已审核) on both wizards, matching the local
-    // wizard's bundled templates.
-    case "approved", "verified", "reviewed": "已审核"
-    case "pending", "unreviewed": "待审核"
-    case "draft": "草稿"
-    case "rejected": "未通过"
-    default: "审核状态未提供"
+struct SeatDisplay: Hashable {
+    let wind: String
+    let name: String
+}
+
+extension FinalMatch {
+    func seatDisplays() -> [SeatDisplay] {
+        if seatsDrawn {
+            // API 实测：seat 不带显示名，按 userId 查 members；查不到才用座位自带名/空座。
+            let namesByUser = Dictionary(uniqueKeysWithValues: members.map { ($0.userId, $0.displayName) })
+            return seats.sorted { (["E": 0, "S": 1, "W": 2, "N": 3][$0.wind] ?? 99) < (["E": 0, "S": 1, "W": 2, "N": 3][$1.wind] ?? 99) }
+                .map { seat in
+                    let name = seat.userId.flatMap { namesByUser[$0] } ?? seat.displayName ?? "空座"
+                    return SeatDisplay(wind: seat.wind, name: name)
+                }
+        }
+        return members.map { SeatDisplay(wind: "?", name: $0.displayName) }
+    }
+    func shareLink() -> String {
+        if let code = joinCode, !code.isEmpty {
+            return "https://riichi.p1ziyu.com/checkin/\(id)?token=\(code)"
+        }
+        return "https://riichi.p1ziyu.com/checkin/\(id)"
     }
 }
 
-private func customRuleLabel(_ key: String) -> String {
-    switch key {
-    case "startingPoints": "起始点数"
-    case "returnPoints": "返还点数"
-    case "targetPoints": "目标点数"
-    case "uma", "umaTenths": "顺位马点"
-    case "fixedSouth4EndPolicy", "automaticEndPolicy", "bustEndsGame": "终局条件"
-    case "terminalRiichiPoolPolicy": "终局供托分配"
-    case "tiedUmaPolicy": "同点顺位"
-    case "notenPenaltyTotal": "流局罚符"
-    case "honbaRon", "honbaPerPayer": "本场棒"
-    case "multiRon", "doubleRonHonbaPolicy": "多家荣和"
-    case "allowLowPointRiichi": "低点立直"
-    case "nagashiManganEnabled", "nagashiCollectsRiichiPool", "nagashiDealerRepeatRequiresTenpai": "流局满贯"
-    case "tsumoLoss": "三麻自摸损"
-    case "kiriageMangan": "切上满贯"
-    case "kazoeYakuman", "compositeYakuman", "doubleYakuman": "役满"
-    default: "其他规则调整"
-    }
-}
+// MARK: - 终局记分编辑器（在线与本地共用）
 
-private struct RuleInfo: View {
-    let snapshot: [String: JSONValue]?
-    let templates: [TemplateDTO]
-    let versionID: String?
+/// 每座一行：风 / 名 / 得点输入 / 顺位自动显示。
+/// 单位：实际点数 ÷ 100（25000 记 250）；支持负数和 0；范围 -9999~9999。
+/// 合计不对时保存禁用并中文提示；非房主只读（editable=false 时无保存键）。
+@MainActor
+struct FinalScoreEditor: View {
+    let seats: [SeatDisplay]
+    let mode: FinalMode
+    let editable: Bool
+    let initial: [String: Int]?
+    let title: String
+    let onSave: ([FinalScoreEntry]) async throws -> Void
+    let onSaved: () -> Void
+    @State private var texts: [String: String] = [:]
+    @State private var saving = false
+    @State private var error: String?
+    @Environment(\.dismiss) private var dismiss
+
+    private var parsed: [(wind: String, score: Int?)] {
+        seats.map { (wind: $0.wind, score: $0.wind == "?" ? nil : FinalScoreLogic.parse(texts[$0.wind] ?? "")) }
+    }
+    private var validation: String? {
+        FinalScoreLogic.validationError(scores: parsed, mode: mode)
+    }
+    private var sumText: String {
+        let sum = parsed.compactMap { $0.score }.reduce(0, +)
+        return "当前合计 \(sum) / \(mode.total)"
+    }
+    private var ranks: [String: Int] {
+        let complete = parsed.compactMap { entry -> (wind: String, score: Int)? in
+            guard let score = entry.score else { return nil }
+            return (wind: entry.wind, score: score)
+        }
+        guard complete.count == seats.count else { return [:] }
+        return FinalScoreLogic.ranks(for: complete, mode: mode)
+    }
 
     var body: some View {
-        let details = ruleDetails(snapshot: snapshot, template: templates.first { $0.versionId == versionID })
-        VStack(alignment: .leading, spacing: 4) {
-            Text("规则：\(details.title)")
-            Text("来源：\(sourceLabel(details.source)) · \(reviewLabel(details.reviewStatus))")
-            Text("自定义：\(details.customizedKeys.isEmpty ? "无（按模板）" : details.customizedKeys.map(customRuleLabel).joined(separator: "、"))")
+        List {
+            Section {
+                Text("单位：实际点数 ÷ 100（例如 25000 记 250），支持负数和 0。")
+                    .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+                Text(sumText)
+                    .font(Brand.font(.headline)).foregroundStyle(validation == nil ? Brand.gain : Brand.loss)
+                    .accessibilityIdentifier("final.sum")
+                if let validation, editable {
+                    Text(validation).foregroundStyle(Brand.loss)
+                        .accessibilityIdentifier("final.sum.hint")
+                }
+                if !editable {
+                    Text("仅房主可以填写与纠正终局得点，你当前为只读查看。")
+                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+                }
+            }
+            .brandPanel()
+            Section {
+                ForEach(seats, id: \.wind) { seat in
+                    HStack(spacing: 12) {
+                        Text(windLabel(seat.wind))
+                            .font(Brand.font(.headline))
+                            .foregroundStyle(Brand.ink)
+                            .frame(width: 30, height: 30)
+                            .background(Brand.cream, in: RoundedRectangle(cornerRadius: 6))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(seat.name).font(Brand.font(.headline)).foregroundStyle(Brand.text)
+                            Text(ranks[seat.wind].map { "第 \($0) 名" } ?? "顺位待定")
+                                .font(Brand.font(.caption1)).foregroundStyle(Brand.muted)
+                        }
+                        Spacer()
+                        if editable {
+                            TextField("得点", text: Binding(
+                                get: { texts[seat.wind] ?? "" },
+                                set: { texts[seat.wind] = $0 }))
+                                .keyboardType(.numbersAndPunctuation)
+                                .multilineTextAlignment(.trailing)
+                                .monospacedDigit()
+                                .padding(8)
+                                .background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
+                                .frame(width: 110)
+                                .accessibilityIdentifier("final.score.\(seat.wind)")
+                        } else {
+                            Text(initial?[seat.wind].map { formatPoints($0) } ?? "—")
+                                .font(Brand.font(.headline)).monospacedDigit()
+                                .accessibilityIdentifier("final.score.\(seat.wind)")
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            } header: { BrandSectionHeader("终局得点") }
+            .brandPanel()
+            if let error {
+                Section { Text(error).foregroundStyle(Brand.loss) }.brandPanel()
+            }
+            if editable {
+                Section {
+                    Button(saving ? "保存中…" : "保存终局得点") {
+                        Task {
+                            guard !saving, validation == nil else { return }
+                            saving = true
+                            error = nil
+                            defer { saving = false }
+                            do {
+                                let entries = FinalScoreLogic.entriesWithRanks(
+                                    parsed.map { (wind: $0.wind, score: $0.score ?? 0) }, mode: mode)
+                                try await onSave(entries)
+                                onSaved()
+                                dismiss()
+                            } catch let failure as APIError {
+                                self.error = APIErrorCopy.text(failure)
+                            } catch {
+                                self.error = error.localizedDescription
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Brand.gold)
+                    .foregroundStyle(Brand.background)
+                    .disabled(saving || validation != nil)
+                    .accessibilityIdentifier("final.save")
+                }
+                .brandPanel()
+            }
         }
-        .font(Brand.font(.subheadline))
-        .foregroundStyle(Brand.muted)
-    }
-
-    private func sourceLabel(_ source: String) -> String {
-        switch source {
-        case "system", "global", "public": "系统模板"
-        case "private", "mine": "私有模板"
-        default: "来源未提供"
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Brand.background)
+        .tint(Brand.gold)
+        .foregroundStyle(Brand.text)
+        .navigationTitle(title)
+        .keyboardDismissal()
+        .onAppear {
+            if texts.isEmpty {
+                for seat in seats {
+                    texts[seat.wind] = initial?[seat.wind].map { String($0) } ?? ""
+                }
+            }
         }
     }
-
 }
+
+// MARK: - 登录（保留 fix10 英文映射：失败只显示中文）
 
 struct AuthScreen: View {
     @ObservedObject var session: AppSession
@@ -511,16 +595,14 @@ struct AuthScreen: View {
                         busy = true; error = nil
                         defer { busy = false }
                         do { try await session.signInGuest() }
-                        // iosfix10 B1: never render a raw error (the
-                        // server's English message) on the login screen.
                         catch let failure as APIError { self.error = APIErrorCopy.text(failure) }
                         catch { self.error = "网络异常，请稍后重试。" }
                     }
                 }
                 .disabled(busy)
-                Text("访客扫码或输入房间码即可加入牌桌，等待房主抽风定座；不能开桌。本地模式不使用此身份。")
+                Text("访客扫码或输入房间码即可加入牌桌，人齐后自动分座；不能开桌。本地模式不使用此身份。")
                     .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
-                Text("本地无身份模式在“本地牌桌”标签中开桌；不登录、不创建访客、不上传。")
+                Text("本地无身份模式在“本地”标签中开桌；不登录、不创建访客、不上传。")
                     .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                 if let warning = session.sessionError {
                     Text(warning).font(Brand.font(.footnote)).foregroundStyle(Brand.loss)
@@ -561,8 +643,6 @@ struct AuthScreen: View {
         do {
             try await session.signIn(email: email.trimmingCharacters(in: .whitespacesAndNewlines), password: password, name: registering ? name.trimmingCharacters(in: .whitespacesAndNewlines) : nil)
         } catch let failure as APIError {
-            // iosfix10 B1: map through APIErrorCopy so a failed login
-            // shows 邮箱或密码不正确 instead of the server's English.
             self.error = APIErrorCopy.text(failure)
         } catch {
             self.error = "网络异常，请稍后重试。"
@@ -570,172 +650,111 @@ struct AuthScreen: View {
     }
 }
 
-@MainActor struct MatchListScreen: View {
+// MARK: - 大厅 / 首页（在线）
+
+@MainActor
+struct LobbyScreen: View {
     @ObservedObject var session: AppSession
-    let lobby: Bool
-    let onRevoked: @MainActor () -> Void
-    let onJoin: () -> Void
-    @State private var matches: [MatchSummary]?
-    @State private var templates: [TemplateDTO] = []
+    let service: any FinalMatchService
+    let isAdmin: Bool
+    let navigateToTable: (String) -> Void
+    @State private var matches: [FinalMatch] = []
     @State private var loading = false
     @State private var error: String?
-    @State private var pendingRefresh = false
     @State private var showCreate = false
-    @State private var createdMatchID: String?
-    // iosfix6 item 5: swipe-to-delete. Only an owner deleting a preparing
-    // (not yet drawn) room calls DELETE; every other row calls /hide, which
-    // is per-user and reversible via the undo banner. A refused DELETE
-    // (409 match_not_deletable) offers hide instead of failing silently.
-    @State private var pendingDelete: MatchSummary?
-    @State private var deleteRefused: MatchSummary?
-    @State private var hiddenUndoId: String?
-    @State private var deleteError: String?
-    @State private var deleting = false
+    @State private var showJoin = false
+    @State private var showAdmin = false
+    @State private var createdMatch: FinalMatch?
 
-    private func isDeletable(_ match: MatchSummary) -> Bool {
-        match.isOwner && match.status == "preparing"
+    private var inProgress: [FinalMatch] {
+        matches.filter { $0.isInProgress || $0.isWaiting }.sorted { ($0.createdAt ?? "") > ($1.createdAt ?? "") }
+    }
+    private var finished: [FinalMatch] {
+        matches.filter { $0.isFinished || $0.isCancelled }.sorted { ($0.createdAt ?? "") > ($1.createdAt ?? "") }
     }
 
-    private func performDelete(_ match: MatchSummary, asHide: Bool = false) {
-        guard !deleting else { return }
-        deleting = true
-        let hide = asHide || !isDeletable(match)
-        Task {
-            do {
-                if hide { try await session.api.hideMatch(match.id) }
-                else { try await session.api.deleteMatch(match.id) }
-                matches?.removeAll { $0.id == match.id }
-                if hide { hiddenUndoId = match.id }
-                Task { await refresh() }
-            } catch let failure as APIError where failure.code == "match_not_deletable" && !hide {
-                deleteRefused = match
-            } catch let failure as APIError {
-                deleteError = failure.code == "forbidden"
-                    ? (hide ? "你不是这张牌桌的成员，无法隐藏它。" : "只有房主可以删除这张牌桌。")
-                    : APIErrorCopy.text(failure)
-            } catch {
-                deleteError = "操作失败，请稍后重试。"
-            }
-            deleting = false
-        }
-    }
-
-    private func unhide(_ id: String) {
-        Task {
-            do {
-                try await session.api.unhideMatch(id)
-                hiddenUndoId = nil
-                await refresh()
-            } catch let failure as APIError {
-                deleteError = APIErrorCopy.text(failure)
-            } catch {
-                deleteError = "操作失败，请稍后重试。"
-            }
-        }
-    }
-
-    private var ordered: [MatchSummary] {
-        (matches ?? []).sorted { lhs, rhs in
-            if lobby && isFinished(lhs.status) != isFinished(rhs.status) {
-                return !isFinished(lhs.status)
-            }
-            return lhs.createdAt > rhs.createdAt
-        }
-    }
-
-    private var liveMatches: [MatchSummary] { ordered.filter { !isFinished($0.status) } }
-    private var recentMatches: [MatchSummary] { lobby ? ordered.filter { isFinished($0.status) } : ordered }
-
-    private func row(_ match: MatchSummary) -> some View {
-        TrailingSwipeDeleteRow(deleteIdentifier: "online.match.delete.\(match.id)") { pendingDelete = match } content: {
-        NavigationLink(value: match.id) {
+    private func row(_ match: FinalMatch) -> some View {
+        Button { navigateToTable(match.id) } label: {
             HStack(alignment: .top, spacing: 14) {
                 EastTile(size: 30)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(ruleDetails(snapshot: match.rulesSnapshot, template: templates.first { $0.versionId == match.rulesetVersionId }).title)
+                    Text("\(match.mode.label) · \(match.statusLabel())")
                         .font(Brand.font(.headline)).foregroundStyle(Brand.gold)
-                    Text("\(statusLabel(match.status)) · \(match.playerCount) 麻")
+                    Text("成员 \(match.members.count)/\(match.mode.playerCount) · \(match.joinCode.map { "房间码 \($0)" } ?? "无房间码")")
                         .foregroundStyle(Brand.text)
-                    Text(localDate(match.createdAt))
+                    Text(match.createdAt.map(localDate) ?? "时间未提供")
                         .font(Brand.font(.subheadline)).foregroundStyle(Brand.muted).monospacedDigit()
-                    Text("牌桌 \(match.id)")
-                        .font(Brand.font(.caption2)).foregroundStyle(Brand.muted).textSelection(.enabled)
                 }
             }
             .padding(.vertical, 5)
             .padding(.horizontal, Brand.cardInnerPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .buttonStyle(.plain)
         .brandCard()
         .padding(.vertical, 4)
-        .accessibilityIdentifier(!isFinished(match.status) ? "online.match.active" : "online.match.finished")
-        }
-        .listRowInsets(Brand.swipeRowInsets)
+        .accessibilityIdentifier(match.isFinished ? "online.match.finished" : (match.isWaiting ? "online.match.waiting" : "online.match.in_progress"))
+        .listRowInsets(Brand.rowInsets)
     }
 
     var body: some View {
         List {
-            if lobby {
-                Section {
-                    VStack(alignment: .leading, spacing: 16) {
-                        HStack(spacing: 10) {
-                            EastTile(size: 38)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("一姬").font(Brand.display(29)).foregroundStyle(Brand.text)
-                                Text("ICHIHIME").font(Brand.font(.caption2)).tracking(3).foregroundStyle(Brand.gold)
-                            }
-                            Spacer()
-                            EastTile(size: 66).rotationEffect(.degrees(12))
+            Section {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(spacing: 10) {
+                        EastTile(size: 38)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("一姬").font(Brand.display(29)).foregroundStyle(Brand.text)
+                            Text("ICHIHIME").font(Brand.font(.caption2)).tracking(3).foregroundStyle(Brand.gold)
                         }
-                        Text("落座，即开局。").font(Brand.display(27)).foregroundStyle(Brand.text)
-                        Text("从规则到结算，给同桌每一分一个清楚的去处。")
-                            .font(Brand.font(.subheadline)).foregroundStyle(Brand.muted)
-                        HStack(spacing: 12) {
-                            Button {
-                                showCreate = true
-                            } label: {
-                                Text("开桌 ↗").frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(Brand.gold)
-                            .foregroundStyle(Brand.background)
-                            .disabled(!session.canHost)
-                            .accessibilityIdentifier("online.wizard.open")
-                            Button {
-                                onJoin()
-                            } label: {
-                                Text("加入牌桌").frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(Brand.gold)
-                            .foregroundStyle(Brand.gold)
-                            .accessibilityIdentifier("online.join.open")
-                        }
-                        Text(session.canHost ? "选择模板、调整规则、预览支付后创建；加入牌桌可用房间码或扫码" : "访客不能开桌，可用「加入牌桌」扫码或输房间码加入")
-                            .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+                        Spacer()
+                        EastTile(size: 66).rotationEffect(.degrees(12))
                     }
-                    .padding(Brand.cardInnerPadding)
-                    .background(LinearGradient(stops: [
-                        .init(color: Brand.panel, location: 0),
-                        .init(color: Color(red: 27 / 255, green: 56 / 255, blue: 68 / 255), location: 0.58),
-                        .init(color: Color(red: 38 / 255, green: 78 / 255, blue: 66 / 255), location: 1)
-                    ], startPoint: .topLeading, endPoint: .bottomTrailing),
-                    in: RoundedRectangle(cornerRadius: 18))
-                    // iosfix9: strokeBorder keeps the 1pt gold stroke
-                    // INSIDE the box (a centered stroke extends 0.5pt
-                    // past it, which is how the hero measured 1pt wider
-                    // per side than the rows on a real phone). Clip so
-                    // the rotated 66pt tile cannot poke past a corner.
-                    .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Brand.gold.opacity(0.7), lineWidth: 1))
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
-                    // iosfix8 item 1: hero shares the horizontal token
-                    // with the rows (Brand.heroRowInsets).
-                    .listRowInsets(Brand.heroRowInsets)
-                    .listRowBackground(Brand.background)
-                    .listRowSeparator(.hidden)
+                    Text("落座，即开局。").font(Brand.display(27)).foregroundStyle(Brand.text)
+                    Text("只记终局得点：人齐自动分座，房主填终局分，合计对上才能保存。")
+                        .font(Brand.font(.subheadline)).foregroundStyle(Brand.muted)
+                    HStack(spacing: 12) {
+                        Button {
+                            showCreate = true
+                        } label: {
+                            Text("开桌 ↗").frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Brand.gold)
+                        .foregroundStyle(Brand.background)
+                        .disabled(!session.canHost && !(service is StubFinalService))
+                        .accessibilityIdentifier("online.create.open")
+                        Button {
+                            showJoin = true
+                        } label: {
+                            Text("加入牌桌").frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(Brand.gold)
+                        .foregroundStyle(Brand.gold)
+                        .accessibilityIdentifier("online.join.open")
+                    }
+                    if isAdmin {
+                        Button("管理入口（管理员）") { showAdmin = true }
+                            .accessibilityIdentifier("online.admin.open")
+                    }
+                    Text(session.canHost || service is StubFinalService ? "开桌选择三麻或四麻；加入牌桌可用房间码、扫码或粘贴链接" : "访客不能开桌，可用「加入牌桌」扫码或输房间码加入")
+                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                 }
+                .padding(Brand.cardInnerPadding)
+                .background(LinearGradient(stops: [
+                    .init(color: Brand.panel, location: 0),
+                    .init(color: Color(red: 27 / 255, green: 56 / 255, blue: 68 / 255), location: 0.58),
+                    .init(color: Color(red: 38 / 255, green: 78 / 255, blue: 66 / 255), location: 1)
+                ], startPoint: .topLeading, endPoint: .bottomTrailing),
+                in: RoundedRectangle(cornerRadius: 18))
+                .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Brand.gold.opacity(0.7), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 18))
+                .listRowInsets(Brand.heroRowInsets)
+                .listRowBackground(Brand.background)
+                .listRowSeparator(.hidden)
             }
-            if loading && matches == nil {
+            if loading && matches.isEmpty {
                 ProgressView("读取对局中…").padding(Brand.cardInnerPadding).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
             }
             if let error {
@@ -744,305 +763,356 @@ struct AuthScreen: View {
                     Button("重试") { Task { await refresh() } }.padding(Brand.cardInnerPadding).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
                 }
             }
-            if lobby {
-                Section {
-                    if matches != nil && liveMatches.isEmpty { Text("暂无进行中的牌桌").foregroundStyle(Brand.muted).padding(Brand.cardInnerPadding).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets) }
-                    ForEach(liveMatches, id: \.id) { match in row(match) }
-                } header: { BrandSectionHeader("正在进行的牌桌", leadingShift: BrandSectionHeader.plainLeadingShift) }
-            }
             Section {
-                if matches != nil && recentMatches.isEmpty {
+                if matches.isEmpty && !loading { Text("暂无进行中的牌桌").foregroundStyle(Brand.muted).padding(Brand.cardInnerPadding).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets) }
+                ForEach(inProgress, id: \.id) { match in row(match) }
+            } header: { BrandSectionHeader("我的对局 · 进行中", leadingShift: BrandSectionHeader.plainLeadingShift) }
+            Section {
+                if matches.isEmpty && !loading {
                     Text("暂无对局记录，下拉刷新试试").foregroundStyle(Brand.muted).padding(Brand.cardInnerPadding).frame(maxWidth: .infinity, alignment: .leading).brandCard().listRowInsets(Brand.rowInsets)
                 }
-                ForEach(recentMatches, id: \.id) { match in row(match) }
-            } header: { BrandSectionHeader(lobby ? "战绩 · 最近对局" : "战绩 · 对局记录", leadingShift: BrandSectionHeader.plainLeadingShift) }
+                ForEach(finished, id: \.id) { match in row(match) }
+            } header: { BrandSectionHeader("历史 · 最近已结束", leadingShift: BrandSectionHeader.plainLeadingShift) }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(Brand.background)
         .tint(Brand.gold)
         .foregroundStyle(Brand.text)
-        .navigationTitle(lobby ? "大厅" : "战绩")
+        .navigationTitle("大厅")
         .tabBarClearance()
         .refreshable { await refresh() }
         .task { await refresh() }
-        .onChange(of: session.generationID) { _, _ in
-            matches = nil
-            templates = []
-            createdMatchID = nil
-            Task { await refresh() }
-        }
+        .onChange(of: session.generationID) { _, _ in Task { await refresh() } }
         .sheet(isPresented: $showCreate) {
+            // 单 sheet 内换内容：开桌成功后同一 sheet 切到分享页。
+            // 旧的双 sheet 链（关开桌 sheet + 弹分享 sheet）在同一更新里
+            // 会丢第二个呈现，导致分享页永远出不来（UI 巡游实测）。
             NavigationStack {
-                RulesWizard(api: session.api) { id in
-                    createdMatchID = id
-                    showCreate = false
+                if let createdMatch {
+                    ShareWaitingScreen(service: service, match: createdMatch) {
+                        let id = createdMatch.id
+                        showCreate = false
+                        self.createdMatch = nil
+                        navigateToTable(id)
+                        Task { await refresh() }
+                    }
+                } else {
+                    CreateMatchSheet(service: service) { match in
+                        createdMatch = match
+                        Task { await refresh() }
+                    }
+                }
+            }
+        }
+        .onChange(of: showCreate) { _, shown in
+            if !shown { createdMatch = nil }
+        }
+        .sheet(isPresented: $showJoin) {
+            NavigationStack {
+                JoinScreen(service: service) { match in
+                    showJoin = false
+                    navigateToTable(match.id)
                     Task { await refresh() }
                 }
             }
         }
-        .navigationDestination(isPresented: Binding(get: { createdMatchID != nil }, set: { if !$0 { createdMatchID = nil } })) {
-            if let createdMatchID { TableScreen(session: session, matchId: createdMatchID, onRevoked: {
-                self.createdMatchID = nil
-                onRevoked()
-            }) }
-        }
-        .safeAreaInset(edge: .bottom) {
-            if let hiddenUndoId {
-                HStack {
-                    Text("已隐藏对局记录").foregroundStyle(Brand.text)
-                    Spacer()
-                    Button("撤销") { unhide(hiddenUndoId) }
-                        .accessibilityIdentifier("online.match.unhideUndo")
-                    Button("知道了") { self.hiddenUndoId = nil }
-                }
-                .padding()
-                .background(Brand.panel)
-            }
-        }
-        .alert("删除牌桌？", isPresented: Binding(get: { pendingDelete != nil && isDeletable(pendingDelete!) }, set: { if !$0 { pendingDelete = nil } })) {
-            Button("取消", role: .cancel) { pendingDelete = nil }
-            Button("删除", role: .destructive) { if let pendingDelete { performDelete(pendingDelete) }; self.pendingDelete = nil }
-        } message: {
-            Text("这张未开始的牌桌将被永久删除，所有成员都将看不到它。此操作无法撤销。")
-        }
-        .alert("隐藏牌桌？", isPresented: Binding(get: { pendingDelete != nil && !isDeletable(pendingDelete!) }, set: { if !$0 { pendingDelete = nil } })) {
-            Button("取消", role: .cancel) { pendingDelete = nil }
-            Button("隐藏", role: .destructive) { if let pendingDelete { performDelete(pendingDelete) }; self.pendingDelete = nil }
-        } message: {
-            Text("这张牌桌只会从你的列表中隐藏，牌桌本身和其他成员不受影响。隐藏后可通过下方的撤销恢复。")
-        }
-        .alert("无法彻底删除", isPresented: Binding(get: { deleteRefused != nil }, set: { if !$0 { deleteRefused = nil } })) {
-            Button("取消", role: .cancel) { deleteRefused = nil }
-            Button("改为隐藏") { if let deleteRefused { performDelete(deleteRefused, asHide: true) }; self.deleteRefused = nil }
-        } message: {
-            Text("这张牌桌已抽风定座或已开始，无法彻底删除；可以改为仅从你的列表中隐藏。")
-        }
-        .alert("删除失败", isPresented: Binding(get: { deleteError != nil }, set: { if !$0 { deleteError = nil } })) {
-            Button("知道了", role: .cancel) { deleteError = nil }
-        } message: {
-            Text(deleteError ?? "操作失败，请稍后重试。")
+        .sheet(isPresented: $showAdmin) {
+            NavigationStack { AdminScreen(service: service) }
         }
     }
 
     @MainActor private func refresh() async {
-        guard !loading else { pendingRefresh = true; return }
+        guard !loading else { return }
         loading = true
         error = nil
-        let generation = session.generationID
-        defer {
-            loading = false
-            if pendingRefresh {
-                pendingRefresh = false
-                Task { await refresh() }
-            }
-        }
+        defer { loading = false }
         do {
-            let updated: [MatchSummary] = try await session.api.get("/api/matches?mine=1")
-            guard generation == session.generationID else { return }
-            matches = updated
+            matches = try await service.mine()
+        } catch let failure as APIError {
+            self.error = APIErrorCopy.text(failure)
         } catch {
-            guard generation == session.generationID else { return }
-            if let failure = error as? APIError, OnlineCommandPolicy.mustClearVisibleTable(failure) {
-                matches = nil
-                templates = []
-            }
-            self.error = error.localizedDescription
-        }
-        // Templates are optional metadata; the rule details still show their honest unknown values on failure.
-        if let updated: [TemplateDTO] = try? await session.api.get("/api/rulesets/templates"),
-           generation == session.generationID {
-            templates = updated
+            self.error = "网络异常，请稍后重试。"
         }
     }
 }
 
-@MainActor struct TableScreen: View {
-    @ObservedObject var session: AppSession
-    let matchId: String
-    let onRevoked: @MainActor () -> Void
-    @Environment(\.scenePhase) private var scenePhase
-    @StateObject private var live: LiveUpdates
-    @State private var snapshot: TableSnapshot?
-    @State private var hands: [HandDTO]?
-    @State private var settlement: SettlementPreview?
-    @State private var templates: [TemplateDTO] = []
-    @State private var loading = false
-    @State private var pendingRefresh = false
-    @State private var error: String?
-    @State private var visible = false
-    @State private var requestGeneration = 0
-    @State private var revoked = false
+// MARK: - 开桌（三麻/四麻选择，无模板）
 
-    init(session: AppSession, matchId: String, onRevoked: @escaping @MainActor () -> Void) {
-        self.session = session
-        self.matchId = matchId
-        self.onRevoked = onRevoked
-        _live = StateObject(wrappedValue: LiveUpdates(api: session.api))
+@MainActor
+struct CreateMatchSheet: View {
+    let service: any FinalMatchService
+    let onCreated: (FinalMatch) -> Void
+    @State private var mode: FinalMode = .four
+    @State private var busy = false
+    @State private var error: String?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        List {
+            Section {
+                Text("开桌后进入分享页：把链接、二维码或房间码发给同桌，人齐后自动分座。")
+                    .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+            }.brandPanel()
+            Section {
+                HStack(spacing: 12) {
+                    ForEach(FinalMode.allCases, id: \.self) { candidate in
+                        Button(candidate.label) { mode = candidate }
+                            .font(Brand.font(.headline, weight: .semibold))
+                            .foregroundStyle(mode == candidate ? Brand.background : Brand.cream)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(mode == candidate ? Brand.gold : Brand.deep, in: RoundedRectangle(cornerRadius: 10))
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("online.create.mode.\(candidate.rawValue)")
+                    }
+                }
+                Text("\(mode.label) · \(mode.playerCount) 人 · 终局合计 \(mode.total)（单位：实际点数 ÷ 100）")
+                    .font(Brand.font(.subheadline)).foregroundStyle(Brand.muted)
+            } header: { BrandSectionHeader("选择模式") }
+            .brandPanel()
+            if let error {
+                Section { Text(error).foregroundStyle(Brand.loss) }.brandPanel()
+            }
+            Section {
+                Button(busy ? "开桌中…" : "开桌") {
+                    Task {
+                        guard !busy else { return }
+                        busy = true
+                        error = nil
+                        defer { busy = false }
+                        do {
+                            let match = try await service.create(mode: mode)
+                            onCreated(match)
+                        } catch let failure as APIError {
+                            self.error = APIErrorCopy.text(failure)
+                        } catch {
+                            self.error = "网络异常，请稍后重试。"
+                        }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Brand.gold)
+                .foregroundStyle(Brand.background)
+                .disabled(busy)
+                .accessibilityIdentifier("online.create.confirm")
+            }.brandPanel()
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Brand.background)
+        .tint(Brand.gold)
+        .foregroundStyle(Brand.text)
+        .navigationTitle("开桌")
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("关闭") { dismiss() } } }
+    }
+}
+
+// MARK: - 分享页 / 等待人齐
+
+@MainActor
+struct ShareWaitingScreen: View {
+    let service: any FinalMatchService
+    var match: FinalMatch
+    let onEnterTable: () -> Void
+    @State private var current: FinalMatch
+    @State private var copied = false
+    @State private var refreshing = false
+    @State private var error: String?
+    @Environment(\.dismiss) private var dismiss
+
+    init(service: any FinalMatchService, match: FinalMatch, onEnterTable: @escaping () -> Void) {
+        self.service = service
+        self.match = match
+        self.onEnterTable = onEnterTable
+        _current = State(initialValue: match)
     }
 
     var body: some View {
         List {
             Section {
-                Label("连接状态：\(live.connection)", systemImage: live.connection == "实时同步中" ? "wifi" : "arrow.clockwise")
-                    .foregroundStyle(live.connection == "实时同步中" ? Brand.gain : Brand.muted)
-                    .accessibilityLabel("实时连接状态：\(live.connection)")
-                if loading && snapshot == nil { ProgressView("读取对局中…") }
-                if let error {
+                Text("把房间码发给同桌即可加入；带凭证的分享链接也可直接加入。进来即成员，不再单独签到。")
+                    .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+                if let code = current.joinCode {
+                    Text("房间码").font(Brand.font(.caption1)).foregroundStyle(Brand.muted)
+                    Text(code).font(Brand.display(36)).foregroundStyle(Brand.gold)
+                        .accessibilityIdentifier("share.joinCode")
+                    Button("复制房间码") {
+                        UIPasteboard.general.string = code
+                        copied = true
+                    }
+                    .accessibilityIdentifier("share.copyCode")
+                }
+                Text("链接").font(Brand.font(.caption1)).foregroundStyle(Brand.muted)
+                Text(current.shareLink()).font(Brand.font(.subheadline)).foregroundStyle(Brand.text).textSelection(.enabled)
+                    .accessibilityIdentifier("share.link")
+                Button("复制链接") {
+                    UIPasteboard.general.string = current.shareLink()
+                    copied = true
+                }
+                .accessibilityIdentifier("share.copyLink")
+                InvitationQR(link: current.shareLink())
+                    .frame(maxWidth: 240, maxHeight: 240)
+                    .frame(maxWidth: .infinity)
+                if copied { Text("已复制").foregroundStyle(Brand.gain) }
+            } header: { BrandSectionHeader("分享") }
+            .brandPanel()
+            Section {
+                Text("成员 \(current.members.count)/\(current.mode.playerCount) · \(current.statusLabel())")
+                    .font(Brand.font(.headline)).foregroundStyle(Brand.text)
+                ForEach(current.members, id: \.userId) { member in
+                    Text(member.displayName).foregroundStyle(Brand.text)
+                }
+                if current.isWaiting {
+                    Text("等待人齐，人齐后自动分座（东座即庄家），无需抽风、无需调座。")
+                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+                }
+                if let error { Text(error).foregroundStyle(Brand.loss) }
+                Button(refreshing ? "刷新中…" : "刷新成员") {
+                    Task {
+                        refreshing = true
+                        defer { refreshing = false }
+                        do {
+                            let mine = try await service.mine()
+                            if let updated = mine.first(where: { $0.id == current.id }) { current = updated }
+                        } catch let failure as APIError { self.error = APIErrorCopy.text(failure) }
+                        catch { self.error = "网络异常，请稍后重试。" }
+                    }
+                }
+                .accessibilityIdentifier("share.refresh")
+                Button("查看牌桌") { onEnterTable() }
+                    .accessibilityIdentifier("share.viewTable")
+            } header: { BrandSectionHeader("成员") }
+            .brandPanel()
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Brand.background)
+        .tint(Brand.gold)
+        .foregroundStyle(Brand.text)
+        .navigationTitle("分享牌桌")
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("关闭") { dismiss() } } }
+    }
+}
+
+// MARK: - 进行中桌 / 已结束桌（在线）
+
+@MainActor
+struct OnlineTableScreen: View {
+    let service: any FinalMatchService
+    let matchId: String
+    @State private var match: FinalMatch?
+    @State private var loading = false
+    @State private var error: String?
+    @State private var showFinal = false
+    @State private var showCancelConfirm = false
+    @State private var cancelling = false
+
+    private var isHost: Bool {
+        guard let match, let userId = service.currentUserId else { return false }
+        if let hostId = match.hostId { return hostId == userId }
+        // hostId 缺失时的兜底：members 的 isHost（API 实测视图字段）。
+        return match.members.first { $0.userId == userId }?.isHost ?? false
+    }
+
+    var body: some View {
+        List {
+            if loading && match == nil { ProgressView("读取对局中…") }
+            if let error {
+                Section {
                     Text("加载失败：\(error)").foregroundStyle(Brand.loss)
                     Button("重试") { Task { await refresh() } }
-                }
-                if snapshot == nil && !loading && error == nil {
-                    Text("暂无对局数据，下拉刷新试试")
-                }
+                }.brandPanel()
             }
-            .listRowBackground(Brand.deep)
-            .listRowSeparatorTint(Brand.hairline)
-            if let currentSnapshot = snapshot {
+            if let match {
                 Section {
-                    let details = ruleDetails(snapshot: currentSnapshot.match.rulesSnapshot, template: templates.first { $0.versionId == currentSnapshot.match.rulesetVersionId })
                     HStack(spacing: 12) {
                         EastTile(size: 40)
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(details.title).font(Brand.display(24)).foregroundStyle(Brand.gold)
-                            Text("\(statusLabel(currentSnapshot.match.status)) · \(currentSnapshot.match.playerCount) 麻")
+                            Text("\(match.mode.label) · \(match.statusLabel())").font(Brand.display(24)).foregroundStyle(Brand.gold)
+                            Text("成员 \(match.members.count)/\(match.mode.playerCount)")
                                 .foregroundStyle(Brand.text)
                         }
                     }
-                    Text("创建时间：\(localDate(currentSnapshot.match.createdAt))").monospacedDigit()
-                    Text("牌桌 \(currentSnapshot.match.id)")
+                    if let code = match.joinCode {
+                        Text("房间码：\(code)").font(Brand.font(.headline)).foregroundStyle(Brand.text)
+                            .accessibilityIdentifier("table.joinCode")
+                    }
+                    Text("牌桌 \(match.id)")
                         .font(Brand.font(.caption2)).foregroundStyle(Brand.muted).textSelection(.enabled)
-                    RuleInfo(snapshot: currentSnapshot.match.rulesSnapshot, templates: templates, versionID: currentSnapshot.match.rulesetVersionId)
+                    Text("创建时间：\(match.createdAt.map(localDate) ?? "未提供")").monospacedDigit()
                 } header: { BrandSectionHeader("对局信息") }
                 .brandPanel()
-                if currentSnapshot.match.status == "preparing",
-                   let ownSeat = currentSnapshot.seats.first(where: { $0.principalId == session.principalID && $0.status == "checked_in" }),
-                   // iosfix10 P4: the host is the one who starts the
-                   // game, so "等待房主开局" must not show to the host
-                   // themselves — only to non-owner members.
-                   currentSnapshot.members.first(where: { $0.principalId == session.principalID })?.isOwner != true {
-                    Section {
-                        Text("你在 \(ownSeat.seatNo + 1) 号位，等待房主开局。")
-                            .foregroundStyle(Brand.gold)
-                    }
-                    .brandPanel()
-                }
-                if currentSnapshot.match.status == "preparing" {
-                    OnlineTableActions(session: session, snapshot: currentSnapshot) { await refresh() }
-                }
                 Section {
-                    ForEach(currentSnapshot.seats.sorted { $0.seatNo < $1.seatNo }, id: \.seatNo) { seat in
-                        let preparing = currentSnapshot.match.status == "preparing"
-                        let drawn = currentSnapshot.match.seatingDrawnAt != nil
-                        // iosfix10 M1: the drawn wind is the truth in
-                        // every state, not just while preparing — the
-                        // old `preparing && drawn` gate made seats fall
-                        // back to seat-number order once the game
-                        // started. The dealer marker likewise follows
-                        // the current hand's dealer (falling back to
-                        // the match dealer before the first hand).
-                        let drawnWind = drawn
-                            ? currentSnapshot.members.first { $0.seatNo == seat.seatNo }?.wind : nil
-                        let dealerSeatNo = currentSnapshot.currentHand?.dealerSeatNo ?? currentSnapshot.match.dealerSeatNo
-                        HStack(spacing: 12) {
-                            Text(preparing && !drawn ? "·" : windLabel(drawnWind ?? ["E", "S", "W", "N"][seat.seatNo % 4]))
-                                .font(Brand.font(.headline))
-                                .foregroundStyle(Brand.ink)
-                                .frame(width: 30, height: 30)
-                                .background(Brand.cream, in: RoundedRectangle(cornerRadius: 6))
-                            VStack(alignment: .leading, spacing: 5) {
-                                // iosfix10 P3: the dealer suffix is its
-                                // own fixed-size Text, so a long name
-                                // wraps on the name while 庄家 never
-                                // splits across lines.
-                                HStack(alignment: .firstTextBaseline, spacing: 0) {
-                                    Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "空座")")
-                                    if drawn && seat.seatNo == dealerSeatNo {
-                                        Text(" · 庄家").fixedSize(horizontal: true, vertical: false)
-                                    }
+                    if match.seatsDrawn {
+                        ForEach(match.seatDisplays(), id: \.wind) { seat in
+                            HStack(spacing: 12) {
+                                Text(windLabel(seat.wind))
+                                    .font(Brand.font(.headline))
+                                    .foregroundStyle(Brand.ink)
+                                    .frame(width: 30, height: 30)
+                                    .background(Brand.cream, in: RoundedRectangle(cornerRadius: 6))
+                                Text(seat.name).font(Brand.font(.headline)).foregroundStyle(Brand.text)
+                                if seat.wind == "E" { Text("· 庄家").foregroundStyle(Brand.gold) }
+                                Spacer()
+                                if let score = match.finalScores?.first(where: { $0.wind == seat.wind }) {
+                                    Text("第 \(score.rank) 名 · \(formatPoints(score.score))")
+                                        .font(Brand.font(.subheadline, weight: .semibold)).monospacedDigit()
                                 }
-                                .font(Brand.font(.headline)).foregroundStyle(Brand.text)
-                                Text(seatLabel(seat.status))
-                                    .font(Brand.font(.caption1)).foregroundStyle(Brand.muted)
                             }
-                            Spacer(minLength: 4)
-                            Text(seat.points.map { "\($0) 点" } ?? "点数未提供")
-                                .font(Brand.font(.subheadline, weight: .semibold))
-                                .monospacedDigit()
-                                .foregroundStyle(Brand.ink)
-                                .padding(.horizontal, 9).padding(.vertical, 7)
-                                .background(Brand.cream, in: RoundedRectangle(cornerRadius: 6))
-                        }
-                        .padding(.vertical, 6)
-                        .listRowBackground(RadialGradient(colors: [
-                            Color(red: 43 / 255, green: 100 / 255, blue: 93 / 255),
-                            Color(red: 36 / 255, green: 83 / 255, blue: 79 / 255),
-                            Color(red: 23 / 255, green: 61 / 255, blue: 66 / 255)
-                        ], center: .center, startRadius: 0, endRadius: 260))
-                        .listRowSeparatorTint(Brand.gold.opacity(0.5))
-                    }
-                } header: { BrandSectionHeader("座位与点数") }
-                Section {
-                    if let hand = currentSnapshot.currentHand {
-                        Text("\(windLabel(hand.roundWind)) \(hand.roundNumber.map { String($0) } ?? "?") 局 · 庄家 \(hand.dealerSeatNo.map { String($0 + 1) } ?? "?") 号位")
-                            .monospacedDigit()
-                        Text("本场棒：\(hand.honba.map { String($0) } ?? "未提供")")
-                            .monospacedDigit()
-                        Text("立直供托：\(hand.riichiPool.map { "\($0) 点 / \($0 / 1000) 根" } ?? "未提供")")
-                            .monospacedDigit()
-                        ForEach(hand.seats.sorted { $0.seatNo < $1.seatNo }, id: \.seatNo) { seat in
-                            Text("\(seat.seatNo + 1) 号位 · \(seat.isRiichi ? "已立直" : "未立直") · 宣言 \(seat.riichiChangeUsage.declares)/2 取消 \(seat.riichiChangeUsage.cancels)/1")
-                                .monospacedDigit()
+                            .padding(.vertical, 4)
                         }
                     } else {
-                        Text("暂无进行中的牌局")
+                        ForEach(match.members, id: \.userId) { member in
+                            Text(member.displayName).foregroundStyle(Brand.text)
+                        }
+                        Text("等待人齐，人齐后自动分座。")
+                            .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                     }
-                } header: { BrandSectionHeader("当前局") }
-                .listRowBackground(Brand.deep)
-                .listRowSeparatorTint(Brand.hairline)
-                if isFinished(currentSnapshot.match.status) {
+                } header: { BrandSectionHeader("座次") }
+                .brandPanel()
+                if match.isInProgress {
                     Section {
-                        if let currentSettlement = settlement, !currentSettlement.standings.isEmpty {
-                            ForEach(currentSettlement.standings.sorted { $0.rank < $1.rank }, id: \.seatNo) { standing in
-                                Text("第 \(standing.rank) 名 · \(standing.seatNo + 1) 号位 · \(standing.finalPoints) 点 · 总成绩 \(Double(standing.totalTenths) / 10)")
+                        if isHost {
+                            Button("进入终局记分") { showFinal = true }
+                                .buttonStyle(.borderedProminent)
+                                .tint(Brand.gold)
+                                .foregroundStyle(Brand.background)
+                                .accessibilityIdentifier("online.final.open")
+                        } else {
+                            Text("终局记分由房主填写，你当前为只读。")
+                                .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+                        }
+                        if isHost {
+                            Button("取消本场", role: .destructive) { showCancelConfirm = true }
+                                .disabled(cancelling)
+                                .accessibilityIdentifier("online.cancel.open")
+                        }
+                    }.brandPanel()
+                }
+                if match.isFinished {
+                    Section {
+                        if let scores = match.finalScores {
+                            ForEach(scores.sorted { $0.rank < $1.rank }, id: \.wind) { score in
+                                Text("第 \(score.rank) 名 · \(windLabel(score.wind)) · \(formatPoints(score.score))")
                                     .monospacedDigit()
                             }
                         } else {
-                            Text("结算数据暂未提供")
+                            Text("终局得点暂未提供")
                         }
-                    } header: { BrandSectionHeader("最终排名") }
+                        if let corrected = match.correctedAt {
+                            Text("已纠正：\(localDate(corrected))").font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+                        }
+                        if isHost {
+                            Button("纠正终局得点") { showFinal = true }
+                                .accessibilityIdentifier("online.final.correct")
+                        }
+                    } header: { BrandSectionHeader("终局得点") }
                     .brandPanel()
                 }
-                if currentSnapshot.match.status != "preparing" {
-                    OnlineTableActions(session: session, snapshot: currentSnapshot) { await refresh() }
-                }
             }
-            Section {
-                Text("显示最早的已结算局摘要（最多 100 局），非完整牌谱回放；无后续分页或原始输入。")
-                    .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
-                if let recordedHands = hands {
-                    if recordedHands.isEmpty { Text("暂无牌局记录") }
-                    ForEach(recordedHands.sorted { $0.handNo < $1.handNo }, id: \.handNo) { hand in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("第 \(hand.handNo) 局 · \(windLabel(hand.roundWind)) \(hand.roundNumber) 局 · \(handLabel(hand.kind))")
-                                .font(Brand.font(.headline))
-                                .monospacedDigit()
-                            Text("庄家 \(hand.dealerSeatNo + 1) 号位 · 本场棒 \(hand.honba)")
-                                .monospacedDigit()
-                            ForEach(hand.perSeat.sorted { $0.seatNo < $1.seatNo }, id: \.seatNo) { delta in
-                                Text("\(delta.seatNo + 1) 号位：\(delta.netPoints > 0 ? "+" : "")\(delta.netPoints) 点")
-                                    .foregroundStyle(delta.netPoints > 0 ? Brand.gain : delta.netPoints < 0 ? Brand.loss : Brand.text)
-                                    .monospacedDigit()
-                            }
-                        }
-                        .brandPanel()
-                    }
-                } else {
-                    Text("牌局记录暂未提供")
-                }
-            } header: { BrandSectionHeader("局历史") }
-            .brandPanel()
         }
+        .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(Brand.background)
         .tint(Brand.gold)
@@ -1050,140 +1120,182 @@ struct AuthScreen: View {
         .navigationTitle("牌桌")
         .tabBarClearance()
         .refreshable { await refresh() }
-        .task(id: matchId) { await refresh() }
-        .onAppear {
-            visible = true
-            if scenePhase == .active { connect() }
+        .task { await refresh() }
+        .alert("取消本场？", isPresented: $showCancelConfirm) {
+            Button("保留牌桌", role: .cancel) {}
+            Button("确认取消", role: .destructive) {
+                Task {
+                    cancelling = true
+                    defer { cancelling = false }
+                    do {
+                        match = try await service.cancel(matchId: matchId)
+                    } catch let failure as APIError {
+                        self.error = APIErrorCopy.text(failure)
+                    } catch {
+                        self.error = "网络异常，请稍后重试。"
+                    }
+                }
+            }
+        } message: {
+            Text("取消后本场不再进行，此操作无法撤销。")
         }
-        .onDisappear {
-            requestGeneration += 1
-            visible = false
-            live.stop()
-        }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active && visible {
-                connect()
-                Task { await refresh() }
-            } else {
-                live.stop()
+        .sheet(isPresented: $showFinal) {
+            if let match {
+                NavigationStack {
+                    FinalScoreEditor(
+                        seats: match.seatDisplays(),
+                        mode: match.mode,
+                        editable: isHost,
+                        initial: Dictionary(uniqueKeysWithValues: (match.finalScores ?? []).map { ($0.wind, $0.score) }),
+                        title: match.isFinished ? "纠正终局得点" : "终局记分",
+                        onSave: { entries in
+                            self.match = try await service.submitFinalScores(
+                                matchId: match.id, scores: entries, correction: match.isFinished)
+                        },
+                        onSaved: { Task { await refresh() } })
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("关闭") { showFinal = false } } }
+                }
             }
         }
-        .onChange(of: session.identity) { _, identity in
-            if identity == .localOnly { clearPrivateState() }
-        }
-        .onChange(of: session.generationID) { _, _ in
-            clearPrivateState()
-            if session.authenticated && visible { Task { await refresh() } }
-        }
-    }
-
-    private func clearPrivateState() {
-        requestGeneration += 1
-        snapshot = nil
-        hands = nil
-        settlement = nil
-        templates = []
-        live.stop()
-    }
-    private func handleRevocation(updated: TableSnapshot? = nil, status: Int? = nil) -> Bool {
-        guard !revoked, OnlineCommandPolicy.wasRemoved(previous: snapshot, updated: updated,
-            status: status, principal: session.principalID) else { return false }
-        revoked = true
-        visible = false
-        pendingRefresh = false
-        clearPrivateState()
-        onRevoked()
-        return true
-    }
-
-    private func connect() {
-        live.start(matchID: matchId) { await refresh() }
     }
 
     @MainActor private func refresh() async {
-        guard !Task.isCancelled else { return }
-        guard !loading else {
-            pendingRefresh = true
-            return
-        }
+        guard !loading else { return }
         loading = true
         error = nil
-        defer {
-            loading = false
-            if pendingRefresh && visible && scenePhase == .active {
-                pendingRefresh = false
-                Task { await refresh() }
-            }
-        }
-        let path = "/api/matches/\(matchId)"
-        let current = requestGeneration
-        let principalGeneration = session.generationID
+        defer { loading = false }
         do {
-            let updated: TableSnapshot = try await session.api.get(path)
-            guard !Task.isCancelled, current == requestGeneration, principalGeneration == session.generationID else { return }
-            if handleRevocation(updated: updated) { return }
-            snapshot = updated
-            settlement = nil
-            hands = nil
-            do {
-                let updatedHands: [HandDTO] = try await session.api.get("\(path)/hands?limit=100")
-                if current == requestGeneration, principalGeneration == session.generationID { hands = updatedHands }
-            } catch {
-                if current == requestGeneration, principalGeneration == session.generationID {
-                    if let failure = error as? APIError {
-                        if handleRevocation(status: failure.status) { return }
-                        if OnlineCommandPolicy.mustClearVisibleTable(failure) { clearPrivateState() }
-                    }
-                    self.error = "读取局记录失败：\((error as? APIError).map(APIErrorCopy.text) ?? error.localizedDescription)"
-                }
-            }
-            guard current == requestGeneration, principalGeneration == session.generationID else { return }
-            if isFinished(updated.match.status) {
-                do {
-                    let updatedSettlement: SettlementPreview = try await session.api.get("\(path)/settlement/preview")
-                    if current == requestGeneration, principalGeneration == session.generationID { settlement = updatedSettlement }
-                } catch {
-                    if current == requestGeneration, principalGeneration == session.generationID {
-                        if let failure = error as? APIError {
-                            if handleRevocation(status: failure.status) { return }
-                            if OnlineCommandPolicy.mustClearVisibleTable(failure) { clearPrivateState() }
-                        }
-                        self.error = "读取终局成绩失败：\((error as? APIError).map(APIErrorCopy.text) ?? error.localizedDescription)"
-                    }
-                }
-            }
-            guard current == requestGeneration, principalGeneration == session.generationID else { return }
-            if let updatedTemplates: [TemplateDTO] = try? await session.api.get("/api/rulesets/templates"),
-               current == requestGeneration, principalGeneration == session.generationID {
-                templates = updatedTemplates
-            }
+            let mine = try await service.mine()
+            match = mine.first { $0.id == matchId }
+            if match == nil { self.error = "对局不在我的列表中。" }
+        } catch let failure as APIError {
+            self.error = APIErrorCopy.text(failure)
         } catch {
-            guard current == requestGeneration, principalGeneration == session.generationID else { return }
-            if let failure = error as? APIError {
-                if handleRevocation(status: failure.status) { return }
-                if OnlineCommandPolicy.mustClearVisibleTable(failure) { clearPrivateState() }
-            }
-            self.error = (error as? APIError).map(APIErrorCopy.text) ?? error.localizedDescription
-        }
-    }
-
-    private func seatLabel(_ status: String?) -> String {
-        switch status {
-        case "empty": "空座"
-        case "assigned": "已入座"
-        case "checked_in": "已签到"
-        default: "状态未提供"
+            self.error = "网络异常，请稍后重试。"
         }
     }
 }
 
+// MARK: - 管理（仅 isAdmin 见入口）
+
+@MainActor
+struct AdminScreen: View {
+    let service: any FinalMatchService
+    @State private var players: [AdminPlayer] = []
+    @State private var matches: [FinalMatch] = []
+    @State private var error: String?
+    @State private var pendingDelete: FinalMatch?
+    @State private var correcting: FinalMatch?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        List {
+            if let error {
+                Section { Text(error).foregroundStyle(Brand.loss) }.brandPanel()
+            }
+            Section {
+                if players.isEmpty { Text("暂无玩家").foregroundStyle(Brand.muted) }
+                ForEach(players, id: \.id) { player in
+                    HStack {
+                        Text(player.name).foregroundStyle(Brand.text)
+                        Spacer()
+                        Text("参与 \(player.matchCount) 局").font(Brand.font(.subheadline)).foregroundStyle(Brand.muted)
+                    }
+                }
+            } header: { BrandSectionHeader("玩家管理") }
+            .brandPanel()
+            Section {
+                if matches.isEmpty { Text("暂无对局").foregroundStyle(Brand.muted) }
+                ForEach(matches, id: \.id) { match in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("\(match.mode.label) · \(match.statusLabel())")
+                            .font(Brand.font(.headline)).foregroundStyle(Brand.gold)
+                        Text("成员 \(match.members.count)/\(match.mode.playerCount) · \(match.joinCode.map { "房间码 \($0)" } ?? "")")
+                            .font(Brand.font(.subheadline)).foregroundStyle(Brand.muted)
+                        HStack(spacing: 12) {
+                            if match.isFinished {
+                                Button("纠正") { correcting = match }
+                                    .accessibilityIdentifier("admin.match.correct.\(match.id)")
+                            }
+                            Button("删除", role: .destructive) { pendingDelete = match }
+                                .accessibilityIdentifier("admin.match.delete.\(match.id)")
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            } header: { BrandSectionHeader("数据管理 · 全部对局") }
+            .brandPanel()
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Brand.background)
+        .tint(Brand.gold)
+        .foregroundStyle(Brand.text)
+        .navigationTitle("管理")
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("关闭") { dismiss() } } }
+        .task { await refresh() }
+        .refreshable { await refresh() }
+        .alert("删除对局？", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })) {
+            Button("取消", role: .cancel) { pendingDelete = nil }
+            Button("删除", role: .destructive) {
+                if let pendingDelete {
+                    Task {
+                        do {
+                            try await service.deleteAdmin(matchId: pendingDelete.id)
+                            await refresh()
+                        } catch let failure as APIError { self.error = APIErrorCopy.text(failure) }
+                        catch { self.error = "网络异常，请稍后重试。" }
+                    }
+                }
+                self.pendingDelete = nil
+            }
+        } message: {
+            Text("这张对局将被永久删除，此操作无法撤销。")
+        }
+        .sheet(item: $correcting) { match in
+            NavigationStack {
+                FinalScoreEditor(
+                    seats: match.seatDisplays(),
+                    mode: match.mode,
+                    editable: true,
+                    initial: Dictionary(uniqueKeysWithValues: (match.finalScores ?? []).map { ($0.wind, $0.score) }),
+                    title: "纠正终局得点",
+                    onSave: { entries in
+                        _ = try await service.correctAdmin(matchId: match.id, scores: entries)
+                    },
+                    onSaved: { Task { await refresh() } })
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("关闭") { correcting = nil } } }
+            }
+        }
+    }
+
+    @MainActor private func refresh() async {
+        do {
+            async let fetchedPlayers = service.adminPlayers()
+            async let fetchedMatches = service.adminMatches()
+            players = try await fetchedPlayers
+            matches = try await fetchedMatches
+            error = nil
+        } catch let failure as APIError {
+            self.error = APIErrorCopy.text(failure)
+        } catch {
+            self.error = "网络异常，请稍后重试。"
+        }
+    }
+}
+
+// MARK: - 我的
+
+@MainActor
 struct ProfileScreen: View {
     @ObservedObject var session: AppSession
-    let onCheckIn: () -> Void
+    let service: (any FinalMatchService)?
+    let isAdmin: Bool
+    let isStub: Bool
+    let onJoin: () -> Void
     @State private var loading = false
     @State private var error: String?
-    @State private var diagnostic: String?
-    @State private var checking = false
+    @State private var showAdmin = false
     @State private var signingOut = false
 
     var body: some View {
@@ -1200,12 +1312,18 @@ struct ProfileScreen: View {
             }
             .brandPanel()
             Section {
-                if loading && session.profile == nil { ProgressView("读取账号中…") }
+                if loading && session.profile == nil && !isStub { ProgressView("读取账号中…") }
                 if let error {
                     Text("加载失败：\(error)").foregroundStyle(Brand.loss)
                     Button("重试") { Task { await refresh() } }
                 }
-                if let principal = session.profile?.principal {
+                if isStub {
+                    LabeledContent {
+                        Text("演示账号").foregroundStyle(Brand.muted)
+                    } label: { Text("昵称").foregroundStyle(Brand.text) }
+                    Text("演示模式：在线流程为内存演练，不连接真实服务。")
+                        .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+                } else if let principal = session.profile?.principal {
                     LabeledContent {
                         Text(principal.displayName).foregroundStyle(Brand.muted)
                     } label: { Text("昵称").foregroundStyle(Brand.text) }
@@ -1216,34 +1334,29 @@ struct ProfileScreen: View {
                         Text(localDate(principal.createdAt)).foregroundStyle(Brand.muted)
                     } label: { Text("创建时间").foregroundStyle(Brand.text) }
                     if session.identity == .onlineGuest {
-                        Text("临时访客会话已安全保存；不能开桌，也不承诺升级账户后自动继承战绩。")
+                        Text("临时访客会话已安全保存；不能开桌。")
                             .font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
                     }
                 }
             } header: { BrandSectionHeader("我的账号") }
             .brandPanel()
             Section {
-                Button(checking ? "自检中…" : "引擎自检") {
-                    Task {
-                        checking = true
-                        diagnostic = await EngineBridgeCheck.runSample()
-                        checking = false
-                    }
+                Button("加入牌桌（房间码 / 扫码 / 链接）", action: onJoin)
+                    .accessibilityIdentifier("profile.join.open")
+                if isAdmin {
+                    Button("管理入口（管理员）") { showAdmin = true }
+                        .accessibilityIdentifier("profile.admin.open")
                 }
-                .disabled(checking)
-                if let diagnostic { Text("诊断结果：\(diagnostic)") }
-            } header: { BrandSectionHeader("关于 / 诊断") }
-            .brandPanel()
-            Section {
-                Button("扫描二维码 / 粘贴签到链接 / 房间码", action: onCheckIn)
-                Button("退出登录", role: .destructive) {
-                    Task {
-                        signingOut = true
-                        await session.signOut()
-                        signingOut = false
+                if !isStub {
+                    Button("退出登录", role: .destructive) {
+                        Task {
+                            signingOut = true
+                            await session.signOut()
+                            signingOut = false
+                        }
                     }
+                    .disabled(signingOut)
                 }
-                .disabled(signingOut)
             }
             .brandPanel()
         }
@@ -1255,10 +1368,15 @@ struct ProfileScreen: View {
         .tabBarClearance()
         .refreshable { await refresh() }
         .task { await refresh() }
+        .sheet(isPresented: $showAdmin) {
+            if let service {
+                NavigationStack { AdminScreen(service: service) }
+            }
+        }
     }
 
     @MainActor private func refresh() async {
-        guard !loading else { return }
+        guard !loading, !isStub else { return }
         loading = true
         error = nil
         defer { loading = false }
@@ -1269,5 +1387,4 @@ struct ProfileScreen: View {
         }
     }
 }
-
 

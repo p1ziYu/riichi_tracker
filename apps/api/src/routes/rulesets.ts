@@ -67,86 +67,21 @@ export function enrichRulesetConfig(rawConfig: Record<string, unknown>, playerCo
 }
 
 export function registerRulesetsRoutes(app: FastifyInstance): void {
-  app.get('/api/rulesets/templates', async (req) => {
-    // D5: system templates for everyone; a signed-in caller also gets their own.
-    const principal = await resolvePrincipal(req);
-    const res = await pool.query<{
-      template_id: string;
-      template_key: string | null;
-      scope: string;
-      name: string;
-      player_count: number;
-      review_status: string;
-      version_id: string;
-      config: Record<string, unknown>;
-    }>(
-      `SELECT DISTINCT ON (t.id)
-         t.id AS template_id,
-         t.template_key,
-         t.scope,
-         t.name,
-         t.player_count,
-         t.review_status,
-         v.id AS version_id,
-         v.config
-       FROM app.ruleset_templates t
-       JOIN app.ruleset_versions v ON v.template_id = t.id
-       WHERE t.scope = 'system' OR (t.scope = 'private' AND $1::uuid IS NOT NULL AND t.owner_principal_id = $1)
-       ORDER BY t.id, v.version DESC`,
-      [principal?.status === 'active' ? principal.id : null],
-    );
-
-    return res.rows.map((r) => ({
-      templateId: r.template_id,
-      templateKey: r.template_key ?? r.template_id,
-      kind: r.player_count === 3 ? '3p' : '4p',
-      scope: r.scope,
-      versionId: r.version_id,
-      name: r.name,
-      reviewStatus: r.review_status,
-      config: enrichRulesetConfig(r.config, r.player_count),
-    }));
+  // Final-native Round 1: template endpoints retired (410). Template rows
+  // stay in the database untouched; only the HTTP surface is gone.
+  // enrichRulesetConfig / prepareEngineRulesConfig above are kept exported
+  // because the legacy match-creation branch still imports them.
+  app.get('/api/rulesets/templates', async (_req, reply) => {
+    return reply.code(410).send({
+      error: 'templates_retired',
+      message: 'Ruleset templates are retired; create matches with { mode } instead.',
+    });
   });
 
-  app.get<{ Params: { versionId: string } }>('/api/rulesets/versions/:versionId', async (req, reply) => {
-    const { versionId } = req.params;
-    if (!UUID_REGEX.test(versionId)) {
-      return reply.code(400).send({ error: 'invalid_ruleset_version_id', message: 'versionId must be a UUID.' });
-    }
-    const res = await pool.query<{
-      id: string;
-      player_count: number;
-      config: Record<string, unknown>;
-      config_hash: string;
-      scope: string;
-      owner_principal_id: string | null;
-    }>(
-      `SELECT v.id, v.player_count, v.config, v.config_hash, t.scope, t.owner_principal_id
-       FROM app.ruleset_versions v
-       JOIN app.ruleset_templates t ON t.id = v.template_id
-       WHERE v.id = $1`,
-      [versionId],
-    );
-
-    const row = res.rows[0];
-    if (!row) {
-      return reply.code(404).send({ error: 'not_found', message: 'Ruleset version not found' });
-    }
-
-    if (row.scope !== 'system') {
-      const principal = await resolvePrincipal(req);
-      if (!principal || principal.status !== 'active' || principal.id !== row.owner_principal_id) {
-        return reply.code(403).send({
-          error: 'forbidden',
-          message: 'Private ruleset version is only visible to its owner',
-        });
-      }
-    }
-
-    return {
-      versionId: row.id,
-      config: enrichRulesetConfig(row.config, row.player_count),
-      configHash: row.config_hash,
-    };
+  app.get<{ Params: { versionId: string } }>('/api/rulesets/versions/:versionId', async (_req, reply) => {
+    return reply.code(410).send({
+      error: 'templates_retired',
+      message: 'Ruleset templates are retired; create matches with { mode } instead.',
+    });
   });
 }

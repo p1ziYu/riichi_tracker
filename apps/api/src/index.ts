@@ -4,7 +4,7 @@ import websocket from '@fastify/websocket';
 import Fastify from 'fastify';
 import { initializeAuth, registerAuthRoutes } from './auth.js';
 import { ensureAuthSchema, pool } from './db.js';
-import { registerHandsRoutes } from './routes/hands.js';
+import { registerFinalModelRoutes } from './routes/finalModel.js';
 import { registerMatchesRoutes } from './routes/matches.js';
 import { registerRulesetsRoutes } from './routes/rulesets.js';
 import { registerWsRoutes } from './ws.js';
@@ -110,7 +110,10 @@ export async function buildApp() {
   registerAuthRoutes(app);
   registerRulesetsRoutes(app);
   registerMatchesRoutes(app);
-  registerHandsRoutes(app);
+  // Final-native Round 1: hands routes are NOT registered (per-hand recording
+  // retired); finalModel registers the new model routes plus 410 stubs for
+  // the old per-hand / settlement paths.
+  registerFinalModelRoutes(app);
   registerWsRoutes(app);
 
   return app;

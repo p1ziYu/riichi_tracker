@@ -6,12 +6,18 @@ import {
   requirePrincipal,
 } from '../auth.js';
 import { pool } from '../db.js';
+import { serializeMatch } from './matchView.js';
 import { generateJoinCode, normalizeJoinCode } from '../joinCode.js';
 import { JoinCodeRateLimiter } from '../rateLimit.js';
 import { broadcastMatchEvent } from '../ws.js';
 import { prepareEngineRulesConfig } from './rulesets.js';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Final-native Round 1: retired-route gate. Deliberately typed as boolean
+// (not the literal true) so the retired handler bodies below still
+// typecheck; the gate is always true at runtime, so they never execute.
+const RETIRED_ROUTE: boolean = true;
 
 export interface RiichiChangeUsage {
   declares: number;
@@ -180,7 +186,7 @@ function signCheckInToken(matchId: string, nonce: string, expiresAtMs: number): 
   return `${payload}.${sig}`;
 }
 
-function verifyCheckInTokenSignature(token: string, expectedMatchId: string): boolean {
+export function verifyCheckInTokenSignature(token: string, expectedMatchId: string): boolean {
   const parts = token.split('.');
   if (parts.length !== 2) return false;
   const [payload, sig] = parts;
@@ -201,8 +207,12 @@ function verifyCheckInTokenSignature(token: string, expectedMatchId: string): bo
   }
 }
 
-async function issueCheckInToken(matchId: string, createdBy: string): Promise<{ token: string; expiresAt: string }> {
-  const expiresAtMs = Date.now() + 10 * 60 * 1000;
+export async function issueCheckInToken(
+  matchId: string,
+  createdBy: string,
+  ttlMs = 10 * 60 * 1000,
+): Promise<{ token: string; expiresAt: string }> {
+  const expiresAtMs = Date.now() + ttlMs;
   const expiresAt = new Date(expiresAtMs);
   const token = signCheckInToken(matchId, randomUUID(), expiresAtMs);
   const tokenHash = createHash('sha256').update(token).digest('hex');
@@ -296,9 +306,14 @@ function mergeRulesOverride(
 }
 
 export function registerMatchesRoutes(app: FastifyInstance): void {
-  // POST /api/matches { rulesetVersionId?, rulesOverride?, config?, visibility? }
+  // POST /api/matches { mode?: '3p' | '4p', rulesetVersionId?, rulesOverride?, config?, visibility? }
+  // Final-native model: { mode } creates a final-scores-only match. Template
+  // selection (rulesetVersionId) is retired (410); the legacy config/default
+  // branches below are kept only so the pre-existing suite keeps exercising
+  // the shared match plumbing, and are not part of the new model.
   app.post<{
     Body: {
+      mode?: string;
       rulesetVersionId?: string;
       rulesOverride?: Record<string, unknown>;
       config?: Record<string, unknown>;
@@ -313,266 +328,119 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     }
 
     const body = req.body ?? {};
-    let rulesetVersionId: string | null = null;
-    let rulesSnapshot: Record<string, unknown>;
-    let rulesHash: string;
-    let playerCount: 3 | 4 = 4;
-    let overrideMetadata: {
-      baseRulesetVersionId: string;
-      baseTemplateName: string;
-      baseConfig: Record<string, unknown>;
-      overrideKeys: string[];
-      sourceLabel: string | null;
-      sourceUrl: string | null;
-    } | null = null;
-    if (body.rulesOverride !== undefined && !body.rulesetVersionId) {
-      return reply.code(400).send({
-        error: 'invalid_rules_override',
-        message: 'rulesOverride requires rulesetVersionId.',
-      });
-    }
-    if (body.rulesetVersionId !== undefined &&
-        (typeof body.rulesetVersionId !== 'string' || !UUID_REGEX.test(body.rulesetVersionId))) {
-      return reply.code(400).send({
-        error: 'invalid_ruleset_version_id',
-        message: 'rulesetVersionId must be a UUID.',
-      });
-    }
 
-    if (body.rulesetVersionId) {
-      const vRes = await pool.query<{
-        id: string;
-        player_count: 3 | 4;
-        config: Record<string, unknown>;
-        config_hash: string;
-        scope: string;
-        owner_principal_id: string | null;
-        name: string;
-        source_label: string | null;
-        source_url: string | null;
-      }>(
-        `SELECT v.id, v.player_count, v.config, v.config_hash, t.scope, t.owner_principal_id,
-                t.name, t.source_label, t.source_url
-         FROM app.ruleset_versions v
-         JOIN app.ruleset_templates t ON t.id = v.template_id
-         WHERE v.id = $1`,
-        [body.rulesetVersionId],
-      );
-      const vRow = vRes.rows[0];
-      if (!vRow) {
-        return reply.code(404).send({ error: 'ruleset_version_not_found', message: 'Ruleset version not found' });
-      }
-      if (vRow.scope !== 'system' && vRow.owner_principal_id !== principal.id) {
-        return reply.code(403).send({
-          error: 'forbidden',
-          message: 'Private ruleset version can only be used by its owner',
-        });
-      }
-      rulesetVersionId = vRow.id;
-      playerCount = vRow.player_count;
-      rulesSnapshot = vRow.config;
-      rulesHash = vRow.config_hash;
-      if (body.rulesOverride !== undefined) {
-        try {
-          const override = validateRulesOverride(body.rulesOverride);
-          if (Object.keys(override).length > 0) {
-            const normalized = mergeRulesOverride(vRow.config, vRow.player_count, override);
-            overrideMetadata = {
-              baseRulesetVersionId: vRow.id,
-              baseTemplateName: vRow.name,
-              baseConfig: vRow.config,
-              overrideKeys: Object.keys(override),
-              sourceLabel: vRow.source_label,
-              sourceUrl: vRow.source_url,
-            };
-            rulesSnapshot = { ...normalized, metadata: overrideMetadata };
-            rulesHash = createHash('sha256').update(JSON.stringify(rulesSnapshot)).digest('hex');
-          }
-        } catch (err) {
-          return reply.code(400).send({
-            error: 'invalid_rules_override',
-            message: err instanceof Error ? err.message : 'Invalid rulesOverride',
-          });
-        }
-      }
-    } else if (body.config && typeof body.config === 'object') {
-      try {
-        // D4: canonical config key is `startingPoints` (engine normalizeRulesConfig
-        // first preference; seeded ruleset_versions use it). Accept the legacy
-        // form-model alias `startPoints`; canonical wins when both are present;
-        // drop the alias from the stored snapshot so no stale dual keys persist.
-        const cfg: Record<string, unknown> = { ...(body.config as Record<string, unknown>) };
-        if (cfg.startPoints !== undefined) {
-          if (cfg.startingPoints === undefined) cfg.startingPoints = cfg.startPoints;
-          delete cfg.startPoints;
-        }
-        // M8: prefer the seed's honba object and ryuukyokuPenaltyTotal over
-        // stale form/engine aliases. Merge partial honba objects, then store
-        // only the canonical keys so subsequent engine normalization agrees.
-        const honbaPayerAlias = firstAlias(cfg, HONBA_PAYER_ALIASES);
-        const honbaRonAlias = firstAlias(cfg, HONBA_RON_ALIASES);
-        const honba = cfg.honba && typeof cfg.honba === 'object' && !Array.isArray(cfg.honba)
-          ? { ...(cfg.honba as Record<string, unknown>) }
-          : {};
-        const hadHonba = cfg.honba !== undefined || honbaPayerAlias !== undefined || honbaRonAlias !== undefined;
-        if (honba.tsumoPerPayer === undefined) {
-          honba.tsumoPerPayer = honbaPayerAlias === undefined
-            ? firstAlias(honba, HONBA_OBJECT_PAYER_ALIASES)
-            : honbaPayerAlias;
-        }
-        if (honba.ronTotal === undefined) {
-          const ronAlias = honbaRonAlias === undefined ? firstAlias(honba, HONBA_OBJECT_RON_ALIASES) : honbaRonAlias;
-          honba.ronTotal = ronAlias === undefined && typeof cfg.honba === 'number' ? cfg.honba : ronAlias;
-        }
-        for (const key of HONBA_PAYER_ALIASES) delete cfg[key];
-        for (const key of HONBA_RON_ALIASES) delete cfg[key];
-        for (const key of HONBA_OBJECT_ALIASES) delete honba[key];
-        if (hadHonba) cfg.honba = honba;
-        if (cfg.ryuukyokuPenaltyTotal === undefined) {
-          cfg.ryuukyokuPenaltyTotal = firstAlias(cfg, RYUUKYOKU_PENALTY_ALIASES);
-        }
-        for (const key of RYUUKYOKU_PENALTY_ALIASES) delete cfg[key];
-        if (cfg.ryuukyokuPenaltyTotal === undefined) delete cfg.ryuukyokuPenaltyTotal;
-        // oka/okaTenths are purely derived: (returnPoints - startingPoints) *
-        // playerCount / 1000. A client-side copy goes stale the moment starting
-        // points are edited, and normalizeRulesConfig rejects stale copies --
-        // drop them here and re-derive from the normalized config below.
-        delete cfg.oka;
-        delete cfg.okaTenths;
-        // The engine recognizes honba.tsumoPerPayer but not honba.ronTotal.
-        // Supply its ron alias for this normalization only; persist the paired
-        // canonical values afterward so future reads need no alias.
-        const engineCfg = hadHonba ? { ...cfg, honbaRon: honba.ronTotal } : cfg;
-        const norm = normalizeRulesConfig(prepareEngineRulesConfig(engineCfg));
-        playerCount = norm.playerCount;
-        if (hadHonba) cfg.honba = { ronTotal: norm.honbaRon, tsumoPerPayer: norm.honbaPerPayer };
-        cfg.oka = norm.oka;
-        cfg.okaTenths = Math.round(norm.oka * 10);
-        rulesSnapshot = cfg;
-        rulesHash = createHash('sha256').update(JSON.stringify(rulesSnapshot)).digest('hex');
-      } catch (err) {
+    if (body.mode !== undefined) {
+      if (body.rulesetVersionId !== undefined) {
         return reply.code(400).send({
-          error: 'invalid_config',
-          message: err instanceof Error ? err.message : 'Invalid rules config',
+          error: 'invalid_request',
+          message: 'mode cannot be combined with rulesetVersionId.',
         });
       }
-    } else {
-      const defaultRes = await pool.query<{
-        id: string;
-        player_count: 3 | 4;
-        config: Record<string, unknown>;
-        config_hash: string;
-      }>(
-        `SELECT v.id, v.player_count, v.config, v.config_hash
-         FROM app.ruleset_templates t
-         JOIN app.ruleset_versions v ON v.template_id = t.id
-         WHERE t.template_key = 'house_4p'
-         ORDER BY v.version DESC
-         LIMIT 1`,
-      );
-      const dRow = defaultRes.rows[0];
-      if (!dRow) {
-        return reply.code(500).send({ error: 'missing_seed', message: 'System default ruleset not seeded' });
+      if (body.mode !== '3p' && body.mode !== '4p') {
+        return reply.code(400).send({ error: 'invalid_mode', message: "mode must be '3p' or '4p'." });
       }
-      rulesetVersionId = dRow.id;
-      playerCount = dRow.player_count;
-      rulesSnapshot = dRow.config;
-      rulesHash = dRow.config_hash;
-    }
-
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      if (overrideMetadata) {
-        const template = await client.query<{ id: string }>(
-          `INSERT INTO app.ruleset_templates (
-             owner_principal_id, scope, name, player_count, source_label, source_url, review_status
-           ) VALUES ($1, 'user', $2, $3, $4, $5, 'not_applicable') RETURNING id`,
-          [principal.id, `${overrideMetadata.baseTemplateName} (match custom)`.slice(0, 64),
-            playerCount, overrideMetadata.sourceLabel, overrideMetadata.sourceUrl],
-        );
-        const version = await client.query<{ id: string }>(
-          `INSERT INTO app.ruleset_versions (
-             template_id, version, player_count, config, config_hash, config_schema_version, engine_version
-           ) VALUES ($1, 1, $2, $3::jsonb, $4, 1, $5) RETURNING id`,
-          [template.rows[0].id, playerCount, JSON.stringify(rulesSnapshot), rulesHash, ENGINE_VERSION],
-        );
-        rulesetVersionId = version.rows[0].id;
-      }
-
-      let match: { id: string; state: string; join_code: string } | undefined;
-      for (let attempt = 0; attempt < 8; attempt++) {
-        const joinCode = generateJoinCode();
-        await client.query('SAVEPOINT match_join_code_insert');
-        try {
-          const matchRes = await client.query<{ id: string; state: string; join_code: string }>(
-            `INSERT INTO app.matches (
-               owner_principal_id,
-               player_count,
-               ruleset_version_id,
-               rules_snapshot,
-               rules_hash,
-               engine_version,
-               state,
-               version,
-               join_code
-             )
-             VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'preparing', 0, $7)
-             RETURNING id, state, join_code`,
-            [principal.id, playerCount, rulesetVersionId, JSON.stringify(rulesSnapshot),
-              rulesHash, ENGINE_VERSION, joinCode],
-          );
-          match = matchRes.rows[0];
-          await client.query('RELEASE SAVEPOINT match_join_code_insert');
-          break;
-        } catch (err) {
-          await client.query('ROLLBACK TO SAVEPOINT match_join_code_insert');
-          await client.query('RELEASE SAVEPOINT match_join_code_insert');
-          if (!(err && typeof err === 'object' && 'code' in err && err.code === '23505' &&
-              'constraint' in err && err.constraint === 'ux_matches_live_join_code') ||
-              attempt === 7) throw err;
+      const newPlayerCount: 3 | 4 = body.mode === '3p' ? 3 : 4;
+      const newSnapshot: Record<string, unknown> = { finalScoresModel: true, mode: body.mode };
+      const newRulesHash = createHash('sha256').update(JSON.stringify(newSnapshot)).digest('hex');
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        let newMatch: { id: string; state: string; join_code: string; created_at: Date } | undefined;
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const joinCode = generateJoinCode();
+          await client.query('SAVEPOINT match_join_code_insert');
+          try {
+            const matchRes = await client.query<{ id: string; state: string; join_code: string; created_at: Date }>(
+              `INSERT INTO app.matches (
+                 owner_principal_id,
+                 player_count,
+                 ruleset_version_id,
+                 rules_snapshot,
+                 rules_hash,
+                 engine_version,
+                 state,
+                 version,
+                 join_code
+               )
+               VALUES ($1, $2, NULL, $3::jsonb, $4, $5, 'preparing', 0, $6)
+               RETURNING id, state, join_code, created_at`,
+              [principal.id, newPlayerCount, JSON.stringify(newSnapshot),
+                newRulesHash, ENGINE_VERSION, joinCode],
+            );
+            newMatch = matchRes.rows[0];
+            await client.query('RELEASE SAVEPOINT match_join_code_insert');
+            break;
+          } catch (err) {
+            await client.query('ROLLBACK TO SAVEPOINT match_join_code_insert');
+            await client.query('RELEASE SAVEPOINT match_join_code_insert');
+            if (!(err && typeof err === 'object' && 'code' in err && err.code === '23505' &&
+                'constraint' in err && err.constraint === 'ux_matches_live_join_code') ||
+                attempt === 7) throw err;
+          }
         }
-      }
-      if (!match) throw new Error('Match insert did not return a row');
-
-      const winds = playerCount === 3 ? ['E', 'S', 'W'] : ['E', 'S', 'W', 'N'];
-      for (let seatNo = 0; seatNo < playerCount; seatNo++) {
+        if (!newMatch) throw new Error('Match insert did not return a row');
+        const newWinds = newPlayerCount === 3 ? ['E', 'S', 'W'] : ['E', 'S', 'W', 'N'];
+        for (let seatNo = 0; seatNo < newPlayerCount; seatNo++) {
+          await client.query(
+            `INSERT INTO app.match_seats (match_id, seat_no, player_count, initial_wind)
+             VALUES ($1, $2, $3, $4)`,
+            [newMatch.id, seatNo, newPlayerCount, newWinds[seatNo]],
+          );
+        }
         await client.query(
-          `INSERT INTO app.match_seats (match_id, seat_no, player_count, initial_wind)
-           VALUES ($1, $2, $3, $4)`,
-          [match.id, seatNo, playerCount, winds[seatNo]],
+          `INSERT INTO app.match_members (match_id, principal_id, role, status)
+           VALUES ($1, $2, 'participant', 'active')`,
+          [newMatch.id, principal.id],
         );
+        const newInviteCode = newMatch.id.replace(/-/g, '').slice(0, 8).toUpperCase();
+        await client.query(
+          `INSERT INTO app.match_invitations (match_id, scope, generation, hmac_key_id, created_by, expires_at)
+           VALUES ($1, 'join', 1, $2, $3, now() + interval '24 hours')`,
+          [newMatch.id, `invite:${newInviteCode}`, principal.id],
+        );
+        await client.query('COMMIT');
+        // Share-page join token: same signed-token credential as by-code, but
+        // with a 24h lifetime so a shared link/QR stays usable while waiting.
+        const joinToken = await issueCheckInToken(newMatch.id, principal.id, 24 * 60 * 60 * 1000);
+        return {
+          match: {
+            id: newMatch.id,
+            mode: body.mode,
+            status: 'waiting',
+            hostId: principal.id,
+            joinCode: newMatch.join_code,
+            inviteCode: newInviteCode,
+            joinToken: joinToken.token,
+            joinTokenExpiresAt: joinToken.expiresAt,
+            members: [{ userId: principal.id, displayName: principal.displayName, isHost: true }],
+            seats: [],
+            finalScores: null,
+            createdAt: newMatch.created_at.toISOString(),
+            startedAt: null,
+            finishedAt: null,
+            correctedAt: null,
+          },
+        };
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
       }
-
-      await client.query(
-        `INSERT INTO app.match_members (match_id, principal_id, role, status)
-         VALUES ($1, $2, 'participant', 'active')`,
-        [match.id, principal.id],
-      );
-
-      const inviteCode = match.id.replace(/-/g, '').slice(0, 8).toUpperCase();
-      await client.query(
-        `INSERT INTO app.match_invitations (match_id, scope, generation, hmac_key_id, created_by, expires_at)
-         VALUES ($1, 'join', 1, $2, $3, now() + interval '24 hours')`,
-        [match.id, `invite:${inviteCode}`, principal.id],
-      );
-
-      await client.query('COMMIT');
-
-      return {
-        match: {
-          id: match.id,
-          inviteCode,
-          joinCode: match.join_code,
-          status: MATCH_STATUS_BY_STATE[match.state] ?? match.state,
-        },
-      };
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
     }
+
+    if (body.rulesetVersionId !== undefined) {
+      return reply.code(410).send({
+        error: 'template_selection_retired',
+        message: 'Creating a match from a ruleset template is retired; create with { mode } instead.',
+      });
+    }
+    // Legacy template/config/default creation is retired; only { mode } creates
+    // are accepted in the final-native model.
+    return reply.code(410).send({
+      error: 'legacy_create_retired',
+      message: 'Creating a match without { mode } is retired; create with { mode } instead.',
+    });
   });
 
   // GET /api/matches?mine=1 -> [{ id, status, playerCount, rulesetVersionId, rulesSnapshot, createdAt, hidden, isOwner }]
@@ -671,6 +539,12 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     async (req, reply) => {
       const principal = await requirePrincipal(req, reply);
       if (!principal) return;
+      // Final-native Round 1: retired endpoint (410, route kept).
+      // Conditional form so the retired body below still typechecks;
+      // the branch always wins at runtime.
+      if (RETIRED_ROUTE) {
+        return reply.code(410).send({ error: 'check_in_retired', message: 'Check-in seat preview is retired; join the room directly instead.' })
+      }
       const matchId = req.params.id;
       const token = req.query.token;
       if (!token || typeof token !== 'string') {
@@ -800,7 +674,22 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     }>(`SELECT * FROM app.matches WHERE id = $1 AND deleted_at IS NULL`, [matchId]);
     const m = mRes.rows[0];
 
-    const norm = normalizeRulesConfig(m.rules_snapshot, m.player_count);
+    // Final-scores-only matches return the new-model view (same shape as
+    // join/final-scores responses). The legacy view below derives points
+    // from score-account balances and cannot represent final scores.
+    if (m && (m.rules_snapshot as Record<string, unknown> | null)?.finalScoresModel === true) {
+      const view = await serializeMatch(matchId);
+      if (view) return reply.send(view);
+    }
+
+    // Final-scores-only matches carry a placeholder snapshot, not an engine
+    // config; fall back to the nominal starting points for the legacy view.
+    let norm: { startingPoints: number };
+    try {
+      norm = normalizeRulesConfig(m.rules_snapshot, m.player_count);
+    } catch {
+      norm = { startingPoints: 250 };
+    }
 
     const seatsRes = await pool.query<{
       seat_no: number;
@@ -974,6 +863,12 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     async (req, reply) => {
       const principal = await requirePrincipal(req, reply);
       if (!principal) return;
+      // Final-native Round 1: retired endpoint (410, route kept).
+      // Conditional form so the retired body below still typechecks;
+      // the branch always wins at runtime.
+      if (RETIRED_ROUTE) {
+        return reply.code(410).send({ error: 'join_requests_retired', message: 'Join requests are retired; join the room directly instead.' })
+      }
 
       const matchId = req.params.id;
 
@@ -1095,6 +990,12 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
   }>('/api/matches/:id/join-requests/:jrId/approve', async (req, reply) => {
     const principal = await requirePrincipal(req, reply);
     if (!principal) return;
+      // Final-native Round 1: retired endpoint (410, route kept).
+      // Conditional form so the retired body below still typechecks;
+      // the branch always wins at runtime.
+      if (RETIRED_ROUTE) {
+        return reply.code(410).send({ error: 'join_requests_retired', message: 'Join requests are retired; join the room directly instead.' })
+      }
 
     const { id: matchId, jrId } = req.params;
     const seatNo = req.body?.seatNo;
@@ -1300,6 +1201,12 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
   }>('/api/matches/:id/check-ins', async (req, reply) => {
     const principal = await requirePrincipal(req, reply);
     if (!principal) return;
+      // Final-native Round 1: retired endpoint (410, route kept).
+      // Conditional form so the retired body below still typechecks;
+      // the branch always wins at runtime.
+      if (RETIRED_ROUTE) {
+        return reply.code(410).send({ error: 'check_in_retired', message: 'Check-in is retired; use POST /api/matches/:id/join instead.' })
+      }
 
     const matchId = req.params.id;
     const { token, alias } = req.body ?? {};
@@ -1466,6 +1373,12 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
   app.post<{ Params: { id: string } }>('/api/matches/:id/seats/draw', async (req, reply) => {
     const principal = await requirePrincipal(req, reply);
     if (!principal) return;
+      // Final-native Round 1: retired endpoint (410, route kept).
+      // Conditional form so the retired body below still typechecks;
+      // the branch always wins at runtime.
+      if (RETIRED_ROUTE) {
+        return reply.code(410).send({ error: 'seats_draw_retired', message: 'Host seat draw is retired; seats are drawn automatically when the room fills.' })
+      }
     const matchId = req.params.id;
     const client = await pool.connect();
     try {
@@ -1590,6 +1503,12 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     async (req, reply) => {
       const principal = await requirePrincipal(req, reply);
       if (!principal) return;
+      // Final-native Round 1: retired endpoint (410, route kept).
+      // Conditional form so the retired body below still typechecks;
+      // the branch always wins at runtime.
+      if (RETIRED_ROUTE) {
+        return reply.code(410).send({ error: 'seat_adjust_retired', message: 'Seat adjustment is retired; seats are locked once drawn.' })
+      }
       const matchId = req.params.id;
       const { fromSeatNo, toSeatNo } = req.body ?? {};
       const client = await pool.connect();
@@ -1818,6 +1737,12 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
   app.post<{ Params: { id: string }; Body: { dealerSeatNo?: number } }>('/api/matches/:id/seats/finalize', async (req, reply) => {
     const principal = await requirePrincipal(req, reply);
     if (!principal) return;
+      // Final-native Round 1: retired endpoint (410, route kept).
+      // Conditional form so the retired body below still typechecks;
+      // the branch always wins at runtime.
+      if (RETIRED_ROUTE) {
+        return reply.code(410).send({ error: 'seat_finalize_retired', message: 'Seat finalization is retired; seats are drawn automatically when the room fills.' })
+      }
 
     const matchId = req.params.id;
     const client = await pool.connect();

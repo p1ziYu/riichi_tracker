@@ -27,24 +27,23 @@ enum APIErrorCopy {
             return "邮箱或密码不正确，请重试。"
         case "match_full": return "牌桌已满员，无法加入。"
         case "match_already_started": return "牌局已开始，无法加入。"
+        case "already_member", "already_joined": return "你已是本桌成员。"
+        case "missing_credential": return "加入需要房间码或分享链接凭证，请房主重新分享带凭证的链接，或使用房间码。"
         case "invalid_token", "token_consumed_or_expired", "missing_token":
-            return "签到链接无效或已过期，请房主重新分享链接，或使用房间码。"
-        case "seat_claim_retired": return "入座方式已更新，请重新加入牌桌。"
-        case "owner_auto_check_in": return "你是房主，已为你打开牌桌。"
-        case "guest_already_bound": return "当前访客身份已绑定其他牌桌。"
-        case "room_not_full": return "人数尚未到齐，无法抽风定座。"
-        case "seating_already_drawn": return "已完成抽风定座。"
-        case "seating_already_complete": return "座位已确定，可直接开局。"
+            return "加入链接无效或已过期，请房主重新分享链接，或使用房间码。"
+        case "final_scores_invalid", "invalid_final_scores", "invalid_scores", "sum_mismatch":
+            return "终局合计不对，请核对后再保存。"
+        case "score_out_of_range": return "得点超出范围（-9999~9999）。"
+        case "match_not_in_progress": return "牌局不在进行中，无法记分。"
+        case "match_not_finished": return "牌局尚未结束，无法纠正。"
+        case "match_cancelled": return "牌局已取消。"
+        case "not_host", "only_host": return "只有房主可以执行此操作。"
+        // 最后一版原生：抽风/签到/调座时代的旧码已删除（新 API 对退役接口返回 410，
+        // 落入 default 通用中文提示；不再为不存在的流程保留专属文案）。
         case "forbidden": return "只有房主可以执行此操作。"
-        case "member_not_found": return "成员已不在牌桌中。"
-        case "seat_empty": return "该座位暂无成员。"
-        case "invalid_seat": return "座位选择无效。"
         case "rate_limited": return "尝试过于频繁，请稍后再试。"
         case "join_code_not_found": return "房间码不正确，或牌桌已结束。"
-        case "incomplete_check_ins": return "成员尚未全部就座，无法开局。"
         case "match_not_found": return "牌桌不存在或已被删除。"
-        case "match_not_deletable": return "这张牌桌已抽风定座或已开始，无法彻底删除。"
-        case "owner_must_delete": return "房主不能退出牌桌，请使用删除。"
         default:
             // iosfix10 B1: better-auth login failures arrive as 401
             // with no machine code and the English message, so sniff
@@ -206,20 +205,15 @@ final class APIClient {
         _ = try await request("/api/auth/sign-in/anonymous", method: "POST", body: EmptyBody())
     }
 
-    // iosfix6 item 5: owner-only DELETE for preparing rooms; /hide for
-    // everyone else and every other state; /unhide backs the undo banner.
-    // Responses are decoded only for status — callers map APIError.code
-    // through APIErrorCopy and never render the raw server message.
-    func deleteMatch(_ id: String) async throws {
-        _ = try await request("/api/matches/\(id)", method: "DELETE")
+    // 最后一版原生：旧的 DELETE/hide/unhide 列表语义已下线。
+    // 取消走 POST /api/matches/:id/cancel（房主），删除只走管理员端点。
+    func patch<T: Decodable>(_ path: String, body: (any Encodable)? = nil) async throws -> T {
+        let (data, _) = try await request(path, method: "PATCH", body: body ?? EmptyBody())
+        return try JSONDecoder().decode(T.self, from: data)
     }
 
-    func hideMatch(_ id: String) async throws {
-        _ = try await request("/api/matches/\(id)/hide", method: "POST", body: EmptyBody())
-    }
-
-    func unhideMatch(_ id: String) async throws {
-        _ = try await request("/api/matches/\(id)/unhide", method: "POST", body: EmptyBody())
+    func deleteRequest(_ path: String) async throws {
+        _ = try await request(path, method: "DELETE")
     }
 
     func signOut() async -> Bool {
@@ -346,6 +340,7 @@ final class AppSession: ObservableObject {
     var authenticated: Bool { identity == .account || identity == .onlineGuest }
     var canHost: Bool { identity == .account }
     var principalID: String? { profile?.principal.id }
+    var isAdmin: Bool { profile?.isAdmin ?? false }
     var generationID: Int { generation }
 
     func restore() async {
@@ -378,13 +373,8 @@ final class AppSession: ObservableObject {
     func signOut() async {
         generation += 1
         let current = generation
-        let oldPrincipal = principalID
         identity = .localOnly
         profile = nil
-        if let oldPrincipal {
-            do { try OnlinePrivateStore.live.clearPrincipal(oldPrincipal) }
-            catch { sessionError = "本机在线草稿清理失败：\(error.localizedDescription)" }
-        }
         let revoked = await api.signOut()
         if !revoked, generation == current {
             sessionError = "本机凭据已清除；网络请求失败，服务器会话尚未确认撤销。"
