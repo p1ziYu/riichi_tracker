@@ -1,5 +1,4 @@
 import { api } from './api.ts';
-import { flowError } from './checkInSeats.ts';
 
 export const normalizeJoinCode = (value: string): string => value.trim().toUpperCase();
 
@@ -13,14 +12,19 @@ export function joinCodePath(code: string): string {
   return `/api/matches/by-code/${encodeURIComponent(code)}`;
 }
 
-export function checkInRoute(match: JoinCodeMatch): string {
-  return `/checkin/${encodeURIComponent(match.matchId)}?token=${encodeURIComponent(match.token)}`;
-}
-
-export function joinCodeError(error: unknown): string {
-  return flowError(error);
-}
-
 export function resolveJoinCode(code: string): Promise<JoinCodeMatch> {
   return api<JoinCodeMatch>(joinCodePath(code));
+}
+
+// Share links carry the lifelong room code in ?token= (the server accepts a
+// token value equal to the room code as the code), so a shared link or QR
+// never expires while the table is waiting.
+export function shareUrl(matchId: string, code: string): string {
+  return `${window.location.origin}/checkin/${encodeURIComponent(matchId)}?token=${encodeURIComponent(code)}`;
+}
+
+export function checkinPath(matchId: string, token?: string): string {
+  return token
+    ? `/checkin/${encodeURIComponent(matchId)}?token=${encodeURIComponent(token)}`
+    : `/checkin/${encodeURIComponent(matchId)}`;
 }

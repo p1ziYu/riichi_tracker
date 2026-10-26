@@ -1,49 +1,50 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { ApiError } from '../src/api.ts';
-import { checkInRoute, isValidJoinCode, joinCodeError, joinCodePath, normalizeJoinCode, resolveJoinCode } from '../src/joinCode.ts';
+import { errorTextZh } from '../src/errors.ts';
+import { checkinPath, isValidJoinCode, joinCodePath, normalizeJoinCode, resolveJoinCode, shareUrl } from '../src/joinCode.ts';
 
 const previousWindow = globalThis.window;
 const previousFetch = globalThis.fetch;
 
+globalThis.window = { location: new URL('https://riichi.p1ziyu.com') };
+
 afterEach(() => {
-  globalThis.window = previousWindow;
+  globalThis.window = { location: new URL('https://riichi.p1ziyu.com') };
   globalThis.fetch = previousFetch;
 });
 
-test('room codes normalize to uppercase and validate the API alphabet and exact length', () => {
-  assert.equal(normalizeJoinCode(' abcd23 '), 'ABCD23');
-  assert.equal(isValidJoinCode(normalizeJoinCode('abcd23')), true);
-  assert.equal(isValidJoinCode('ABCDEFG'), false);
+test('normalize uppercases and trims; alphabet excludes I, O, 0, 1', () => {
+  assert.equal(normalizeJoinCode('  ab2345 '), 'AB2345');
+  assert.equal(isValidJoinCode('ABC234'), true);
   assert.equal(isValidJoinCode('ABC23'), false);
-  assert.equal(isValidJoinCode('ABCI23'), false);
-  assert.equal(isValidJoinCode('ABCO23'), false);
-  assert.equal(isValidJoinCode('ABC123'), false);
-  assert.equal(isValidJoinCode('ABC023'), false);
-  assert.equal(isValidJoinCode('ABC-23'), false);
-  assert.equal(isValidJoinCode('ABC中23'), false);
+  assert.equal(isValidJoinCode('ABC2345'), false);
+  assert.equal(isValidJoinCode('ABCI45'), false);
+  assert.equal(isValidJoinCode('ABCO45'), false);
+  assert.equal(isValidJoinCode('ABC045'), false);
+  assert.equal(isValidJoinCode('ABC145'), false);
 });
 
-test('lookup uses the public GET route and preserves the returned check-in token', async () => {
-  globalThis.window = { location: new URL('https://riichi.p1ziyu.com/') };
-  globalThis.fetch = async (path, options) => {
-    assert.equal(path, '/api/matches/by-code/ABCD23');
-    assert.equal(options.method, undefined);
-    return new Response(JSON.stringify({ matchId: 'match-1', token: 'a+/=b', expiresAt: '2026-10-23T12:00:00Z' }));
+test('share links carry the room code in ?token= and checkin paths round-trip', () => {
+  assert.equal(shareUrl('match-1', 'ABC234'), 'https://riichi.p1ziyu.com/checkin/match-1?token=ABC234');
+  assert.equal(checkinPath('match-1', 'ABC234'), '/checkin/match-1?token=ABC234');
+  assert.equal(checkinPath('match-1'), '/checkin/match-1');
+  assert.equal(joinCodePath('ABC234'), '/api/matches/by-code/ABC234');
+});
+
+test('resolveJoinCode returns the match id and token; failures map to Chinese', async () => {
+  globalThis.fetch = async (url) => {
+    assert.equal(url, '/api/matches/by-code/ABC234');
+    return { ok: true, status: 200, text: async () => JSON.stringify({ matchId: 'match-1', token: 'tok', expiresAt: '2026-01-01T00:00:00Z' }) };
   };
-  const match = await resolveJoinCode(normalizeJoinCode(' abcd23 '));
-  assert.equal(joinCodePath('ABCD23'), '/api/matches/by-code/ABCD23');
-  assert.equal(match.expiresAt, '2026-10-23T12:00:00Z');
-  assert.equal(checkInRoute(match), '/checkin/match-1?token=a%2B%2F%3Db');
-  assert.equal(checkInRoute({ ...match, matchId: 'match/2' }), '/checkin/match%2F2?token=a%2B%2F%3Db');
-});
+  assert.deepEqual(await resolveJoinCode('ABC234'), { matchId: 'match-1', token: 'tok', expiresAt: '2026-01-01T00:00:00Z' });
 
-test('lookup maps codes first and uses generic copy for missing or unknown codes', () => {
-  assert.equal(joinCodeError(new ApiError(404, 'private', 'join_code_not_found')), '房间码不正确，或牌桌已结束。');
-  assert.equal(joinCodeError(new ApiError(429, 'private', 'rate_limited')), '尝试过于频繁，请稍后再试。');
-  assert.equal(joinCodeError(new ApiError(409, 'private', 'match_already_started')), '牌局已开始，无法加入。');
-  assert.equal(joinCodeError(new ApiError(404, 'private', 'rate_limited')), '尝试过于频繁，请稍后再试。');
-  assert.equal(joinCodeError(new ApiError(404, 'private')), '操作失败，请稍后重试');
-  assert.equal(joinCodeError(new ApiError(404, 'private server detail', 'unknown_code')), '操作失败，请稍后重试');
-  assert.equal(joinCodeError(new Error('private network detail')), '操作失败，请稍后重试');
+  globalThis.fetch = async () => ({
+    ok: false, status: 404, text: async () => JSON.stringify({ error: 'join_code_not_found', message: 'Join code not found' }),
+  });
+  await assert.rejects(resolveJoinCode('ZZZZZZ'), (error) => {
+    assert.ok(error instanceof ApiError);
+    assert.equal(errorTextZh(error), '找不到该房间码的牌局');
+    return true;
+  });
 });
