@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Brand navy sampled from the AppIcon master (#101C28). -->
+    <color name="ic_launcher_background">#FF101C28</color>
+</resources>
