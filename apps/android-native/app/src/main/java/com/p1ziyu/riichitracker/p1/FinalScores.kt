@@ -9,10 +9,21 @@ import java.util.TimeZone
 
 // ---- Spec §1: modes, winds, totals, ranks ---------------------------------
 
-/** Winds in seat order. East is the dealer seat. */
+/** Winds in seat order. East is the dealer seat.
+ *  Internal keys are the server wind codes (E/S/W/N); render only
+ *  via windLabel(). The server rejects Chinese winds (400 unknown_wind). */
 fun windsFor(mode: String?): List<String> = when (mode) {
-    "3p" -> listOf("东", "南", "西")
-    else -> listOf("东", "南", "西", "北")
+    "3p" -> listOf("E", "S", "W")
+    else -> listOf("E", "S", "W", "N")
+}
+
+/** Display-only mapping: server wind code -> Chinese wind name. */
+fun windLabel(wind: String): String = when (wind) {
+    "E" -> "东"
+    "S" -> "南"
+    "W" -> "西"
+    "N" -> "北"
+    else -> wind
 }
 
 fun modeLabel(mode: String?): String = when (mode) {

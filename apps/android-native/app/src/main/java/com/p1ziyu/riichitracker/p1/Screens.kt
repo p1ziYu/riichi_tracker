@@ -273,8 +273,8 @@ import kotlinx.coroutines.delay
         if (rows.isEmpty()) Caption("座次尚未分出：等待人齐后服务端自动分座。")
         rows.forEach { row ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("${row.wind} · ${row.displayName}", color = Brand.text)
-                if (row.wind == "东") Text("庄家", color = Brand.goldText)
+                Text("${windLabel(row.wind)} · ${row.displayName}", color = Brand.text)
+                if (row.wind == "E") Text("庄家", color = Brand.goldText)
             }
             HorizontalDivider(color = Brand.hairline)
         }
@@ -283,7 +283,7 @@ import kotlinx.coroutines.delay
             val ranks = computeRanks(match.finalByWind(), windsFor(match.mode))
             match.finalScores.forEach { score ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("${score.wind} · ${match.displayNameFor(match.seats.firstOrNull { it.wind == score.wind }?.userId ?: "")}",
+                    Text("${windLabel(score.wind)} · ${match.displayNameFor(match.seats.firstOrNull { it.wind == score.wind }?.userId ?: "")}",
                         color = Brand.text)
                     Text("${score.score} · ${rankLabel(score.rank ?: ranks[score.wind])}", color = Brand.text)
                 }
@@ -333,7 +333,7 @@ private fun applyKey(current: String, key: String): String = when (key) {
     onSave: (Map<String, String>) -> Unit, onBack: () -> Unit) {
     val winds = windsFor(match.mode)
     var cells by remember { mutableStateOf(winds.associateWith { initial[it].orEmpty() }) }
-    var active by remember { mutableStateOf(winds.firstOrNull() ?: "东") }
+    var active by remember { mutableStateOf(winds.firstOrNull() ?: "E") }
     val parsed = winds.associateWith { parseScoreCell(cells[it].orEmpty()) }
     val ranks = computeRanks(parsed.filterValues { it != null }.mapValues { it.value!! }, winds)
     val validation = validateFinalScores(cells, match.mode)
@@ -349,7 +349,7 @@ private fun applyKey(current: String, key: String): String = when (key) {
                 .border(if (selected) 2.dp else 0.dp, Brand.gold, RoundedCornerShape(10.dp))) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("$wind · ${row?.displayName ?: "待定"}", color = Brand.goldText,
+                        Text("${windLabel(wind)} · ${row?.displayName ?: "待定"}", color = Brand.goldText,
                             style = MaterialTheme.typography.titleMedium)
                         Text(rankLabel(ranks[wind]), color = Brand.text)
                     }
@@ -484,9 +484,9 @@ private fun applyKey(current: String, key: String): String = when (key) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Text("${modeLabel(match.mode)} · ${if (match.status == "in_progress") "进行中" else if (match.status == "finished") "已结束" else "已取消"}",
                     color = Brand.goldText, style = MaterialTheme.typography.titleMedium)
-                Text(match.seats.joinToString(" ") { "${it.wind}${it.name}" }, color = Brand.text)
+                Text(match.seats.joinToString(" ") { "${windLabel(it.wind)}${it.name}" }, color = Brand.text)
                 if (match.finalScores != null) {
-                    Text(match.finalScores.joinToString(" ") { "${it.wind}${it.score}" }, color = Brand.text)
+                    Text(match.finalScores.joinToString(" ") { "${windLabel(it.wind)}${it.score}" }, color = Brand.text)
                     Text("合计 ${match.finalScores.sumOf { it.score }} / ${match.total}", color = Brand.goldText)
                 }
                 Caption("左滑删除 · ${localMatchTime(match.createdAt)}")
@@ -535,8 +535,8 @@ private fun applyKey(current: String, key: String): String = when (key) {
         SectionTitle("座次")
         match.seats.forEach { seat ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("${seat.wind} · ${seat.name}", color = Brand.text)
-                if (seat.wind == "东") Text("庄家", color = Brand.goldText)
+                Text("${windLabel(seat.wind)} · ${seat.name}", color = Brand.text)
+                if (seat.wind == "E") Text("庄家", color = Brand.goldText)
             }
             HorizontalDivider(color = Brand.hairline)
         }
@@ -544,7 +544,7 @@ private fun applyKey(current: String, key: String): String = when (key) {
             SectionTitle("终局得点")
             match.finalScores.forEach { score ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("${score.wind} · ${match.seats.firstOrNull { it.wind == score.wind }?.name}", color = Brand.text)
+                    Text("${windLabel(score.wind)} · ${match.seats.firstOrNull { it.wind == score.wind }?.name}", color = Brand.text)
                     Text("${score.score} · ${rankLabel(score.rank)}", color = Brand.text)
                 }
             }
@@ -573,7 +573,7 @@ private fun applyKey(current: String, key: String): String = when (key) {
     onSave: (Map<String, String>) -> Unit, onBack: () -> Unit) {
     val winds = windsFor(match.mode)
     var cells by remember { mutableStateOf(winds.associateWith { localFinalCells(match)[it].orEmpty() }) }
-    var active by remember { mutableStateOf(winds.firstOrNull() ?: "东") }
+    var active by remember { mutableStateOf(winds.firstOrNull() ?: "E") }
     val parsed = winds.associateWith { parseScoreCell(cells[it].orEmpty()) }
     val ranks = computeRanks(parsed.filterValues { it != null }.mapValues { it.value!! }, winds)
     val validation = validateFinalScores(cells, match.mode)
@@ -588,7 +588,7 @@ private fun applyKey(current: String, key: String): String = when (key) {
                 .border(if (active == wind) 2.dp else 0.dp, Brand.gold, RoundedCornerShape(10.dp))) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("$wind · ${seat?.name}", color = Brand.goldText, style = MaterialTheme.typography.titleMedium)
+                        Text("${windLabel(wind)} · ${seat?.name}", color = Brand.goldText, style = MaterialTheme.typography.titleMedium)
                         Text(rankLabel(ranks[wind]), color = Brand.text)
                     }
                     OutlinedTextField(cells[wind].orEmpty(), { value ->

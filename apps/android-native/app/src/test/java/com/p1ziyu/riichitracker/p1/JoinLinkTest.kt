@@ -43,10 +43,10 @@ class JoinLinkTest {
         val m = json.decodeFromString<MatchDetail>("""{
             "id":"m1","mode":"3p","status":"in_progress","hostId":"u1","joinCode":"ABC234",
             "members":[{"userId":"u1","displayName":"东家"},{"userId":"u2","displayName":"南家"},{"userId":"u3","displayName":"西家"}],
-            "seats":[{"userId":"u1","wind":"东"},{"userId":"u2","wind":"南"},{"userId":"u3","wind":"西"}],
+            "seats":[{"userId":"u1","wind":"E"},{"userId":"u2","wind":"S"},{"userId":"u3","wind":"W"}],
             "finalScores":null,"createdAt":"2026-10-26T00:00:00Z"}""")
         assertEquals(3, m.expectedCount)
-        assertEquals(listOf("东", "南", "西"), m.seatRows().map { it.wind })
+        assertEquals(listOf("E", "S", "W"), m.seatRows().map { it.wind })
         assertTrue(m.isHost("u1")); assertFalse(m.isHost("u2"))
     }
 }
