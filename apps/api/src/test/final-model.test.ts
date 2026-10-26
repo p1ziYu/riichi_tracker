@@ -274,6 +274,15 @@ test('Final-native model: create, auto-draw join, final scores, cancel, admin, r
     const adminMatches = await request<MatchView[]>('/api/admin/matches', { cookie: admin.cookie });
     assert.equal(adminMatches.status, 200);
     assert.equal(adminMatches.data.some((m) => m.id === match.id), true);
+
+    // Admin may read any match detail (data management) even without
+    // membership; a non-member who is not admin still gets 403.
+    const adminDetail = await request<MatchView>(`/api/matches/${match.id}`, { cookie: admin.cookie });
+    assert.equal(adminDetail.status, 200);
+    assert.equal(adminDetail.data.id, match.id);
+    const stranger = await player('Final stranger');
+    const strangerDetail = await request<{ error: string }>(`/api/matches/${match.id}`, { cookie: stranger.cookie });
+    assert.equal(strangerDetail.status, 403);
     const adminPatch = await request<MatchView>(`/api/admin/matches/${match.id}/final-scores`, {
       method: 'PATCH', cookie: admin.cookie,
       body: { scores: [{ wind: 'E', score: 400 }, { wind: 'S', score: 300 }, { wind: 'W', score: 200 }, { wind: 'N', score: 100 }] },

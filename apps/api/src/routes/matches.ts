@@ -3,6 +3,7 @@ import { ENGINE_VERSION, normalizeRulesConfig } from '@riichi/engine';
 import type { FastifyInstance } from 'fastify';
 import {
   bindGuestToMatch,
+  isAdminPrincipal,
   requirePrincipal,
 } from '../auth.js';
 import { pool } from '../db.js';
@@ -650,7 +651,10 @@ export function registerMatchesRoutes(app: FastifyInstance): void {
     if (access === 'not_found') {
       return reply.code(404).send({ error: 'match_not_found', message: 'Match not found' });
     }
-    if (access === 'forbidden') {
+    // Admins manage all matches (players/data management), so they may read
+    // any match detail even without membership. This bypass is scoped to the
+    // detail read only; the check-in-token endpoint below stays owner-only.
+    if (access === 'forbidden' && !(await isAdminPrincipal(principal))) {
       return reply.code(403).send({ error: 'forbidden', message: 'Access denied' });
     }
 
