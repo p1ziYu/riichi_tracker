@@ -26,9 +26,10 @@ internal fun matchStatusLabel(status: String): String = when (status.lowercase(L
 }
 
 internal fun reviewLabel(status: String): String = when (status.lowercase(Locale.ROOT)) {
-    "approved", "verified" -> "已审核"
+    // fix10 P10: reviewed and approved are the same state in the UI —
+    // one word (已审核) on both wizards, matching iOS.
+    "approved", "verified", "reviewed" -> "已审核"
     "pending", "unreviewed" -> "待审核"
-    "reviewed" -> "已复核"
     "draft" -> "草稿"
     "rejected" -> "未通过"
     else -> "审核状态未提供"
@@ -86,4 +87,18 @@ internal fun localMatchTime(value: String?, timeZone: TimeZone = TimeZone.getDef
             .atZoneSameInstant(timeZone.toZoneId())
             .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ROOT))
     }.getOrDefault("时间未提供")
+}
+
+/**
+ * fix10 M7: same parse as [localMatchTime], but null when the value is
+ * missing or unparseable, so callers can OMIT the line instead of
+ * rendering the "更新于 时间未提供" placeholder.
+ */
+internal fun localMatchTimeOrNull(value: String?, timeZone: TimeZone = TimeZone.getDefault()): String? {
+    if (value.isNullOrBlank()) return null
+    return runCatching {
+        OffsetDateTime.parse(value, DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+            .atZoneSameInstant(timeZone.toZoneId())
+            .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ROOT))
+    }.getOrNull()
 }

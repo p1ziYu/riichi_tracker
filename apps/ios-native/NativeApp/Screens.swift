@@ -18,6 +18,15 @@ extension View {
                 }
             }
             .scrollDismissesKeyboard(.immediately)
+            // iosfix10 P8: the iOS 27 floating keyboard toolbar pill
+            // straddles the keyboard's top edge, so a focused field
+            // scrolled flush above the keyboard ends up under the pill.
+            // A clear bottom inset lifts the field above the pill
+            // (same safeAreaInset mechanism as the undo banner, which
+            // already floats correctly above the floating tab bar).
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                Color.clear.frame(height: 72)
+            }
             // NOTE (iosfix6, measured 2026-10-24): .interactively broke
             // drag-to-dismiss here — three swipeUps moved the sheet's
             // content 0pt and left the numberPad open, because a flick never
@@ -144,6 +153,21 @@ extension View {
     func brandPanel() -> some View { modifier(BrandPanel()) }
 }
 
+extension View {
+    /// iosfix10 M3: the iOS 27 floating tab bar (pill) overlays the
+    /// bottom of tab content, and the List's own safe area does not
+    /// clear it, so static last rows end up half-covered. A clear
+    /// bottom safe-area inset lifts content above the pill (same
+    /// mechanism as the undo banner, which already floats correctly
+    /// above the pill). Applied to tab roots only, never to sheets
+    /// (sheets cover the tab bar).
+    func tabBarClearance() -> some View {
+        self.safeAreaInset(edge: .bottom, spacing: 0) {
+            Color.clear.frame(height: 96)
+        }
+    }
+}
+
 // iosfix8 item 1: the plain-list card. In .plain style
 // listRowBackground fills the full screen width, so brandPanel()
 // (a listRowBackground) makes rows full-width bands, not cards.
@@ -221,19 +245,39 @@ struct TrailingSwipeDeleteRow<Content: View>: View {
                 .accessibilityHidden(!(revealed || offset < -trailingDeleteWidth * 0.5))
                 .allowsHitTesting(revealed || offset < -trailingDeleteWidth * 0.5)
             content
-                .offset(x: offset)
                 .disabled(revealed || offset != 0)
+                // iosfix10 B2: the outer TapGesture that used to live here
+                // swallowed the row's NavigationLink tap on all three
+                // lists (lobby, history, local), so rows never navigated.
+                // Collapse-on-tap is now an overlay that exists ONLY
+                // while the row is swiped open, and the overlay sits
+                // INSIDE the offset (offset outermost) so it rides with
+                // the shifted content: its right edge stops 88pt short
+                // of the row edge and never covers the delete block.
+                // (Overlay after offset would sit on the unshifted
+                // frame and eat delete taps — that mis-ordering failed
+                // testFix8LocalSwipe/testLocalSwipeDelete in phase A.)
+                // Disabled stays before the overlay so the overlay tap
+                // itself is not disabled.
+                .overlay {
+                    if revealed || offset != 0 {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                revealed = false
+                                offset = 0
+                            }
+                    }
+                }
+                .offset(x: offset)
         }
         .clipped()
-        .contentShape(Rectangle())
-        .gesture(
-            TapGesture().onEnded {
-                if revealed || offset != 0 {
-                    revealed = false
-                    offset = 0
-                }
-            }
-        )
+        // iosfix10 P5: a row hidden by undo (or scrolled away) resets to
+        // its resting state, so it never reappears still swiped open.
+        .onDisappear {
+            revealed = false
+            offset = 0
+        }
         .simultaneousGesture(
             DragGesture(minimumDistance: 12, coordinateSpace: .local)
                 .onChanged { value in
@@ -281,7 +325,9 @@ private extension DateFormatter {
     }()
 }
 
-private func handLabel(_ kind: String) -> String {
+// iosfix10 B3: shared with LocalScreens (was private; the local
+// history rows need the same kind labels as the online history).
+func handLabel(_ kind: String) -> String {
     switch kind.lowercased() {
     case "ron": "荣和"
     case "tsumo": "自摸"
@@ -326,10 +372,23 @@ func windLabel(_ wind: String?) -> String {
     }
 }
 
+/// iosfix10 P9: point fields and preset chips share one format
+/// (25,000). The field's getter formats the stored digits, so typed
+/// values display grouped; parsing strips grouping separators so a
+/// grouped display (or paste) still parses back to the same value.
+func formatPoints(_ value: Int) -> String { value.formatted() }
+func parsePoints(_ text: String) -> Int? {
+    let digits = text.filter { $0.isASCII && $0.isNumber }
+    guard !digits.isEmpty else { return nil }
+    return Int(digits)
+}
+
 func reviewLabel(_ review: String) -> String {
     switch review.lowercased() {
-    case "approved", "verified": "已审核"
-    case "reviewed": "已复核"
+    // iosfix10 P10: reviewed and approved are the same state in the
+    // UI — one word (已审核) on both wizards, matching the local
+    // wizard's bundled templates.
+    case "approved", "verified", "reviewed": "已审核"
     case "pending", "unreviewed": "待审核"
     case "draft": "草稿"
     case "rejected": "未通过"
@@ -452,7 +511,10 @@ struct AuthScreen: View {
                         busy = true; error = nil
                         defer { busy = false }
                         do { try await session.signInGuest() }
-                        catch { self.error = error.localizedDescription }
+                        // iosfix10 B1: never render a raw error (the
+                        // server's English message) on the login screen.
+                        catch let failure as APIError { self.error = APIErrorCopy.text(failure) }
+                        catch { self.error = "网络异常，请稍后重试。" }
                     }
                 }
                 .disabled(busy)
@@ -498,8 +560,12 @@ struct AuthScreen: View {
         defer { busy = false }
         do {
             try await session.signIn(email: email.trimmingCharacters(in: .whitespacesAndNewlines), password: password, name: registering ? name.trimmingCharacters(in: .whitespacesAndNewlines) : nil)
+        } catch let failure as APIError {
+            // iosfix10 B1: map through APIErrorCopy so a failed login
+            // shows 邮箱或密码不正确 instead of the server's English.
+            self.error = APIErrorCopy.text(failure)
         } catch {
-            self.error = error.localizedDescription
+            self.error = "网络异常，请稍后重试。"
         }
     }
 }
@@ -697,6 +763,7 @@ struct AuthScreen: View {
         .tint(Brand.gold)
         .foregroundStyle(Brand.text)
         .navigationTitle(lobby ? "大厅" : "战绩")
+        .tabBarClearance()
         .refreshable { await refresh() }
         .task { await refresh() }
         .onChange(of: session.generationID) { _, _ in
@@ -849,7 +916,11 @@ struct AuthScreen: View {
                 } header: { BrandSectionHeader("对局信息") }
                 .brandPanel()
                 if currentSnapshot.match.status == "preparing",
-                   let ownSeat = currentSnapshot.seats.first(where: { $0.principalId == session.principalID && $0.status == "checked_in" }) {
+                   let ownSeat = currentSnapshot.seats.first(where: { $0.principalId == session.principalID && $0.status == "checked_in" }),
+                   // iosfix10 P4: the host is the one who starts the
+                   // game, so "等待房主开局" must not show to the host
+                   // themselves — only to non-owner members.
+                   currentSnapshot.members.first(where: { $0.principalId == session.principalID })?.isOwner != true {
                     Section {
                         Text("你在 \(ownSeat.seatNo + 1) 号位，等待房主开局。")
                             .foregroundStyle(Brand.gold)
@@ -863,8 +934,16 @@ struct AuthScreen: View {
                     ForEach(currentSnapshot.seats.sorted { $0.seatNo < $1.seatNo }, id: \.seatNo) { seat in
                         let preparing = currentSnapshot.match.status == "preparing"
                         let drawn = currentSnapshot.match.seatingDrawnAt != nil
-                        let drawnWind = preparing && drawn
+                        // iosfix10 M1: the drawn wind is the truth in
+                        // every state, not just while preparing — the
+                        // old `preparing && drawn` gate made seats fall
+                        // back to seat-number order once the game
+                        // started. The dealer marker likewise follows
+                        // the current hand's dealer (falling back to
+                        // the match dealer before the first hand).
+                        let drawnWind = drawn
                             ? currentSnapshot.members.first { $0.seatNo == seat.seatNo }?.wind : nil
+                        let dealerSeatNo = currentSnapshot.currentHand?.dealerSeatNo ?? currentSnapshot.match.dealerSeatNo
                         HStack(spacing: 12) {
                             Text(preparing && !drawn ? "·" : windLabel(drawnWind ?? ["E", "S", "W", "N"][seat.seatNo % 4]))
                                 .font(Brand.font(.headline))
@@ -872,8 +951,17 @@ struct AuthScreen: View {
                                 .frame(width: 30, height: 30)
                                 .background(Brand.cream, in: RoundedRectangle(cornerRadius: 6))
                             VStack(alignment: .leading, spacing: 5) {
-                                Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "空座")\(preparing && drawn && seat.seatNo == currentSnapshot.match.dealerSeatNo ? " · 庄家" : "")")
-                                    .font(Brand.font(.headline)).foregroundStyle(Brand.text)
+                                // iosfix10 P3: the dealer suffix is its
+                                // own fixed-size Text, so a long name
+                                // wraps on the name while 庄家 never
+                                // splits across lines.
+                                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                                    Text("\(seat.seatNo + 1) 号位 · \(seat.displayName ?? "空座")")
+                                    if drawn && seat.seatNo == dealerSeatNo {
+                                        Text(" · 庄家").fixedSize(horizontal: true, vertical: false)
+                                    }
+                                }
+                                .font(Brand.font(.headline)).foregroundStyle(Brand.text)
                                 Text(seatLabel(seat.status))
                                     .font(Brand.font(.caption1)).foregroundStyle(Brand.muted)
                             }
@@ -960,6 +1048,7 @@ struct AuthScreen: View {
         .tint(Brand.gold)
         .foregroundStyle(Brand.text)
         .navigationTitle("牌桌")
+        .tabBarClearance()
         .refreshable { await refresh() }
         .task(id: matchId) { await refresh() }
         .onAppear {
@@ -1163,6 +1252,7 @@ struct ProfileScreen: View {
         .tint(Brand.gold)
         .foregroundStyle(Brand.text)
         .navigationTitle("我的")
+        .tabBarClearance()
         .refreshable { await refresh() }
         .task { await refresh() }
     }

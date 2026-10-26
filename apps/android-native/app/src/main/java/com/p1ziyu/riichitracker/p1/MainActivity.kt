@@ -32,6 +32,9 @@ import kotlinx.serialization.Serializable
 @Serializable private object History
 @Serializable private object Profile
 @Serializable private object Create
+// fix10 M5: local tables reachable via a tab like iOS, instead of
+// only through 我的 → 进入本地无身份模式.
+@Serializable private object Local
 @Serializable private data class Table(val id: String)
 
 class MainActivity : ComponentActivity() {
@@ -61,7 +64,15 @@ class MainActivity : ComponentActivity() {
                     }
                     state.session == SessionMode.LOCAL_ONLY -> {
                         val local by localModel.ui.collectAsState()
-                        LocalContent(local, localModel, model::online)
+                        // fix10 M6: this branch bypasses MainContent's
+                        // Scaffold (whose content padding carries the
+                        // status-bar inset on every other screen), so
+                        // the local title collided with the status bar.
+                        // Pad here only — the Local tab inside
+                        // MainContent already gets Scaffold padding.
+                        Box(Modifier.fillMaxSize().statusBarsPadding()) {
+                            LocalContent(local, localModel, model::online)
+                        }
                     }
                     state.session == SessionMode.SIGNED_OUT -> {
                         AuthScreen(state.registering, state.authBusy, state.authError,
@@ -72,7 +83,7 @@ class MainActivity : ComponentActivity() {
                         CheckInScreen(incomingLink, state, model) { incomingLink = null }
                         androidx.activity.compose.BackHandler { incomingLink = null }
                     }
-                    else -> MainContent(model, state) { incomingLink = "" }
+                    else -> MainContent(model, state, localModel) { incomingLink = "" }
                 }
             }
         }
@@ -86,10 +97,11 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun MainContent(model: AppViewModel, state: AppState, onPasteLink: () -> Unit) {
+private fun MainContent(model: AppViewModel, state: AppState, localModel: LocalViewModel, onPasteLink: () -> Unit) {
     val nav = rememberNavController()
     val entry by nav.currentBackStackEntryAsState()
     val route = entry?.destination?.route.orEmpty()
+    val local by localModel.ui.collectAsState()
     LaunchedEffect(Unit) { model.loadList() }
     LaunchedEffect(state.revokedTableId, route) {
         if (state.revokedTableId != null && route.contains("Table")) {
@@ -122,11 +134,13 @@ private fun MainContent(model: AppViewModel, state: AppState, onPasteLink: () ->
         if (!route.contains("Table") && !route.contains("Create")) NavigationBar {
             listOf(Triple("大厅", Lobby, route.contains("Lobby")),
                 Triple("战绩", History, route.contains("History")),
+                Triple("本地", Local, route.contains("Local")),
                 Triple("我的", Profile, route.contains("Profile"))).forEach { (title, destination, selected) ->
                 NavigationBarItem(selected = selected, onClick = {
                     when (destination) {
                         Lobby -> nav.navigate(Lobby) { popUpTo(nav.graph.findStartDestination().id) { saveState = true }; launchSingleTop = true; restoreState = true }
                         History -> nav.navigate(History) { popUpTo(nav.graph.findStartDestination().id) { saveState = true }; launchSingleTop = true; restoreState = true }
+                        Local -> nav.navigate(Local) { popUpTo(nav.graph.findStartDestination().id) { saveState = true }; launchSingleTop = true; restoreState = true }
                         Profile -> nav.navigate(Profile) { popUpTo(nav.graph.findStartDestination().id) { saveState = true }; launchSingleTop = true; restoreState = true }
                     }
                 }, icon = { Text(title.take(1)) }, label = { Text(title) })
@@ -164,6 +178,19 @@ private fun MainContent(model: AppViewModel, state: AppState, onPasteLink: () ->
                 LaunchedEffect(Unit) { model.loadProfile() }
                 ProfileScreen(state.profile, state.profileError, state.diagnostic,
                     model::runDiagnostic, model::logout, onPasteLink, model::loadProfile, model::localOnly)
+            }
+            composable<Local> {
+                // fix10 M5: the Local tab reuses LocalContent; its
+                // "进入在线登录" button switches to the Lobby tab
+                // instead of resetting the session (model::online
+                // would drop an already-signed-in session to
+                // RESTORING/SIGNED_OUT).
+                LocalContent(local, localModel, onOnline = {
+                    nav.navigate(Lobby) {
+                        popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                        launchSingleTop = true; restoreState = true
+                    }
+                })
             }
             composable<Table> { stack ->
                 val id = stack.toRoute<Table>().id

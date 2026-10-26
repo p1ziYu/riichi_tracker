@@ -213,7 +213,7 @@ struct RulesWizard: View {
             } else {
                 Section {
                     Text("\(selected?.name ?? "") · \(count) 麻 · 自定义 \(changed.count) 项").brandPanel()
-                    Text("创建后需房主自行选座，所有座位签到并确认起家方可开始。")
+                    Text("创建后由房主抽风定座（可调整），成员签到齐全后确认起家即可开局。")
                         .foregroundStyle(Brand.muted).brandPanel()
                     Button(busy ? "创建中…" : "创建并进入牌桌") { Task { await create() } }
                         .disabled(busy || issue != nil || creationUncertain)
@@ -247,9 +247,16 @@ struct RulesWizard: View {
     private func pointInput(_ key: String, label: String) -> some View {
         VStack(alignment: .leading) {
             Text(label)
-            TextField(label, text: Binding(get: { numberText[key] ?? "" }, set: { text in
+            // iosfix10 P9: the getter formats the stored digits, so
+            // the field shows 25,000 like the preset chips below it;
+            // parsing strips separators, so the grouped display (or a
+            // grouped paste) still parses to the same value.
+            TextField(label, text: Binding(get: {
+                if let raw = numberText[key], let value = parsePoints(raw) { return formatPoints(value) }
+                return numberText[key] ?? ""
+            }, set: { text in
                 numberText[key] = text
-                if let amount = Int(text) { setPoint(key, amount, preserveText: true) }
+                if let amount = parsePoints(text) { setPoint(key, amount, preserveText: true) }
                 else { issue = "\(label)需填写整数"; examples = [] }
             }), prompt: Text(label).foregroundColor(Brand.muted))
             .keyboardType(.numberPad)
@@ -295,7 +302,7 @@ struct RulesWizard: View {
     private func recalculate() {
         examples = []
         for (index, key) in pointKeys.enumerated() {
-            guard let text = numberText[key], let number = Int(text), number >= 0, number <= 2_147_483_647,
+            guard let text = numberText[key], let number = parsePoints(text), number >= 0, number <= 2_147_483_647,
                   number % 100 == 0, (index != 0 || number >= 1000), (index != 1 && index != 2 || number > 0) else {
                 issue = "\(pointLabels[index])需为有效的整百点数"; return
             }

@@ -38,15 +38,25 @@ private extension View {
                 .listRowInsets(Brand.rowInsets)
             }
             Section {
+                // iosfix10 M4: empty-state guidance cards, same style
+                // as the online lobby's (never shown on load failure,
+                // so a failed read is not mistaken for "no tables").
+                if store.failure == nil && store.matches.filter({ $0.status == "active" }).isEmpty {
+                    Text("暂无进行中的本地牌桌，点击“离线开桌”开始一局。").foregroundStyle(Brand.muted).padding(Brand.cardInnerPadding).frame(maxWidth: .infinity, alignment: .leading).brandCard(cornerRadius: 10).listRowInsets(Brand.rowInsets)
+                }
                 ForEach(store.matches.filter { $0.status == "active" }) { match in row(match) }
             } header: { BrandSectionHeader("进行中", leadingShift: BrandSectionHeader.plainLeadingShift) }
             Section {
+                if store.failure == nil && store.matches.filter({ $0.status == "finished" }).isEmpty {
+                    Text("暂无已结束的本地牌桌，结算完成后会在这里显示逐局明细。").foregroundStyle(Brand.muted).padding(Brand.cardInnerPadding).frame(maxWidth: .infinity, alignment: .leading).brandCard(cornerRadius: 10).listRowInsets(Brand.rowInsets)
+                }
                 ForEach(store.matches.filter { $0.status == "finished" }) { match in row(match) }
             } header: { BrandSectionHeader("已结束 · 逐局明细", leadingShift: BrandSectionHeader.plainLeadingShift) }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden).background(Brand.background).tint(Brand.gold).foregroundStyle(Brand.text)
         .navigationTitle("本地牌桌")
+        .tabBarClearance()
         .navigationDestination(for: String.self) { id in LocalTableScreen(store: store, id: id) }
         .sheet(isPresented: $creating) {
             NavigationStack { LocalWizard(store: store) { id in creating = false; chosen = id } }
@@ -54,8 +64,13 @@ private extension View {
         .navigationDestination(isPresented: Binding(get: { chosen != nil }, set: { if !$0 { chosen = nil } })) {
             if let chosen { LocalTableScreen(store: store, id: chosen) }
         }
-        .confirmationDialog("删除整桌及全部历史？", isPresented: Binding(get: { deleteFirst != nil }, set: { if !$0 { deleteFirst = nil } }), titleVisibility: .visible) {
-            Button("取消", role: .cancel) { deleteFirst = nil }
+        // iosfix10 P6: on iOS 27 this confirmationDialog renders as a
+        // centered popover that DROPS the cancel-role button, leaving
+        // only red 继续确认 (tap-outside was the only dismiss). An
+        // alert always renders both buttons, so step 1 now has an
+        // explicit 保留牌桌 cancel.
+        .alert("删除整桌及全部历史？", isPresented: Binding(get: { deleteFirst != nil }, set: { if !$0 { deleteFirst = nil } })) {
+            Button("保留牌桌", role: .cancel) { deleteFirst = nil }
             Button("继续确认", role: .destructive) { deleteFinal = deleteFirst; deleteFirst = nil }
         } message: { Text("已结算的逐局历史也将永久删除。") }
         .alert("最后确认：永久删除？", isPresented: Binding(get: { deleteFinal != nil }, set: { if !$0 { deleteFinal = nil } })) {
@@ -307,9 +322,15 @@ private extension View {
     private func point(_ key: String, _ label: String) -> some View {
         VStack(alignment: .leading) {
             Text(label)
-            TextField("", text: Binding(get: { numbers[key] ?? "" }, set: { text in
+            // iosfix10 P9: same shared format as the online wizard —
+            // the getter groups the digits (25,000, like the chips),
+            // parsing strips separators.
+            TextField("", text: Binding(get: {
+                if let raw = numbers[key], let value = parsePoints(raw) { return formatPoints(value) }
+                return numbers[key] ?? ""
+            }, set: { text in
                 numbers[key] = text
-                if let value = Int(text) { setPoint(key, value, keepText: true) }
+                if let value = parsePoints(text) { setPoint(key, value, keepText: true) }
                 else { issue = "\(label)需填写整数"; examples = [] }
             }), prompt: Text(label).foregroundColor(Brand.muted)).keyboardType(.numberPad).localBrandField()
         }.brandPanel()
@@ -332,7 +353,7 @@ private extension View {
     private func recalculate() {
         examples = []
         for (index, key) in pointKeys.enumerated() {
-            guard let text = numbers[key], let number = Int(text), number >= 0, number <= 2_147_483_647,
+            guard let text = numbers[key], let number = parsePoints(text), number >= 0, number <= 2_147_483_647,
                   number % 100 == 0, (index != 0 || number >= 1000), (index != 1 && index != 2 || number > 0) else {
                 issue = "\(pointLabels[index])需为有效整百点数"; return
             }
@@ -343,10 +364,10 @@ private extension View {
               umaNumbers.allSatisfy({ $0.isFinite && ($0 * 10).rounded() == $0 * 10 }),
               abs(umaNumbers.reduce(0, +)) < 0.00001 else { issue = "马点须每座为十分位且总和为零"; return }
         values["uma"] = .array(umaNumbers.map(JSONValue.number))
-        guard let penalty = Int(numbers["notenPenaltyTotal"] ?? ""), penalty % (count == 3 ? 200 : 600) == 0 else {
+        guard let penalty = parsePoints(numbers["notenPenaltyTotal"] ?? ""), penalty % (count == 3 ? 200 : 600) == 0 else {
             issue = "荒牌罚符不可整百分摊"; return
         }
-        guard let ron = Int(numbers["honbaRon"] ?? ""), let perPayer = Int(numbers["honbaPerPayer"] ?? ""),
+        guard let ron = parsePoints(numbers["honbaRon"] ?? ""), let perPayer = parsePoints(numbers["honbaPerPayer"] ?? ""),
               ron == perPayer * (count - 1) else { issue = "本场荣和与自摸支付需联动"; return }
         do {
             let data = try JSONEncoder().encode(values)
@@ -431,7 +452,7 @@ private extension View {
                         }
                         Button("录入本局结果") { entering = true }.disabled(currentMatch.engineVersion != EngineBridgeCheck.version)
                             .brandPanel().accessibilityIdentifier("local.table.enterResult")
-                    } header: { BrandSectionHeader("\(hand.roundWind) \(hand.roundNumber) · 庄 \(hand.dealerSeatNo + 1) · 本场 \(hand.honba) · 供托 \(hand.riichiPool) 点（\(hand.riichiPool / 1000) 根）") }
+                    } header: { BrandSectionHeader("\(windLabel(hand.roundWind)) \(hand.roundNumber) · 庄 \(hand.dealerSeatNo + 1) · 本场 \(hand.honba) · 供托 \(hand.riichiPool) 点（\(hand.riichiPool / 1000) 根）") }
                 } else if currentMatch.status == "active" {
                     Section { Button("新开一局") { action { try store.openHand(id) } }.disabled(currentMatch.engineVersion != EngineBridgeCheck.version).brandPanel() }
                 }
@@ -465,7 +486,7 @@ private extension View {
                 Section {
                     if currentMatch.results.isEmpty { Text("暂无已结算局").foregroundStyle(Brand.muted).brandPanel() }
                     ForEach(currentMatch.results) { result in
-                        DisclosureGroup("\(result.hand.roundWind) \(result.hand.roundNumber) · \(result.input["kind"]?.string ?? "结果") · \(result.settledAt)") {
+                        DisclosureGroup("\(windLabel(result.hand.roundWind)) \(result.hand.roundNumber) · \(handLabel(result.input["kind"]?.string ?? "")) · \(localDate(result.settledAt))") {
                             Text("庄 \(result.hand.dealerSeatNo + 1) · 本场 \(result.hand.honba) · 原供托 \(result.hand.riichiPool) 点")
                                 .foregroundStyle(Brand.muted).brandPanel()
                             if let seats = result.output["perSeat"]?.arrayValue {
@@ -489,10 +510,14 @@ private extension View {
         }
         .scrollContentBackground(.hidden).background(Brand.background).tint(Brand.gold).foregroundStyle(Brand.text)
         .navigationTitle(match?.name ?? "本地牌桌")
+        .tabBarClearance()
         .sheet(isPresented: $entering) {
             resultEntrySheet
         }
-        .confirmationDialog("放弃未结算局并终局？", isPresented: $abandonFirst, titleVisibility: .visible) {
+        // iosfix10 P6, same mechanism as the delete dialog above:
+        // the iOS 27 popover drops the cancel-role button, so this
+        // first step is an alert with an explicit 保留当前局 cancel.
+        .alert("放弃未结算局并终局？", isPresented: $abandonFirst) {
             Button("保留当前局", role: .cancel) {}
             Button("继续确认", role: .destructive) { abandonFinal = true }
         } message: { Text("尚未结算的结果及立直标记会丢弃；已结算历史不会删除。") }
@@ -595,7 +620,7 @@ private extension View {
                         }
                     }
                     if let next = valid.output["nextHand"]?.object {
-                        Text("下局：\(next["roundWind"]?.string ?? "?") \(number(next["roundNumber"]) ?? 0) · 本场 \(number(next["honba"]) ?? 0) · 供托 \(number(next["riichiPool"]) ?? 0) 点")
+                        Text("下局：\(windLabel(next["roundWind"]?.string)) \(number(next["roundNumber"]) ?? 0) · 本场 \(number(next["honba"]) ?? 0) · 供托 \(number(next["riichiPool"]) ?? 0) 点")
                             .foregroundStyle(Brand.muted).brandPanel()
                     }
                     Button("确认并原子结算") {

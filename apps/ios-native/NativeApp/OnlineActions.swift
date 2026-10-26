@@ -1076,6 +1076,11 @@ struct ResultInputFields: View {
                                  ResultInputBuilder.ronCap(rules: snapshot.match.rulesSnapshot,
                                                            playerCount: seats.count))
                             Toggle("\(number + 1) 号位 · \(seat.displayName ?? "未命名")和牌", isOn: winnerBinding)
+                                // iosfix10 P2: lock the ON track to gold
+                                // explicitly, so every winner toggle in
+                                // the ON state renders the same color
+                                // even if a section tint is ever lost.
+                                .tint(Brand.gold)
                                 .disabled(selectionDisabled).brandPanel()
                         } else {
                             Button("\(number + 1) 号位 · \(seat.displayName ?? "未命名")\(draft.winners == [number] ? " ✓" : "")") {
@@ -1084,34 +1089,20 @@ struct ResultInputFields: View {
                         }
                         if draft.winners.contains(number) {
                             if draft.kind == "nagashi_mangan" {
-                                TextField("按顺序填写完整幺九弃牌，如 1m 9m 1z",
-                                          text: field(number, keyPath: \.rivers),
-                                          prompt: Text("按顺序填写完整幺九弃牌，如 1m 9m 1z").foregroundColor(Brand.muted))
-                                    .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
-                                    .brandPanel()
-                                TextField("被鸣走弃牌（如有则不能流满）",
-                                          text: field(number, keyPath: \.called),
-                                          prompt: Text("被鸣走弃牌（如有则不能流满）").foregroundColor(Brand.muted))
-                                    .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
-                                    .brandPanel()
+                                labeledNumberField("按顺序填写完整幺九弃牌，如 1m 9m 1z",
+                                                   text: field(number, keyPath: \.rivers), keyboard: .default)
+                                labeledNumberField("被鸣走弃牌（如有则不能流满）",
+                                                   text: field(number, keyPath: \.called), keyboard: .default)
                             } else {
                                 if (Int(draft.yakuman[number, default: "0"]) ?? 0) == 0 &&
                                     (Int(draft.doubleYakuman[number, default: "0"]) ?? 0) == 0 {
-                                    TextField("\(number + 1) 号位番 1–130",
-                                              text: field(number, keyPath: \.han, fallback: "2"),
-                                              prompt: Text("\(number + 1) 号位番 1–130").foregroundColor(Brand.muted))
-                                        .keyboardType(.numberPad)
-                                        .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
-                                        .brandPanel()
+                                    labeledNumberField("\(number + 1) 号位番 1–130",
+                                                       text: field(number, keyPath: \.han, fallback: "2"))
                                     if let fieldError = fieldErrors["\(number).han"] {
                                         Text(fieldError).foregroundStyle(Brand.loss).brandPanel()
                                     }
-                                    TextField("\(number + 1) 号位符 20–140",
-                                              text: field(number, keyPath: \.fu, fallback: "30"),
-                                              prompt: Text("\(number + 1) 号位符 20–140").foregroundColor(Brand.muted))
-                                        .keyboardType(.numberPad)
-                                        .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
-                                        .brandPanel()
+                                    labeledNumberField("\(number + 1) 号位符 20–140",
+                                                       text: field(number, keyPath: \.fu, fallback: "30"))
                                     if let fieldError = fieldErrors["\(number).fu"] {
                                         Text(fieldError).foregroundStyle(Brand.loss).brandPanel()
                                     }
@@ -1120,22 +1111,14 @@ struct ResultInputFields: View {
                                         .font(Brand.font(.footnote)).foregroundStyle(Brand.muted).brandPanel()
                                 }
                                 let ordinaryCap = snapshot.match.rulesSnapshot?["compositeYakuman"] == .bool(true) ? 10 : 1
-                                TextField("\(number + 1) 号位普通役满数 0–\(ordinaryCap)",
-                                          text: field(number, keyPath: \.yakuman, fallback: "0"),
-                                          prompt: Text("\(number + 1) 号位普通役满数 0–\(ordinaryCap)").foregroundColor(Brand.muted))
-                                    .keyboardType(.numberPad)
-                                    .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
-                                    .brandPanel()
+                                labeledNumberField("\(number + 1) 号位普通役满数 0–\(ordinaryCap)",
+                                                   text: field(number, keyPath: \.yakuman, fallback: "0"))
                                 if let fieldError = fieldErrors["\(number).yakuman"] {
                                     Text(fieldError).foregroundStyle(Brand.loss).brandPanel()
                                 }
                                 if snapshot.match.rulesSnapshot?["doubleYakuman"] == .bool(true) {
-                                    TextField("\(number + 1) 号位特殊双倍役满数 0–10",
-                                              text: field(number, keyPath: \.doubleYakuman, fallback: "0"),
-                                              prompt: Text("\(number + 1) 号位特殊双倍役满数 0–10").foregroundColor(Brand.muted))
-                                        .keyboardType(.numberPad)
-                                        .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
-                                        .brandPanel()
+                                    labeledNumberField("\(number + 1) 号位特殊双倍役满数 0–10",
+                                                       text: field(number, keyPath: \.doubleYakuman, fallback: "0"))
                                     if let fieldError = fieldErrors["\(number).doubleYakuman"] {
                                         Text(fieldError).foregroundStyle(Brand.loss).brandPanel()
                                     }
@@ -1147,5 +1130,19 @@ struct ResultInputFields: View {
                        fallback: String = "") -> Binding<String> {
         Binding(get: { draft[keyPath: keyPath][seat] ?? fallback },
                 set: { draft[keyPath: keyPath][seat] = $0 })
+    }
+    /// iosfix10 P1: the old fields showed their label only as a
+    /// prompt, so once pre-filled (2 / 30 / 0) they were bare
+    /// numbers with nothing saying which was han, fu or yakuman.
+    /// The label now sits above the field permanently.
+    private func labeledNumberField(_ label: String, text: Binding<String>,
+                                    keyboard: UIKeyboardType = .numberPad) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(Brand.font(.footnote)).foregroundStyle(Brand.muted)
+            TextField(label, text: text, prompt: Text(label).foregroundColor(Brand.muted))
+                .keyboardType(keyboard)
+                .padding(10).background(Brand.deep, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .brandPanel()
     }
 }

@@ -146,14 +146,14 @@ final class ScreenshotTourTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["起点与成绩"].waitForExistence(timeout: timeout))
         let startField = app.textFields.element(boundBy: 0)
         XCTAssertTrue(startField.waitForExistence(timeout: timeout))
-        XCTAssertEqual(startField.value as? String, "25000", "House 4P template must start at 25000")
+        XCTAssertEqual(startField.value as? String, "25,000", "House 4P template must start at 25000")
         // Identifiers pin each chip (label queries once resolved the 30000
         // chip to the right element yet still filled 35000 — the Form-row
         // collapse — so labels alone cannot guard this regression).
         scrollTo(app.buttons["local.wizard.preset.startingPoints.30000"], in: app)
         tap(app.buttons["local.wizard.preset.startingPoints.30000"])
         Thread.sleep(forTimeInterval: 1)
-        XCTAssertEqual(startField.value as? String, "30000", "Tapping the 30000 chip did not fill the starting-points field")
+        XCTAssertEqual(startField.value as? String, "30,000", "Tapping the 30000 chip did not fill the starting-points field")
         // Second path: numberPad open, then dismiss via the keyboard
         // toolbar's 完成 (iosfix6 item 4), then tap a chip.
         startField.tap()
@@ -170,11 +170,11 @@ final class ScreenshotTourTests: XCTestCase {
         XCTAssertFalse(app.keyboards.firstMatch.exists, "完成 did not dismiss the keyboard")
         tap(app.buttons["local.wizard.preset.startingPoints.35000"])
         Thread.sleep(forTimeInterval: 1)
-        XCTAssertEqual(startField.value as? String, "35000", "Tapping a chip after dismissing the keyboard did not fill the field")
+        XCTAssertEqual(startField.value as? String, "35,000", "Tapping a chip after dismissing the keyboard did not fill the field")
         // Third path: tapping back down must also dispatch per-chip.
         tap(app.buttons["local.wizard.preset.startingPoints.25000"])
         Thread.sleep(forTimeInterval: 1)
-        XCTAssertEqual(startField.value as? String, "25000", "Tapping the 25000 chip did not restore the field")
+        XCTAssertEqual(startField.value as? String, "25,000", "Tapping the 25000 chip did not restore the field")
         capture("tour-local-preset-chip", in: app)
     }
 

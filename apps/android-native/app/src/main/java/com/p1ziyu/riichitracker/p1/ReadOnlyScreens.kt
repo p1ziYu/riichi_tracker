@@ -158,7 +158,10 @@ private fun MatchRow(match: MatchSummary, templates: List<TemplateDto>, onOpen: 
                 Text("${matchStatusLabel(match.status)} · ${match.playerCount} 麻", color = Brand.text)
                 Caption(localMatchTime(match.createdAt))
                 Caption("牌桌编号 · ${match.id}")
-                Caption("更新于 ${localMatchTime(match.updatedAt)}")
+                // fix10 M7: omit the line when updatedAt is missing —
+                // the API never sends it, so the old code rendered
+                // "更新于 时间未提供" on every row.
+                localMatchTimeOrNull(match.updatedAt)?.let { Caption("更新于 $it") }
             }
         }
     }
@@ -294,8 +297,11 @@ fun MatchListScreen(
             title = { Text(if (deletable) "删除牌桌？" else "隐藏牌桌？") },
             text = { Text(if (deletable) "这张未开始的牌桌将被永久删除，所有成员都将看不到它。此操作无法撤销。"
                 else "这张牌桌只会从你的列表中隐藏，牌桌本身和其他成员不受影响。隐藏后可通过下方的撤销恢复。") },
+            // fix10 P11: the destructive action renders in red like
+            // iOS; 隐藏 (reversible via undo) keeps the default color.
             confirmButton = { TextButton(onClick = { onDeleteMatch(match); pendingDelete = null }) {
-                Text(if (deletable) "删除" else "隐藏") } },
+                Text(if (deletable) "删除" else "隐藏",
+                    color = if (deletable) MaterialTheme.colorScheme.error else Color.Unspecified) } },
             dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } })
     }
     deleteRefusedMatch?.let { match ->
@@ -313,7 +319,7 @@ fun MatchListScreen(
 }
 
 @Composable
-private fun SeatRow(seat: SeatDto) {
+private fun SeatRow(seat: SeatDto, wind: String? = null, isDealer: Boolean = false) {
     val seatStatus = when (seat.status) {
         "empty" -> "空座"
         "assigned" -> "已入座"
@@ -323,12 +329,15 @@ private fun SeatRow(seat: SeatDto) {
     BrandPanel(Modifier.fillMaxWidth()) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Box(Modifier.size(36.dp).background(Color(0xFFEFE8D6), RoundedCornerShape(5.dp)), contentAlignment = Alignment.Center) {
-                Text(when (seat.seatNo) { 0 -> "东"; 1 -> "南"; 2 -> "西"; 3 -> "北"; else -> "?" },
+                // fix10 M1: post-start seats show the DRAWN wind (the
+                // member's wind), not seat-number order; without a
+                // drawn wind the seat-order tile is the fallback.
+                Text(wind?.let { windLabel(it) } ?: when (seat.seatNo) { 0 -> "东"; 1 -> "南"; 2 -> "西"; 3 -> "北"; else -> "?" },
                     color = Color(0xFF194C46), fontWeight = FontWeight.Bold)
             }
             Column(Modifier.weight(1f)) {
                 Text(seat.displayName ?: "空座", color = Brand.text, style = MaterialTheme.typography.titleMedium)
-                Caption("${seat.seatNo + 1} 号位 · $seatStatus")
+                Caption("${seat.seatNo + 1} 号位 · $seatStatus" + if (isDealer) " · 庄家" else "")
             }
             Box(Modifier.background(Brand.cream, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 6.dp)) {
                 Text(seat.points?.let { "$it 点" } ?: "点数未提供", color = Brand.tileInk, style = MaterialTheme.typography.labelMedium)
@@ -422,7 +431,16 @@ fun TableScreen(
                             state.members.sortedWith(compareBy<MemberDto> { it.seatNo ?: Int.MAX_VALUE }.thenBy { it.displayName })
                                 .forEach { MemberRow(it, state.match.seatingDrawnAt != null, state.match.dealerSeatNo) }
                         } else {
-                            state.seats.sortedBy { it.seatNo }.forEach { SeatRow(it) }
+                            // fix10 M1: after the start, winds come from
+                            // the draw result (members) and the dealer
+                            // marker from the current hand's dealer,
+                            // falling back to the match dealer.
+                            val dealerNo = state.currentHand?.dealerSeatNo ?: state.match.dealerSeatNo
+                            state.seats.sortedBy { it.seatNo }.forEach { seat ->
+                                SeatRow(seat,
+                                    wind = state.members.firstOrNull { it.seatNo == seat.seatNo }?.wind,
+                                    isDealer = seat.seatNo == dealerNo)
+                            }
                         }
                         BrandPanel(Modifier.fillMaxWidth()) {
                             val hand = state.currentHand

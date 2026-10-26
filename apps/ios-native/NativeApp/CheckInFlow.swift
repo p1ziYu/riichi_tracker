@@ -219,6 +219,16 @@ struct CheckInScreen: View {
             previewKey = nil
             recoverableKey = nil
             waitingMembers = nil
+            // iosfix10 M2: clear the stale failure banner the moment a
+            // new input starts validating, and debounce 600ms so a
+            // typed link fires ONE validation after the input settles
+            // instead of one per keystroke (each intermediate 400 used
+            // to plant a banner that success never cleared). The sleep
+            // throws on cancellation, so an intermediate keystroke
+            // abandons its task before any request fires.
+            notice = nil
+            do { try await Task.sleep(nanoseconds: 600_000_000) } catch { return }
+            guard !Task.isCancelled else { return }
             if destination != nil && session.authenticated && !joined { await loadSeats() }
         }
         .onChange(of: link) { _, newLink in
@@ -346,6 +356,10 @@ struct CheckInScreen: View {
             preview = seats
             previewKey = key
             recoverableKey = nil
+            // iosfix10 M2: a successful preview clears any earlier
+            // failure banner (the started-match notice below still
+            // overrides this when the match already started).
+            notice = nil
             if seats.caller.isOwner {
                 onCompleted(destination.matchID)
                 return
@@ -363,7 +377,7 @@ struct CheckInScreen: View {
             guard seatsRequest == request, destinationKey == key else { return }
             preview = nil; previewKey = nil
             recoverableKey = nil
-            notice = error.localizedDescription
+            notice = "网络异常，请稍后重试。"
         }
     }
     private func recoverCheckIn() async {

@@ -21,6 +21,10 @@ struct APIError: LocalizedError {
 enum APIErrorCopy {
     static func text(_ error: APIError) -> String {
         switch error.code {
+        // iosfix10 B1: bad credentials must never surface the
+        // server's English message ("Invalid email or password").
+        case "invalid_credentials", "invalid_email_or_password", "invalid_login", "bad_credentials":
+            return "邮箱或密码不正确，请重试。"
         case "match_full": return "牌桌已满员，无法加入。"
         case "match_already_started": return "牌局已开始，无法加入。"
         case "invalid_token", "token_consumed_or_expired", "missing_token":
@@ -41,7 +45,14 @@ enum APIErrorCopy {
         case "match_not_found": return "牌桌不存在或已被删除。"
         case "match_not_deletable": return "这张牌桌已抽风定座或已开始，无法彻底删除。"
         case "owner_must_delete": return "房主不能退出牌桌，请使用删除。"
-        default: return "操作失败，请稍后重试。"
+        default:
+            // iosfix10 B1: better-auth login failures arrive as 401
+            // with no machine code and the English message, so sniff
+            // that message here instead of leaking it to the UI.
+            if error.status == 401, error.message.localizedCaseInsensitiveContains("invalid email or password") {
+                return "邮箱或密码不正确，请重试。"
+            }
+            return "操作失败，请稍后重试。"
         }
     }
 }
