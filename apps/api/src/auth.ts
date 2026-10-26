@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { verifyPassword } from 'better-auth/crypto';
 import { betterAuth, type Auth, type BetterAuthOptions } from 'better-auth';
-import { anonymous, bearer } from 'better-auth/plugins';
+import { bearer } from 'better-auth/plugins';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { pool } from './db.js';
 
@@ -69,7 +69,6 @@ export async function ensurePrincipalForAuthUser(user: {
   id: string;
   name?: string | null;
   email?: string | null;
-  isAnonymous?: boolean | null;
 }): Promise<{
   id: string;
   kind: 'user' | 'guest' | 'erased';
@@ -77,57 +76,32 @@ export async function ensurePrincipalForAuthUser(user: {
   display_name: string;
   created_at: Date;
 }> {
-  const isAnon = Boolean(user.isAnonymous);
-  const displayName = (user.name?.trim() || (isAnon ? 'Guest' : user.email?.split('@')[0]) || 'Player').slice(0, 64);
+  const displayName = (user.name?.trim() || user.email?.split('@')[0] || 'Player').slice(0, 64);
 
-  if (!isAnon) {
-    const existing = await pool.query<{
-      id: string;
-      kind: 'user' | 'guest' | 'erased';
-      status: 'active' | 'suspended' | 'erased';
-      display_name: string;
-      created_at: Date;
-    }>(
-      `SELECT id, kind, status, display_name, created_at
-       FROM app.principals
-       WHERE auth_user_id = $1`,
-      [user.id],
-    );
-    if (existing.rows[0]) {
-      await pool.query(
-        `INSERT INTO public.auth_principal_map (auth_user_id, principal_id)
-         VALUES ($1, $2)
-         ON CONFLICT (auth_user_id) DO NOTHING`,
-        [user.id, existing.rows[0].id],
-      );
-      return existing.rows[0];
-    }
-
-    const inserted = await pool.query<{
-      id: string;
-      kind: 'user' | 'guest' | 'erased';
-      status: 'active' | 'suspended' | 'erased';
-      display_name: string;
-      created_at: Date;
-    }>(
-      `INSERT INTO app.principals (kind, auth_user_id, display_name, status)
-       VALUES ('user', $1, $2, 'active')
-       ON CONFLICT (auth_user_id) DO UPDATE SET display_name = app.principals.display_name
-       RETURNING id, kind, status, display_name, created_at`,
-      [user.id, displayName],
-    );
-    const row = inserted.rows[0];
+  const existing = await pool.query<{
+    id: string;
+    kind: 'user' | 'guest' | 'erased';
+    status: 'active' | 'suspended' | 'erased';
+    display_name: string;
+    created_at: Date;
+  }>(
+    `SELECT id, kind, status, display_name, created_at
+     FROM app.principals
+     WHERE auth_user_id = $1`,
+    [user.id],
+  );
+  if (existing.rows[0]) {
     await pool.query(
       `INSERT INTO public.auth_principal_map (auth_user_id, principal_id)
        VALUES ($1, $2)
        ON CONFLICT (auth_user_id) DO NOTHING`,
-      [user.id, row.id],
+      [user.id, existing.rows[0].id],
     );
-    return row;
+    return existing.rows[0];
   }
 
-  // Anonymous guest principal: app.principals.ck_principals_auth_user requires auth_user_id IS NULL for kind='guest'.
-  // Guest principals are NOT auto-bound to any match here; binding happens only via approved join-request or F1 check-in.
+  // A surviving map may still point at a legacy guest principal. Do not
+  // replace that identity with a new account or let it join as a user.
   const mapped = await pool.query<{
     id: string;
     kind: 'user' | 'guest' | 'erased';
@@ -141,9 +115,7 @@ export async function ensurePrincipalForAuthUser(user: {
      WHERE m.auth_user_id = $1`,
     [user.id],
   );
-  if (mapped.rows[0]) {
-    return mapped.rows[0];
-  }
+  if (mapped.rows[0]) return mapped.rows[0];
 
   const inserted = await pool.query<{
     id: string;
@@ -153,9 +125,10 @@ export async function ensurePrincipalForAuthUser(user: {
     created_at: Date;
   }>(
     `INSERT INTO app.principals (kind, auth_user_id, display_name, status)
-     VALUES ('guest', NULL, $1, 'active')
+     VALUES ('user', $1, $2, 'active')
+     ON CONFLICT (auth_user_id) DO UPDATE SET display_name = app.principals.display_name
      RETURNING id, kind, status, display_name, created_at`,
-    [displayName],
+    [user.id, displayName],
   );
   const row = inserted.rows[0];
   await pool.query(
@@ -185,34 +158,12 @@ const authOptions = {
   emailAndPassword: {
     enabled: true,
   },
-  plugins: [
-    anonymous({
-      onLinkAccount: async ({ anonymousUser, newUser }) => {
-        const guestPrincipal = await ensurePrincipalForAuthUser({
-          ...anonymousUser.user,
-          isAnonymous: true,
-        });
-        const accountPrincipal = await ensurePrincipalForAuthUser({
-          ...newUser.user,
-          isAnonymous: false,
-        });
-        if (guestPrincipal.id !== accountPrincipal.id) {
-          await pool.query(
-            `INSERT INTO app.principal_links (source_principal_id, target_principal_id)
-             VALUES ($1, $2)
-             ON CONFLICT (source_principal_id) DO NOTHING`,
-            [guestPrincipal.id, accountPrincipal.id],
-          );
-        }
-      },
-    }),
-    bearer(),
-  ],
+  plugins: [bearer()],
   databaseHooks: {
     user: {
       create: {
         after: async (user) => {
-          await ensurePrincipalForAuthUser(user as { id: string; name?: string; email?: string; isAnonymous?: boolean });
+          await ensurePrincipalForAuthUser(user as { id: string; name?: string; email?: string });
         },
       },
     },
@@ -223,8 +174,7 @@ const authOptions = {
             id: string;
             name: string;
             email: string;
-            isAnonymous: boolean | null;
-          }>(`SELECT id, name, email, "isAnonymous" FROM public."user" WHERE id = $1`, [session.userId]);
+          }>(`SELECT id, name, email FROM public."user" WHERE id = $1`, [session.userId]);
           if (uRes.rows[0]) {
             await ensurePrincipalForAuthUser(uRes.rows[0]);
           }
@@ -265,9 +215,15 @@ export async function resolvePrincipal(req: FastifyRequest): Promise<ResolvedPri
     return null;
   }
 
-  const pRow = await ensurePrincipalForAuthUser(
-    session.user as { id: string; name?: string; email?: string; isAnonymous?: boolean },
+  // Without the anonymous plugin, getSession omits isAnonymous from its user
+  // shape. Check the stored flag so sessions issued before the cutover expire
+  // without resolving to a principal.
+  const authUser = await pool.query<{ is_anonymous: boolean | null }>(
+    `SELECT "isAnonymous" AS is_anonymous FROM public."user" WHERE id = $1`,
+    [session.user.id],
   );
+  if (authUser.rows[0]?.is_anonymous) return null;
+  const pRow = await ensurePrincipalForAuthUser(session.user);
 
   return {
     id: pRow.id,
@@ -358,12 +314,11 @@ export function registerAuthRoutes(app: FastifyInstance): void {
         const parsed = JSON.parse(responseText) as {
           user?: { id?: string; name?: string; email?: string; isAnonymous?: boolean };
         };
-        if (parsed?.user?.id) {
+        if (parsed?.user?.id && !parsed.user.isAnonymous) {
           await ensurePrincipalForAuthUser({
             id: parsed.user.id,
             name: parsed.user.name,
             email: parsed.user.email,
-            isAnonymous: parsed.user.isAnonymous ?? url.pathname.endsWith('/anonymous'),
           });
         }
       } catch {

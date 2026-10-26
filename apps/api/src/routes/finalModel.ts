@@ -17,7 +17,7 @@
 // has started anyway, because join then requires waiting state.
 import { createHash, randomInt } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { bindGuestToMatch, isAdminPrincipal, requirePrincipal } from '../auth.js';
+import { isAdminPrincipal, requirePrincipal } from '../auth.js';
 import { pool } from '../db.js';
 import { serializeMatch } from './matchView.js';
 import type { MatchRow } from './matchView.js';
@@ -108,6 +108,9 @@ export function registerFinalModelRoutes(app: FastifyInstance): void {
     async (req, reply) => {
       const principal = await requirePrincipal(req, reply);
       if (!principal) return;
+      if (principal.kind !== 'user') {
+        return reply.code(403).send({ error: 'account_required', message: '请登录账户后加入牌局' });
+      }
       const matchId = req.params.id;
       const body = req.body ?? {};
       const client = await pool.connect();
@@ -175,13 +178,6 @@ export function registerFinalModelRoutes(app: FastifyInstance): void {
         } else {
           await client.query('ROLLBACK');
           return reply.code(400).send({ error: 'missing_credential', message: 'A room code or join token is required' });
-        }
-        if (principal.kind === 'guest') {
-          const bindStatus = await bindGuestToMatch(principal.id, matchId, client);
-          if (bindStatus === 'already_bound_other_match') {
-            await client.query('ROLLBACK');
-            return reply.code(403).send({ error: 'guest_already_bound', message: 'Guest session is already bound to another match' });
-          }
         }
         const countRes = await client.query<{ count: number }>(
           `SELECT COUNT(*)::int AS count FROM app.match_members

@@ -41,7 +41,7 @@ export default function Login({ onAuthenticated }: { onAuthenticated: (me: Me) =
   }
 
   return <main className="page narrow">
-    <p className="eyebrow">ACCOUNT / 账户</p>
+    <p className="eyebrow">账户</p>
     <h1>登录一姬</h1>
     <section className="panel">
       <Segmented label="登录方式" value={mode}

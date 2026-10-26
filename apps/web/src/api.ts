@@ -60,7 +60,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   if (response.status === 204) return undefined as T;
   const text = await response.text();
   const value = (text ? JSON.parse(text) : undefined) as T;
-  if (native && /^\/api\/auth\/(?:sign-in\/(?:email|anonymous)|sign-up\/email)$/.test(path)) {
+  if (native && /^\/api\/auth\/(?:sign-in\/email|sign-up\/email)$/.test(path)) {
     const bearer = response.headers.get('set-auth-token') ??
       (value as { token?: string } | undefined)?.token;
     if (bearer) localStorage.setItem(TOKEN_KEY, bearer);

@@ -200,16 +200,54 @@ test('Account self-service + admin soft-delete', async () => {
     });
     assert.equal(guestDelete.status, 404);
     assert.equal(guestDelete.data.error, 'player_not_found');
+    const guestCountsBefore = await pool.query<{ principals: string; sessions: string }>(
+      `SELECT
+         (SELECT count(*) FROM app.principals WHERE kind = 'guest') AS principals,
+         (SELECT count(*) FROM app.guest_sessions) AS sessions`,
+    );
     const anonymous = await fetch(`${baseUrl}/api/auth/sign-in/anonymous`, {
       method: 'POST', headers: { origin: 'http://127.0.0.1:5173', 'content-type': 'application/json' }, body: '{}',
     });
-    assert.equal(anonymous.status, 200);
-    const guestCookie = (anonymous.headers.getSetCookie?.() ?? []).map((v) => v.split(';')[0]).join('; ');
-    const guestSelfDelete = await request<{ error: string }>('/api/me/delete-account', {
-      method: 'POST', cookie: guestCookie, body: { currentPassword: other.password, confirmed: true },
+    assert.ok(anonymous.status < 200 || anonymous.status >= 300, 'anonymous sign-in is unavailable');
+    const guestCountsAfter = await pool.query<{ principals: string; sessions: string }>(
+      `SELECT
+         (SELECT count(*) FROM app.principals WHERE kind = 'guest') AS principals,
+         (SELECT count(*) FROM app.guest_sessions) AS sessions`,
+    );
+    assert.deepEqual(guestCountsAfter.rows, guestCountsBefore.rows, 'anonymous sign-in creates no guest data');
+    // Simulate a surviving non-anonymous session mapped to a legacy guest.
+    // It must reach join's account gate without acquiring a seat or binding.
+    const legacySession = await signup('旧访客会话', 'LegacyPass123');
+    await pool.query(
+      `UPDATE app.principals
+       SET kind = 'erased', status = 'erased', auth_user_id = NULL, display_name = '已注销玩家'
+       WHERE id = $1`,
+      [legacySession.principalId],
+    );
+    await pool.query(
+      `UPDATE public.auth_principal_map SET principal_id = $1 WHERE auth_user_id = $2`,
+      [guestId, legacySession.authUserId],
+    );
+    const guestMatch = await request<{ match: MatchView }>('/api/matches', {
+      method: 'POST', cookie: admin.cookie, body: { mode: '3p' },
     });
-    assert.equal(guestSelfDelete.status, 403);
-    assert.equal(guestSelfDelete.data.error, 'account_required');
+    assert.equal(guestMatch.status, 200);
+    const rejectedJoin = await request<{ error: string }>(`/api/matches/${guestMatch.data.match.id}/join`, {
+      method: 'POST', cookie: legacySession.cookie, body: { code: guestMatch.data.match.joinCode },
+    });
+    assert.equal(rejectedJoin.status, 403);
+    assert.equal(rejectedJoin.data.error, 'account_required');
+    const guestMembership = await pool.query(
+      `SELECT 1 FROM app.match_members WHERE match_id = $1 AND principal_id = $2`,
+      [guestMatch.data.match.id, guestId],
+    );
+    assert.equal(guestMembership.rowCount, 0);
+    const boundSessions = await pool.query(
+      `SELECT 1 FROM app.guest_sessions WHERE principal_id = $1`, [guestId],
+    );
+    assert.equal(boundSessions.rowCount, 0);
+    await pool.query(`UPDATE public."user" SET "isAnonymous" = true WHERE id = $1`, [legacySession.authUserId]);
+    assert.equal((await request('/api/me', { cookie: legacySession.cookie })).status, 401);
     const nonAdminDelete = await request<{ error: string }>(`/api/admin/players/${other.principalId}`, {
       method: 'DELETE', cookie: filler2.cookie,
     });

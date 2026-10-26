@@ -21,6 +21,7 @@ const cases = [
   ['invalid_display_name', '显示名字须为 1 至 64 个字符'],
   ['cannot_delete_self', '不能删除自己的账号'],
   ['player_not_found', '找不到该玩家'],
+  ['account_required', '请登录账户后加入牌局'],
 ];
 
 test('known error codes map to Chinese copy', () => {

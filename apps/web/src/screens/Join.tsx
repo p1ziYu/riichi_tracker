@@ -50,7 +50,7 @@ export default function Join() {
   }
 
   return <main className="page narrow">
-    <p className="eyebrow">JOIN / 加入牌桌</p>
+    <p className="eyebrow">加入牌桌</p>
     <h1>加入牌桌</h1>
     <section className="panel">
       {token && busy && <p className="muted" role="status">正在加入牌桌…</p>}
