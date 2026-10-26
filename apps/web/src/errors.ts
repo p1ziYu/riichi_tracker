@@ -44,6 +44,13 @@ const COPY: Record<string, string> = {
   USER_ALREADY_EXISTS: '该邮箱已注册，请直接登录',
   EMAIL_ALREADY_EXISTS: '该邮箱已注册，请直接登录',
   WEAK_PASSWORD: '密码强度不足，请换一个更强的密码',
+  PASSWORD_TOO_SHORT: '密码至少 8 位，最多 128 位',
+  PASSWORD_TOO_LONG: '密码至少 8 位，最多 128 位',
+  INVALID_PASSWORD: '当前密码不正确',
+  CREDENTIAL_ACCOUNT_NOT_FOUND: '该账户没有设置密码',
+  invalid_display_name: '显示名字须为 1 至 64 个字符',
+  cannot_delete_self: '不能删除自己的账号',
+  player_not_found: '找不到该玩家',
 };
 
 function statusFallback(status: number): string {

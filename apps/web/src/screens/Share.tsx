@@ -37,7 +37,7 @@ export default function Share() {
     return () => { alive = false; };
   }, [link]);
 
-  return <main className="page narrow">
+  return <main className="page narrow share-page">
     <p className="eyebrow">SHARE / 分享牌桌</p>
     <h1>牌桌已创建</h1>
     {error && <Notice invalid>{error}</Notice>}

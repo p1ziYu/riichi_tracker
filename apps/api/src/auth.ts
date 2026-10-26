@@ -177,6 +177,9 @@ const authOptions = {
     'capacitor://localhost',
     'https://localhost',
   ],
+  // Password policy: better-auth 1.7.11 defaults with NO min/max override here.
+  // Enforced range is 8–128 chars, no character-kind rules. The web hint
+  // (apps/web/src/passwordRules.ts) must stay in sync with these defaults.
   emailAndPassword: {
     enabled: true,
   },
@@ -385,6 +388,45 @@ export function registerAuthRoutes(app: FastifyInstance): void {
       },
       // Final-native: admin flag for the client admin entry. Unauthenticated
       // callers still get 401 above; this branch never turns that into a 500.
+      isAdmin: await isAdminPrincipal(principal),
+    };
+  });
+
+  // PATCH /api/me/display-name -> rename the caller's principal + auth user name.
+  // Returns the same shape as GET /api/me so the web can refresh its state.
+  app.patch<{ Body: { displayName?: unknown } }>('/api/me/display-name', async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    const raw = req.body?.displayName;
+    const displayName = typeof raw === 'string' ? raw.trim() : '';
+    if (displayName.length === 0 || displayName.length > 64) {
+      return reply.code(400).send({ error: 'invalid_display_name', message: 'Display name must be 1 to 64 characters' });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE app.principals SET display_name = $1 WHERE id = $2`,
+        [displayName, principal.id],
+      );
+      await client.query(
+        `UPDATE public."user" SET name = $1 WHERE id = $2`,
+        [displayName, principal.authUserId],
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+    return {
+      principal: {
+        id: principal.id,
+        type: principal.type,
+        displayName,
+        createdAt: principal.createdAt,
+      },
       isAdmin: await isAdminPrincipal(principal),
     };
   });

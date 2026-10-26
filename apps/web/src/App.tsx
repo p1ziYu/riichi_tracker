@@ -4,6 +4,7 @@ import { ApiError, api, post } from './api';
 import { errorTextZh } from './errors';
 import type { Me } from './types';
 import BottomTabs from './BottomTabs';
+import Account from './screens/Account';
 import Admin from './screens/Admin';
 import Create from './screens/Create';
 import History from './screens/History';
@@ -19,6 +20,7 @@ function Shell({ me, children }: { me: Me | null; children: React.ReactNode }) {
   return <div className="app-shell">
     <header className="topbar">
       <Link to="/" className="brand"><span className="brand-tile">東</span><span>一姬<span className="brand-sub"> / ICHIHIME</span></span></Link>
+      {me && <nav><Link to="/account">我的</Link></nav>}
     </header>
     {children}
     <footer className="footer">一姬 / ICHIHIME · 记录每一场半庄{me?.isAdmin ? ' · 管理员' : ''}</footer>
@@ -47,6 +49,7 @@ function LoginRoute({ me, onAuthenticated, onLogout, logoutError }: {
       <h2>{me.principal.displayName}</h2>
       <p className="muted">账户与牌局记录</p>
       <p><Link className="button" to="/history">查看战绩 →</Link></p>
+      <p><Link className="button" to="/account">账户设置 →</Link></p>
       {me.isAdmin && <p><Link className="button" to="/admin">玩家管理与数据管理 →</Link></p>}
       <p><button type="button" className="text-button" onClick={onLogout}>退出登录</button></p>
       {logoutError && <Notice invalid>退出登录失败：{logoutError}，请重试。</Notice>}
@@ -97,6 +100,7 @@ export default function App() {
         <Route path="/share/:id" element={<Protected me={me}><Share /></Protected>} />
         <Route path="/table/:id" element={<Protected me={me}>{me && <TablePage me={me} />}</Protected>} />
         <Route path="/history" element={<Protected me={me}>{me && <History me={me} />}</Protected>} />
+        <Route path="/account" element={<Protected me={me}>{me && <Account me={me} onUpdated={setMe} />}</Protected>} />
         <Route path="/admin" element={<Protected me={me}>{me && <Admin me={me} />}</Protected>} />
         <Route path="/checkin/:matchId" element={<Protected me={me}><Join /></Protected>} />
         <Route path="*" element={<Navigate to="/" replace />} />

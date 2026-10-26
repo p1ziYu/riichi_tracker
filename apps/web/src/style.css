@@ -18,7 +18,6 @@ h1,h2{letter-spacing:.015em}
 .seat-name{min-width:0;overflow-wrap:anywhere}
 .seat-status{display:block;font-size:.8rem}
 @media(max-width:600px){
-  .table-page{width:calc(100% - 24px);padding-top:18px}
   .table-heading{gap:8px;margin-bottom:12px}
   .table-heading h1{font-size:1.7rem;margin-bottom:4px}
   .table-heading .eyebrow,.table-heading .muted{margin-bottom:4px}
@@ -334,3 +333,31 @@ h1,h2{letter-spacing:.015em}
 /* Round 2 fix: desktop hero title must stay on one line next to the tile
    (the new sidebar narrows the hero; the old full-width hero fit). */
 .hero h1{font-size:clamp(2.2rem,4.5vw,3.6rem)}
+
+/* Round 3 (lobby alignment + share/table top spacing + login note).
+   Appended last so these win over the earlier rules, including mobile overrides. */
+.hero,
+.ongoing-card,
+.join-code-entry {
+  padding-left: 26px;
+  padding-right: 26px;
+}
+.share-page,
+.table-page {
+  padding-top: 46px;
+}
+.login-note {
+  margin-top: 24px;
+}
+@media (max-width: 600px) {
+  .hero,
+  .ongoing-card,
+  .join-code-entry {
+    padding-left: 26px;
+    padding-right: 26px;
+  }
+  .share-page,
+  .table-page {
+    padding-top: 28px;
+  }
+}

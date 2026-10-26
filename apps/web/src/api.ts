@@ -50,9 +50,10 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     let message = body;
     let code: string | undefined;
     try {
-      const parsed = JSON.parse(body) as { message?: string; error?: string };
+      // App routes return { error }, better-auth returns { code } (and { message }).
+      const parsed = JSON.parse(body) as { message?: string; error?: string; code?: string };
       message = parsed.message ?? parsed.error ?? body;
-      code = parsed.error;
+      code = parsed.error ?? parsed.code;
     } catch { /* Non-JSON error response. */ }
     throw new ApiError(response.status, message || `请求失败 (${response.status})`, code);
   }

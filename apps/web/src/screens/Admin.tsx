@@ -11,6 +11,7 @@ export default function Admin({ me }: { me: Me }) {
   const [matches, setMatches] = useState<MatchView[] | null>(null);
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [busyPlayerId, setBusyPlayerId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -46,6 +47,19 @@ export default function Admin({ me }: { me: Me }) {
     }
   }
 
+  async function removePlayer(playerId: string) {
+    if (!window.confirm('确定删除该账户吗？删除后该账户无法再登录，将从玩家列表消失，但其参与过的对局记录和终局得点会保留，名字显示为“已注销玩家”。此操作无法撤销。')) return;
+    setBusyPlayerId(playerId);
+    try {
+      await api(`/api/admin/players/${encodeURIComponent(playerId)}`, { method: 'DELETE' });
+      await refresh();
+    } catch (cause) {
+      setError(errorTextZh(cause));
+    } finally {
+      setBusyPlayerId(null);
+    }
+  }
+
   return <main className="page">
     <p className="eyebrow">ADMIN / 管理</p>
     <h1>玩家管理与数据管理</h1>
@@ -57,6 +71,7 @@ export default function Admin({ me }: { me: Me }) {
     {players && (players.length ? <div className="history-list">{players.map((player) => <div className="history-row" key={player.id}>
       <span className="tile-mini">中</span>
       <div><strong className="ellipsis">{player.displayName}</strong><small>参与对局 {player.matchCount} 场</small></div>
+      <button type="button" className="text-button danger" disabled={busyPlayerId === player.id} onClick={() => void removePlayer(player.id)}>删除账户</button>
     </div>)}</div> : <div className="empty">暂无玩家。</div>)}
 
     <div className="section-heading"><span>数据管理 · 全部对局</span></div>

@@ -412,6 +412,7 @@ export function registerFinalModelRoutes(app: FastifyInstance): void {
       `SELECT p.id, p.display_name, COUNT(DISTINCT mm.match_id)::text AS match_count
        FROM app.principals p
        LEFT JOIN app.match_members mm ON mm.principal_id = p.id
+       WHERE p.status <> 'erased'
        GROUP BY p.id, p.display_name
        ORDER BY COUNT(DISTINCT mm.match_id) DESC, p.display_name ASC`,
     );
@@ -422,6 +423,47 @@ export function registerFinalModelRoutes(app: FastifyInstance): void {
         matchCount: Number(r.match_count),
       })),
     };
+  });
+
+  // DELETE /api/admin/players/:id -> SOFT delete an account (never the principal
+  // row, never match_members / matches / final_scores). History stays intact and
+  // the deleted member renders as '已注销玩家' via serializeMatch.
+  app.delete<{ Params: { id: string } }>('/api/admin/players/:id', async (req, reply) => {
+    const admin = await requireAdmin(req, reply);
+    if (!admin) return;
+    const targetId = req.params.id;
+    if (targetId === admin.id) {
+      return reply.code(403).send({ error: 'cannot_delete_self', message: 'Cannot delete your own account' });
+    }
+    const targetRes = await pool.query<{ id: string; auth_user_id: string | null }>(
+      `SELECT id, auth_user_id FROM app.principals WHERE id = $1 AND kind = 'user' AND status = 'active'`,
+      [targetId],
+    );
+    const target = targetRes.rows[0];
+    if (!target) {
+      return reply.code(404).send({ error: 'player_not_found', message: 'Player not found' });
+    }
+    const authUserId = target.auth_user_id;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE app.principals SET kind = 'erased', status = 'erased', auth_user_id = NULL, display_name = '已注销玩家' WHERE id = $1`,
+        [targetId],
+      );
+      if (authUserId) {
+        // Cascades sessions, credential accounts, and the auth-principal map,
+        // so existing sessions die and sign-in with that email fails afterwards.
+        await client.query(`DELETE FROM public."user" WHERE id = $1`, [authUserId]);
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+    return { deleted: true };
   });
 
   app.get('/api/admin/matches', async (req, reply) => {

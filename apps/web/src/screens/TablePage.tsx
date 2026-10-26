@@ -76,7 +76,7 @@ export default function TablePage({ me }: { me: Me }) {
   const seats = [...view.seats].sort((a, b) => a.seatNo - b.seatNo);
   const editorMode: EditorMode = isHost ? 'correct' : 'admin-correct';
 
-  return <main className="page">
+  return <main className="page table-page">
     <p className="eyebrow">TABLE / 牌桌</p>
     <div className="table-heading">
       <h1>{MODE_LABEL[view.mode]} · {STATUS_LABEL[view.status]}</h1>

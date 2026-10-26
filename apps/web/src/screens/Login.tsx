@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, post } from '../api';
 import { errorTextZh } from '../errors';
+import { PASSWORD_HINT } from '../passwordRules';
 import type { Me } from '../types';
 import Segmented from '../Segmented';
 import { Notice } from './ui';
@@ -56,10 +57,11 @@ export default function Login({ onAuthenticated }: { onAuthenticated: (me: Me) =
         <label>密码
           <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required />
         </label>
+        {mode === 'register' && <small className="muted">{PASSWORD_HINT}</small>}
         <button className="primary" type="submit" disabled={busy}>{busy ? '请稍候…' : mode === 'login' ? '登录' : '注册并登录'}</button>
       </form>
       {error && <Notice invalid>{error}</Notice>}
-      <p className="note">登录后可开桌、加入牌局并查看自己的对局记录。牌局分享链接会先要求登录，再直接加入。</p>
+      <p className="note login-note">登录后可开桌、加入牌局并查看自己的对局记录。牌局分享链接会先要求登录，再直接加入。</p>
     </section>
   </main>;
 }
