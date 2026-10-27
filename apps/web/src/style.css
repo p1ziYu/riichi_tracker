@@ -387,3 +387,20 @@ h1,h2{letter-spacing:.015em}
   background: #422f37;
   color: #f3a9a7;
 }
+
+/* Mobile fixes: 360 hero title clip, editor dealer tag, 44px tap targets. */
+@media (max-width: 367px) {
+  .hero h1 { font-size: 7.8vw; }
+}
+@media (max-width: 380px) {
+  .score-row .ellipsis { white-space: normal; }
+}
+a.text-button { display: inline-flex; align-items: center; }
+.brand { min-height: 44px; }
+.topbar nav a { min-height: 44px; }
+.section-heading a { display: inline-flex; align-items: center; min-height: 44px; }
+
+/* score-field flex-shrink: keep the score column from shrinking below its content on narrow rows. */
+@media (max-width: 600px) {
+  .score-row .score-field { flex-shrink: 0; }
+}
