@@ -121,18 +121,22 @@ export default function Account({ me, onUpdated, onLogout, onDeleted, logoutErro
 
     <section className="panel">
       <h2>账户操作</h2>
-      <button type="button" className="text-button" onClick={onLogout}>退出</button>
+      <div className="account-actions">
+        <button type="button" onClick={onLogout}>退出</button>
+        <button type="button" className="danger" onClick={() => { setConfirmingDelete(true); setDeleteError(''); }}>注销账户</button>
+      </div>
       {logoutError && <Notice invalid>退出登录失败：{logoutError}，请重试。</Notice>}
-      <p><button type="button" className="text-button danger" onClick={() => { setConfirmingDelete(true); setDeleteError(''); }}>注销账户</button></p>
-      {confirmingDelete && <div>
+      {confirmingDelete && <div className="account-delete-confirm">
         <p className="muted">注销账户不可逆；注销后立即退出登录。历史对局记录保留，过去对局中的名字将显示为已注销玩家。</p>
         <form onSubmit={(event) => void deleteAccount(event)}>
           <label>当前密码
             <input type="password" autoComplete="current-password" value={deletePassword}
               onChange={(event) => setDeletePassword(event.target.value)} required />
           </label>
-          <button type="submit" className="text-button danger" disabled={deleteBusy}>{deleteBusy ? '正在注销…' : '确认注销账户'}</button>
-          <button type="button" className="text-button" disabled={deleteBusy} onClick={() => { setConfirmingDelete(false); setDeletePassword(''); setDeleteError(''); }}>取消</button>
+          <div className="account-actions">
+            <button type="submit" className="danger" disabled={deleteBusy}>{deleteBusy ? '正在注销…' : '确认注销账户'}</button>
+            <button type="button" disabled={deleteBusy} onClick={() => { setConfirmingDelete(false); setDeletePassword(''); setDeleteError(''); }}>取消</button>
+          </div>
         </form>
         {deleteError && <Notice invalid>{deleteError}</Notice>}
       </div>}

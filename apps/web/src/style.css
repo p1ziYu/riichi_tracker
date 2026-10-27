@@ -339,8 +339,8 @@ h1,h2{letter-spacing:.015em}
 .hero,
 .ongoing-card,
 .join-code-entry {
-  padding-left: 26px;
-  padding-right: 26px;
+  padding-left: 40px;
+  padding-right: 40px;
 }
 .share-page,
 .table-page {
@@ -353,8 +353,8 @@ h1,h2{letter-spacing:.015em}
   .hero,
   .ongoing-card,
   .join-code-entry {
-    padding-left: 26px;
-    padding-right: 26px;
+    padding-left: 40px;
+    padding-right: 40px;
   }
   .share-page,
   .table-page {
@@ -369,3 +369,21 @@ h1,h2{letter-spacing:.015em}
 /* Align the share heading with the hall hero's first content line. */
 .share-page{padding-top:118px}
 @media(max-width:600px){.share-page{padding-top:53px}}
+
+/* Account page bordered action buttons (Round 6). */
+.account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+.account-delete-confirm {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #ffffff25;
+}
+.account-actions button.danger:not(.text-button):not(.quiet):not(.close) {
+  border-color: #d27575;
+  background: #422f37;
+  color: #f3a9a7;
+}
